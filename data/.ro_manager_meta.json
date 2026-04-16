@@ -1,9 +1,0 @@
-{
-  "last_refresh": "2026-04-16T04:30:03.481821",
-  "rows": {
-    "demand": 30240,
-    "customer": 755663,
-    "journey": 28941
-  },
-  "source": "shared_csv"
-}
