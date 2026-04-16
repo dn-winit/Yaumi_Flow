@@ -1,0 +1,17 @@
+# ML Pipeline (existing)
+pandas
+numpy
+scikit-learn
+scipy
+statsmodels
+lightgbm
+xgboost
+optuna
+pyyaml
+joblib
+
+# API Layer (new)
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+pydantic>=2.0
+pydantic-settings>=2.0

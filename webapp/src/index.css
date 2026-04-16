@@ -1,0 +1,137 @@
+@import "tailwindcss";
+@config "../tailwind.config.ts";
+
+/*
+ * Runtime design tokens — mirrored from src/theme/tokens.ts.
+ * Consumed by inline styles (charts, dynamic widths) where Tailwind utility
+ * classes are not practical. Stay in sync with tokens.ts.
+ */
+:root {
+  /* Brand — Yaumi crimson */
+  --color-brand-50:  #FBE9EC;
+  --color-brand-100: #F4C2C9;
+  --color-brand-200: #EA8E9C;
+  --color-brand-300: #DD5C71;
+  --color-brand-400: #D03048;
+  --color-brand-500: #C8102E;
+  --color-brand-600: #B00E28;
+  --color-brand-700: #8C0A20;
+  --color-brand-800: #6E0819;
+  --color-brand-900: #4F0612;
+
+  /* Accent — Yaumi gold */
+  --color-accent-50:  #FDF6E3;
+  --color-accent-100: #F8E5A8;
+  --color-accent-200: #F2D070;
+  --color-accent-300: #ECBF4A;
+  --color-accent-400: #E8B23A;
+  --color-accent-500: #D9A12B;
+  --color-accent-600: #C9962A;
+  --color-accent-700: #9F751E;
+  --color-accent-800: #785815;
+  --color-accent-900: #523B0E;
+
+  /* Success */
+  --color-success-50:  #f0fdf4;
+  --color-success-100: #dcfce7;
+  --color-success-500: #22c55e;
+  --color-success-600: #16a34a;
+  --color-success-700: #15803d;
+
+  /* Warning */
+  --color-warning-50:  #fffbeb;
+  --color-warning-100: #fef3c7;
+  --color-warning-500: #f59e0b;
+  --color-warning-600: #d97706;
+  --color-warning-700: #b45309;
+
+  /* Danger */
+  --color-danger-50:  #fef2f2;
+  --color-danger-100: #fee2e2;
+  --color-danger-500: #ef4444;
+  --color-danger-600: #dc2626;
+  --color-danger-700: #b91c1c;
+
+  /* Info */
+  --color-info-50:  #ecfeff;
+  --color-info-100: #cffafe;
+  --color-info-500: #06b6d4;
+  --color-info-600: #0891b2;
+  --color-info-700: #0e7490;
+
+  /* Neutral */
+  --color-neutral-0:   #ffffff;
+  --color-neutral-50:  #f8fafc;
+  --color-neutral-100: #f1f5f9;
+  --color-neutral-200: #e2e8f0;
+  --color-neutral-300: #cbd5e1;
+  --color-neutral-400: #94a3b8;
+  --color-neutral-500: #64748b;
+  --color-neutral-600: #475569;
+  --color-neutral-700: #334155;
+  --color-neutral-800: #1e293b;
+  --color-neutral-900: #0f172a;
+
+  /* Surface */
+  --color-surface-base:    #f8fafc;
+  --color-surface-raised:  #ffffff;
+  --color-surface-sunken:  #f1f5f9;
+  --color-surface-overlay: rgba(15, 23, 42, 0.5);
+
+  /* Text */
+  --color-text-primary:   #0f172a;
+  --color-text-secondary: #475569;
+  --color-text-tertiary:  #94a3b8;
+  --color-text-inverse:   #ffffff;
+
+  /* Border */
+  --color-border-subtle:  #f1f5f9;
+  --color-border-default: #e2e8f0;
+  --color-border-strong:  #cbd5e1;
+
+  /* Radius */
+  --radius-sm:   0.25rem;
+  --radius-md:   0.5rem;
+  --radius-lg:   0.75rem;
+  --radius-xl:   1rem;
+  --radius-full: 9999px;
+
+  /* Elevation */
+  --shadow-1: 0 1px 2px 0 rgba(15, 23, 42, 0.05);
+  --shadow-2: 0 1px 3px 0 rgba(15, 23, 42, 0.08), 0 1px 2px -1px rgba(15, 23, 42, 0.06);
+  --shadow-3: 0 4px 6px -1px rgba(15, 23, 42, 0.08), 0 2px 4px -2px rgba(15, 23, 42, 0.06);
+  --shadow-4: 0 10px 15px -3px rgba(15, 23, 42, 0.10), 0 4px 6px -4px rgba(15, 23, 42, 0.08);
+  --shadow-5: 0 20px 25px -5px rgba(15, 23, 42, 0.12), 0 8px 10px -6px rgba(15, 23, 42, 0.08);
+
+  /* Typography */
+  --font-family-sans: "Inter", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-family-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
+
+  --font-size-caption: 0.75rem;
+  --font-size-label:   0.8125rem;
+  --font-size-body:    0.875rem;
+  --font-size-heading: 1rem;
+  --font-size-title:   1.125rem;
+  --font-size-display: 1.5rem;
+
+  /* Motion */
+  --motion-fast: 120ms;
+  --motion-base: 180ms;
+  --motion-slow: 260ms;
+
+  /* Z-index */
+  --z-dropdown: 1000;
+  --z-sticky:   1020;
+  --z-drawer:   1030;
+  --z-modal:    1040;
+  --z-toast:    1060;
+
+  /* Layout */
+  --sidebar-width: 240px;
+}
+
+html {
+  font-family: var(--font-family-sans);
+  color: var(--color-text-primary);
+  background: var(--color-surface-base);
+}

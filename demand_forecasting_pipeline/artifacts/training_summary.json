@@ -1,0 +1,167 @@
+{
+  "per_class": {
+    "intermittent": {
+      "models_trained": [
+        "croston",
+        "croston_sba",
+        "naive",
+        "moving_average",
+        "two_stage"
+      ],
+      "metrics": {
+        "croston": 43.32054955315059,
+        "croston_sba": 43.108444767074175,
+        "naive": 53.05236172921285,
+        "moving_average": 44.28739964978128,
+        "two_stage": 26.42492525015325
+      }
+    },
+    "lumpy": {
+      "models_trained": [
+        "croston",
+        "croston_sba",
+        "two_stage",
+        "moving_average"
+      ],
+      "metrics": {
+        "croston": 344.58333413721914,
+        "croston_sba": 341.7904364153406,
+        "two_stage": 324.29821530223484,
+        "moving_average": 358.53613463102045
+      }
+    },
+    "smooth": {
+      "models_trained": [
+        "naive",
+        "moving_average",
+        "ets",
+        "linear",
+        "random_forest",
+        "lightgbm",
+        "xgboost",
+        "ensemble"
+      ],
+      "metrics": {
+        "naive": 54.51710254850525,
+        "moving_average": 50.316782859662354,
+        "ets": 50.04244345100446,
+        "linear": 27.71292939234218,
+        "random_forest": 26.959357141818398,
+        "lightgbm": 26.358724621437858,
+        "xgboost": 26.420280846811995
+      }
+    },
+    "erratic": {
+      "models_trained": [
+        "moving_average",
+        "random_forest",
+        "lightgbm",
+        "xgboost",
+        "two_stage",
+        "ensemble"
+      ],
+      "metrics": {
+        "moving_average": 86.24388645394103,
+        "random_forest": 51.446327340322945,
+        "lightgbm": 52.90664731324514,
+        "xgboost": 53.15955149603978,
+        "two_stage": 53.23853223736778
+      }
+    }
+  },
+  "models_path": {
+    "intermittent__croston": "demand_forecasting_pipeline/artifacts/models\\intermittent_croston.pkl",
+    "intermittent__croston_sba": "demand_forecasting_pipeline/artifacts/models\\intermittent_croston_sba.pkl",
+    "intermittent__naive": "demand_forecasting_pipeline/artifacts/models\\intermittent_naive.pkl",
+    "intermittent__moving_average": "demand_forecasting_pipeline/artifacts/models\\intermittent_moving_average.pkl",
+    "intermittent__two_stage": "demand_forecasting_pipeline/artifacts/models\\intermittent_two_stage.pkl",
+    "lumpy__croston": "demand_forecasting_pipeline/artifacts/models\\lumpy_croston.pkl",
+    "lumpy__croston_sba": "demand_forecasting_pipeline/artifacts/models\\lumpy_croston_sba.pkl",
+    "lumpy__two_stage": "demand_forecasting_pipeline/artifacts/models\\lumpy_two_stage.pkl",
+    "lumpy__moving_average": "demand_forecasting_pipeline/artifacts/models\\lumpy_moving_average.pkl",
+    "smooth__naive": "demand_forecasting_pipeline/artifacts/models\\smooth_naive.pkl",
+    "smooth__moving_average": "demand_forecasting_pipeline/artifacts/models\\smooth_moving_average.pkl",
+    "smooth__ets": "demand_forecasting_pipeline/artifacts/models\\smooth_ets.pkl",
+    "smooth__linear": "demand_forecasting_pipeline/artifacts/models\\smooth_linear.pkl",
+    "smooth__random_forest": "demand_forecasting_pipeline/artifacts/models\\smooth_random_forest.pkl",
+    "smooth__lightgbm": "demand_forecasting_pipeline/artifacts/models\\smooth_lightgbm.pkl",
+    "smooth__xgboost": "demand_forecasting_pipeline/artifacts/models\\smooth_xgboost.pkl",
+    "smooth__ensemble": "weights",
+    "erratic__moving_average": "demand_forecasting_pipeline/artifacts/models\\erratic_moving_average.pkl",
+    "erratic__random_forest": "demand_forecasting_pipeline/artifacts/models\\erratic_random_forest.pkl",
+    "erratic__lightgbm": "demand_forecasting_pipeline/artifacts/models\\erratic_lightgbm.pkl",
+    "erratic__xgboost": "demand_forecasting_pipeline/artifacts/models\\erratic_xgboost.pkl",
+    "erratic__two_stage": "demand_forecasting_pipeline/artifacts/models\\erratic_two_stage.pkl",
+    "erratic__ensemble": "weights"
+  },
+  "schema": {
+    "forecast_level": [
+      "RouteCode",
+      "ItemCode"
+    ],
+    "date_col": "TrxDate",
+    "target_col": "TotalQuantity",
+    "granularity": "D",
+    "feature_cols": [
+      "AvgUnitPrice",
+      "activity_flag",
+      "pair_history_len",
+      "day_of_week",
+      "day_of_week_sin",
+      "day_of_week_cos",
+      "day_of_month",
+      "week_of_year",
+      "is_weekend",
+      "month",
+      "month_sin",
+      "month_cos",
+      "days_since_start",
+      "lag_1",
+      "lag_7",
+      "lag_14",
+      "lag_21",
+      "lag_28",
+      "roll_mean_7",
+      "roll_std_7",
+      "roll_max_7",
+      "roll_mean_14",
+      "roll_std_14",
+      "roll_max_14",
+      "roll_mean_28",
+      "roll_std_28",
+      "roll_max_28",
+      "roll_sum_7",
+      "roll_nonzero_ratio_7",
+      "roll_sum_14",
+      "roll_nonzero_ratio_14",
+      "roll_sum_28",
+      "roll_nonzero_ratio_28",
+      "nonzero_mean_to_date",
+      "inter_demand_interval",
+      "last_nonzero_gap",
+      "roll_min_7",
+      "roll_median_7",
+      "roll_min_14",
+      "roll_median_14",
+      "roll_min_28",
+      "roll_median_28",
+      "hol_arafat_day",
+      "hol_commemoration_day",
+      "hol_death_of_sheikh_khalifa_bin_zayed_al_nahyan",
+      "hol_eid_al_adha",
+      "hol_eid_al_fitr",
+      "hol_islamic_new_year",
+      "hol_national_day",
+      "hol_new_years_day",
+      "hol_prophets_birthday",
+      "n_holidays_in_period",
+      "evt_covid_lockdown",
+      "te_pair_mean"
+    ],
+    "meta_cols": [
+      "WarehouseName",
+      "ItemName",
+      "CategoryName"
+    ]
+  }
+}

@@ -1,0 +1,137 @@
+project:
+  name: demand_forecasting
+  random_seed: 42
+  log_level: INFO
+
+paths:
+  raw_data: data/sales_recent.csv
+  artifacts_dir: demand_forecasting_pipeline/artifacts
+  models_dir: demand_forecasting_pipeline/artifacts/models
+  predictions_dir: demand_forecasting_pipeline/artifacts/predictions
+  metrics_dir: demand_forecasting_pipeline/artifacts/metrics
+  explainability_dir: demand_forecasting_pipeline/artifacts/explainability
+  logs_dir: demand_forecasting_pipeline/artifacts/logs
+
+data:
+  forecast_level: [RouteCode, ItemCode]
+  granularity: D
+  date_col: TrxDate
+  target_col: TotalQuantity
+  meta_cols: [WarehouseName, ItemName, CategoryName]
+  max_inactivity_periods: 180
+  fill_missing_periods: true
+  zero_fill_value: 0.0
+  activity_flag: true
+  causal_cols:
+    - col: AvgUnitPrice
+      agg: mean
+
+validation:
+  enabled: true
+
+cleaning:
+  clip_negative_to_zero: true
+  per_pair_outlier:
+    enabled: true
+    method: iqr
+    iqr_multiplier: 3.0
+    skip_if_intermittent: true
+
+split:
+  test_horizon: 30
+  validation_horizon: 30
+
+holidays:
+  enabled: true
+  country_code: AE
+  subdivision: null
+  custom_events:
+    - name: covid_lockdown
+      start: "2020-03-01"
+      end: "2021-12-31"
+
+classification:
+  adi_intermittent_threshold: 1.32
+  cv2_erratic_threshold: 0.49
+
+feature_engineering:
+  adaptive_depth: true
+  target_encoding:
+    enabled: true
+    smoothing: 10
+  temporal:
+    enabled: true
+    weekend_days: [4]
+    components:
+      - day_of_week
+      - day_of_week_sin
+      - day_of_week_cos
+      - day_of_month
+      - week_of_year
+      - month
+      - month_sin
+      - month_cos
+      - is_weekend
+      - days_since_start
+  lags:
+    smooth: [1, 7, 14, 21, 28]
+    intermittent: [7, 14, 28]
+    erratic: [1, 7, 14, 21, 28]
+    lumpy: [7, 14, 28]
+  rolling:
+    smooth:
+      windows: [7, 14, 28]
+      stats: [mean, std, min, max, median]
+    intermittent:
+      windows: [7, 14, 28]
+      stats: [mean, sum, nonzero_ratio]
+    erratic:
+      windows: [7, 14, 28]
+      stats: [mean, std, max]
+    lumpy:
+      windows: [7, 14, 28]
+      stats: [mean, std, nonzero_ratio]
+  intermittent_specific:
+    inter_demand_interval: true
+    last_nonzero_gap: true
+    nonzero_mean: true
+
+model_selection:
+  strategy: per_pair
+
+models:
+  enabled:
+    smooth: [naive, moving_average, ets, linear, random_forest, lightgbm, xgboost, ensemble]
+    intermittent: [croston, croston_sba, naive, moving_average, two_stage]
+    erratic: [moving_average, random_forest, lightgbm, xgboost, ensemble, two_stage]
+    lumpy: [croston, croston_sba, two_stage, moving_average]
+  fallback_order: [moving_average, naive]
+  selection_metric: rmse
+  model_defaults:
+    moving_average:
+      window: 7
+    croston:
+      alpha: 0.4
+    ets:
+      seasonal_periods: 7
+
+two_stage:
+  threshold: 0.5
+
+hyperparameter_tuning:
+  enabled: true
+  n_trials: 15
+  timeout_seconds: 60
+  temporal_cv:
+    enabled: true
+    n_splits: 3
+  models_to_tune: [lightgbm, xgboost, random_forest]
+
+evaluation:
+  metrics: [mae, rmse, mape, smape, bias, wape]
+  prediction_intervals:
+    enabled: true
+    quantiles: [0.1, 0.9]
+
+inference:
+  forecast_horizon: 30

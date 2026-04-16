@@ -1,0 +1,61 @@
+# ── Python ──────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+*.egg-info/
+.pytest_cache/
+
+# ── Node / Webapp ───────────────────────────────────────
+webapp/node_modules/
+webapp/dist/
+webapp/.vite/
+
+# ── Environment (secrets — never commit) ────────────────
+.env
+*/.env
+
+# ── Data (large CSVs produced by import pipeline) ──────
+data/*.csv
+
+# ── Demand Forecast artifacts (regeneratable) ──────────
+demand_forecasting_pipeline/artifacts/**/*.pkl
+demand_forecasting_pipeline/artifacts/**/*.csv
+
+# ── Recommended Order (generated output + runtime state)─
+recommended_order/output/
+recommended_order/data/feedback_multipliers.json
+recommended_order/data/generation_metrics.csv
+recommended_order/data/.ro_manager_meta.json
+
+# ── Runtime state (any location) ────────────────────────
+**/feedback_multipliers.json
+**/generation_metrics.csv
+**/.ro_manager_meta.json
+
+# ── Sales Supervision (session files + runtime) ────────
+sales_supervision/data/
+
+# ── LLM Analytics cache ────────────────────────────────
+llm_analytics/cache/
+
+# ── Logs ────────────────────────────────────────────────
+*.log
+
+# ── Temp / scratch files ────────────────────────────────
+_tmp_*
+_push_*
+.compare_old/
+.compare_new/
+
+# ── OS ──────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ── IDE / Tools ─────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*.swo
+.claude/

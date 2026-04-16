@@ -1,0 +1,111 @@
+version: "3.9"
+
+services:
+  # ---------------------------------------------------------------
+  # Backend services (all share the same Python image)
+  # ---------------------------------------------------------------
+
+  data-import:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: python -m data_import
+    env_file: .env
+    ports: ["${DI_PORT:-8005}:8005"]
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8005/api/v1/data/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  forecast:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: python -m demand_forecasting_pipeline
+    env_file: .env
+    ports: ["${DF_PORT:-8002}:8002"]
+    volumes:
+      - ./data:/app/data
+      - ./demand_forecasting_pipeline/artifacts:/app/demand_forecasting_pipeline/artifacts
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/api/v1/forecast/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  orders:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: python -m recommended_order
+    env_file: .env
+    ports: ["${RO_PORT:-8001}:8001"]
+    volumes:
+      - ./data:/app/data
+      - ./recommended_order/output:/app/recommended_order/output
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/api/v1/recommended-order/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  supervision:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: python -m sales_supervision
+    env_file: .env
+    ports: ["${SS_PORT:-8004}:8004"]
+    volumes:
+      - ./sales_supervision/data:/app/sales_supervision/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8004/api/v1/supervision/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  analytics:
+    build:
+      context: .
+      dockerfile: Dockerfile.backend
+    command: python -m llm_analytics
+    env_file: .env
+    ports: ["${LLM_PORT:-8003}:8003"]
+    volumes:
+      - ./llm_analytics/cache:/app/llm_analytics/cache
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/api/v1/analytics/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ---------------------------------------------------------------
+  # Frontend + Nginx reverse proxy
+  # ---------------------------------------------------------------
+
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+      args:
+        VITE_DATA_IMPORT_URL: ""
+        VITE_FORECAST_URL: ""
+        VITE_RECOMMENDED_ORDER_URL: ""
+        VITE_SUPERVISION_URL: ""
+        VITE_ANALYTICS_URL: ""
+    ports: ["${WEBAPP_PORT:-80}:80"]
+    depends_on:
+      - data-import
+      - forecast
+      - orders
+      - supervision
+      - analytics
+    restart: unless-stopped

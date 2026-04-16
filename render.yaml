@@ -1,0 +1,82 @@
+# Render Blueprint -- deploy all services with one click
+# https://render.com/docs/blueprint-spec
+
+services:
+  - type: web
+    name: yaumi-data-import
+    runtime: python
+    buildCommand: pip install -r data_import/requirements.txt
+    startCommand: python -m data_import
+    envVars:
+      - fromGroup: yaumi-shared
+
+  - type: web
+    name: yaumi-forecast
+    runtime: python
+    buildCommand: pip install -r demand_forecasting_pipeline/requirements.txt
+    startCommand: python -m demand_forecasting_pipeline
+    envVars:
+      - fromGroup: yaumi-shared
+
+  - type: web
+    name: yaumi-orders
+    runtime: python
+    buildCommand: pip install -r recommended_order/requirements.txt
+    startCommand: python -m recommended_order
+    envVars:
+      - fromGroup: yaumi-shared
+
+  - type: web
+    name: yaumi-supervision
+    runtime: python
+    buildCommand: pip install -r sales_supervision/requirements.txt
+    startCommand: python -m sales_supervision
+    envVars:
+      - fromGroup: yaumi-shared
+
+  - type: web
+    name: yaumi-analytics
+    runtime: python
+    buildCommand: pip install -r llm_analytics/requirements.txt
+    startCommand: python -m llm_analytics
+    envVars:
+      - fromGroup: yaumi-shared
+
+  - type: web
+    name: yaumi-web
+    runtime: static
+    buildCommand: cd webapp && npm ci && npm run build
+    staticPublishPath: webapp/dist
+    routes:
+      - type: rewrite
+        source: /api/v1/data/*
+        destination: https://yaumi-data-import.onrender.com/api/v1/data/*
+      - type: rewrite
+        source: /api/v1/forecast/*
+        destination: https://yaumi-forecast.onrender.com/api/v1/forecast/*
+      - type: rewrite
+        source: /api/v1/recommended-order/*
+        destination: https://yaumi-orders.onrender.com/api/v1/recommended-order/*
+      - type: rewrite
+        source: /api/v1/supervision/*
+        destination: https://yaumi-supervision.onrender.com/api/v1/supervision/*
+      - type: rewrite
+        source: /api/v1/analytics/*
+        destination: https://yaumi-analytics.onrender.com/api/v1/analytics/*
+      - type: rewrite
+        source: /*
+        destination: /index.html
+
+envVarGroups:
+  - name: yaumi-shared
+    envVars:
+      - key: DI_DB_HOST
+        sync: false
+      - key: DI_DB_USERNAME
+        sync: false
+      - key: DI_DB_PASSWORD
+        sync: false
+      - key: LLM_API_KEY
+        sync: false
+      - key: PYTHONPATH
+        value: /opt/render/project/src

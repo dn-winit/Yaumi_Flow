@@ -1,0 +1,21 @@
+FROM node:20-alpine AS build
+
+WORKDIR /app
+COPY webapp/package.json webapp/package-lock.json* ./
+RUN npm ci
+
+COPY webapp/ .
+
+ARG VITE_DATA_IMPORT_URL=/api/v1/data
+ARG VITE_FORECAST_URL=/api/v1/forecast
+ARG VITE_RECOMMENDED_ORDER_URL=/api/v1/recommended-order
+ARG VITE_SUPERVISION_URL=/api/v1/supervision
+ARG VITE_ANALYTICS_URL=/api/v1/analytics
+
+RUN npm run build
+
+# Serve with nginx
+FROM nginx:alpine
+COPY --from=build /app/dist /usr/share/nginx/html
+COPY nginx.conf /etc/nginx/conf.d/default.conf
+EXPOSE 80
