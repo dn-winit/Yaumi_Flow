@@ -74,11 +74,12 @@ React 18 + TypeScript + Vite + Tailwind CSS v4
 
 ### Pages
 - **Dashboard** — business KPIs, sales trends, customer overview, service health
+- **Pipeline** — train/inference status, accuracy comparison, model management
 - **Workflow** — three tabs:
   - **Van Load** — demand forecast with accuracy drawer (WAPE-based, spike-resistant)
   - **Recommended Orders** — per-customer recommendations with adoption drawer
   - **Supervision** — live session with planned/unplanned visit tabs
-- **Admin** — data import, pipeline management, cache control
+- **Admin** — data import, cache control
 
 ### Design system
 - Centralised design tokens (`src/theme/tokens.ts`) — Yaumi brand crimson + gold
@@ -150,7 +151,7 @@ forecast_new/
 │   ├── config/                  # Settings + DB config
 │   ├── core/                    # Database connectors
 │   ├── services/                # EDA + import logic
-│   └── scheduler/               # Cron jobs
+│   └── scheduler.py             # Cron jobs
 │
 ├── demand_forecasting_pipeline/ # ML forecasting service
 │   ├── api/                     # FastAPI routes
@@ -183,10 +184,13 @@ forecast_new/
 │   ├── models/                  # Session schemas
 │   └── services/                # Storage + live actuals client
 │
-├── analytics/                   # AI analytics service
+├── llm_analytics/               # AI analytics service
 │   ├── api/                     # FastAPI routes
+│   ├── cache/                   # Response caching
+│   ├── config/                  # Settings + provider config
 │   ├── core/                    # Analysis client + prompt loader
-│   └── prompts/                 # Structured prompt templates
+│   ├── models/                  # Schemas
+│   └── services/                # Analysis orchestration
 │
 ├── webapp/                      # React frontend
 │   ├── public/                  # Static assets (Yaumi logo)

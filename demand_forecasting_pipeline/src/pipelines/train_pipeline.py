@@ -75,7 +75,16 @@ def _build_per_pair_predictions(pair_best, predictions_by_model, group_keys, cls
     return pd.concat(records, ignore_index=True) if records else pd.DataFrame()
 
 
-def run_training(config_path):
+def run_training(config_path, on_step=None):
+    """Run the full training pipeline.
+
+    Args:
+        config_path: path to config YAML.
+        on_step: optional ``(step_name, status) -> None`` callback fired after
+            each major stage completes, so the caller can report live progress.
+    """
+    _step = on_step or (lambda *_: None)
+
     cfg = load_config(config_path)
     ensure_dirs(cfg)
     logger = get_logger("train", cfg["paths"]["logs_dir"], cfg["project"]["log_level"])
@@ -88,6 +97,7 @@ def run_training(config_path):
     causal_cols = cfg["data"].get("causal_cols", [])
     activity_flag = cfg["data"].get("activity_flag", False)
 
+    _step("data_collection", "running")
     logger.info("Step 1: load and validate raw data")
     raw = load_raw(cfg["paths"]["raw_data"], date_col)
     if cfg.get("validation", {}).get("enabled", False):
@@ -97,7 +107,9 @@ def run_training(config_path):
         [cc["col"] for cc in causal_cols if cc["col"] in raw.columns]
     ))
     raw = raw[[c for c in all_cols if c in raw.columns]].copy()
+    _step("data_collection", "completed")
 
+    _step("data_processing", "running")
     logger.info("Step 2-3: build panel at {} per {}".format(freq, group_keys))
     agg = build_panel(
         raw, group_keys, date_col, target_col, meta_cols, freq,
@@ -121,6 +133,9 @@ def run_training(config_path):
     test_start = max_date - period_offset(freq, test_horizon - 1)
     train_window = agg[agg[date_col] < test_start]
 
+    _step("data_processing", "completed")
+
+    _step("classification", "running")
     logger.info("Step 6: segmentation on train window (date < {})".format(test_start.date()))
     classes_df = classify_dataset(
         train_window, group_keys, target_col,
@@ -134,6 +149,9 @@ def run_training(config_path):
         classes=classes_df, source_df=train_window,
     )
 
+    _step("classification", "completed")
+
+    _step("feature_engineering", "running")
     logger.info("Step 8: explainability metrics")
     expl = compute_pair_explainability(
         train_window, group_keys, target_col,
@@ -156,10 +174,12 @@ def run_training(config_path):
 
     train, val, test = time_based_split(feats, date_col, test_horizon, val_horizon, granularity=freq)
     logger.info("Train: {} | Val: {} | Test: {}".format(len(train), len(val), len(test)))
+    _step("feature_engineering", "completed")
 
     feature_cols = _feature_columns(train, group_keys, date_col, target_col)
     logger.info("Feature columns ({}): {}".format(len(feature_cols), feature_cols[:10]))
 
+    _step("training", "running")
     enabled = cfg["models"]["enabled"]
     fallback = cfg["models"]["fallback_order"]
     selection_metric = cfg["models"]["selection_metric"]
@@ -388,5 +408,6 @@ def run_training(config_path):
     classes_out = classes_df.reset_index()
     save_dataframe(classes_out, os.path.join(cfg["paths"]["explainability_dir"], "pair_classes.csv"))
 
+    _step("training", "completed")
     logger.info("Training pipeline complete")
     return artifacts

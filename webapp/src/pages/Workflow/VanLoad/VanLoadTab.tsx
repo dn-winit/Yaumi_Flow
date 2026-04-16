@@ -15,6 +15,8 @@ import VanLoadTable from "./VanLoadTable";
 import AccuracyDrawer from "./AccuracyDrawer";
 import ForecastDrawer from "./ForecastDrawer";
 import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
+import InfoPanel from "@/components/ui/InfoPanel";
+import { VAN_LOAD_INFO } from "@/config/module-info";
 import { toNum, pickDate } from "@/lib/format";
 import type { Row } from "@/types/common";
 
@@ -141,14 +143,16 @@ export default function VanLoadTab() {
         setRouteCode={setRouteCode}
       />
 
-      {/* Analytic drawers: backward-looking accuracy + forward-looking forecast */}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button variant="secondary" onClick={() => setAccuracyOpen(true)}>
           Last 30 Days Performance
         </Button>
         <Button variant="secondary" onClick={() => setForecastOpen(true)}>
           Future Forecast
         </Button>
+        <div className="ml-auto">
+          <InfoPanel {...VAN_LOAD_INFO} />
+        </div>
       </div>
 
       {forecast.loading ? (

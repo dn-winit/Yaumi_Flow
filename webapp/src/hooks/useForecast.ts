@@ -86,6 +86,39 @@ export function usePipelineStatus() {
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
+/* ---- Auto-retrain ---- */
+
+export function useRetrainConfig() {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["retrain-config"],
+    queryFn: () => forecastApi.getRetrainConfig(),
+    ...tier("dashboard"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
+}
+
+export function useRetrainHistory() {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["retrain-history"],
+    queryFn: () => forecastApi.getRetrainHistory(),
+    ...tier("dashboard"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
+}
+
+export function useUpdateRetrainConfig() {
+  const qc = useQueryClient();
+  const mutation = useMutation({
+    mutationFn: (updates: Parameters<typeof forecastApi.updateRetrainConfig>[0]) =>
+      forecastApi.updateRetrainConfig(updates),
+    onSuccess: () => {
+      qc.invalidateQueries({ queryKey: ["retrain-config"] });
+      qc.invalidateQueries({ queryKey: ["retrain-history"] });
+    },
+  });
+  return mutation;
+}
+
 export function useTriggerPipeline() {
   const qc = useQueryClient();
   const train = useMutation({

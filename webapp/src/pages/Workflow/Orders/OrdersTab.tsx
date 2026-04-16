@@ -10,6 +10,8 @@ import { useFilterOptions, useRecommendations, useGenerate } from "@/hooks/useRe
 import RoutePickerGrid from "@/pages/RecommendedOrders/RoutePickerGrid";
 import CustomerRecommendationsPanel from "@/pages/RecommendedOrders/CustomerRecommendationsPanel";
 
+import InfoPanel from "@/components/ui/InfoPanel";
+import { RECOMMENDED_ORDERS_INFO } from "@/config/module-info";
 import AdoptionDrawer from "./AdoptionDrawer";
 import UpcomingPlanDrawer from "./UpcomingPlanDrawer";
 import { useWorkflow } from "../workflowContext";
@@ -163,14 +165,16 @@ export default function OrdersTab() {
         </div>
       )}
 
-      {/* Analytics drawers -- historical adoption + upcoming plan */}
-      <div className="flex flex-wrap gap-3">
+      <div className="flex flex-wrap items-center gap-3">
         <Button variant="secondary" onClick={() => setAdoptionOpen(true)}>
           Last 30 Days Adoption
         </Button>
         <Button variant="secondary" onClick={() => setUpcomingOpen(true)}>
           Upcoming Week Plan
         </Button>
+        <div className="ml-auto">
+          <InfoPanel {...RECOMMENDED_ORDERS_INFO} />
+        </div>
       </div>
 
       {renderBody()}

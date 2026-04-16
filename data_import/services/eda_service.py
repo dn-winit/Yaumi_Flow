@@ -240,7 +240,7 @@ class EdaService:
         """Mean accuracy for forecast rows in the trailing `days` window.
 
         Uses ``demand_forecast.csv`` which carries ``Predicted`` + ``ActualQty``.
-        Computes (1 - MAPE) over rows where actual > 0, mirroring the accuracy
+        Computes (1 - WAPE) over rows where actual > 0, mirroring the accuracy
         service's formula so this card and the drawer agree.
         """
         path = self._s.data_path(self._s.demand_forecast_file)
@@ -258,12 +258,12 @@ class EdaService:
             return {"available": True, "rows_compared": 0, "accuracy_pct": None}
         actual = pd.to_numeric(scored["ActualQty"], errors="coerce")
         predicted = pd.to_numeric(scored["Predicted"], errors="coerce")
-        mape = float(((actual - predicted).abs() / actual).mean() * 100)
+        wape = float((actual - predicted).abs().sum() / actual.sum() * 100)
         return {
             "available": True,
             "window_days": days,
             "rows_compared": int(len(scored)),
-            "accuracy_pct": round(max(0.0, 100.0 - mape), 1),
+            "accuracy_pct": round(max(0.0, 100.0 - wape), 1),
         }
 
     def _today_operations(self, anchor: pd.Timestamp) -> Dict[str, Any]:

@@ -89,14 +89,19 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     const byDay = new Map<string, { p: number; a: number }>();
     let totalPred = 0;
     let totalActual = 0;
-    let totalAbsErr = 0;
+    let scoredAbsErr = 0;
+    let scoredActual = 0;
 
     filteredRows.forEach((r) => {
       const p = toNum(r.predicted) ?? 0;
       const a = toNum(r.actual_qty) ?? 0;
       totalPred += p;
       totalActual += a;
-      totalAbsErr += Math.abs(a - p);
+      // WAPE numerator/denominator: only rows where actual > 0, matching backend
+      if (a > 0) {
+        scoredAbsErr += Math.abs(a - p);
+        scoredActual += a;
+      }
       const d = String(r.trx_date ?? "").slice(0, 10);
       if (d) {
         const cur = byDay.get(d) ?? { p: 0, a: 0 };
@@ -160,7 +165,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     const sellThroughPct = totalPred > 0 ? (Math.min(totalActual, totalPred) / totalPred) * 100 : null;
 
     return {
-      accuracyPct: wapeAccuracy(totalAbsErr, totalActual),
+      accuracyPct: wapeAccuracy(scoredAbsErr, scoredActual),
       biasPct: totalActual > 0 ? ((totalPred - totalActual) / totalActual) * 100 : null,
       demandServed,
       sellThroughPct,

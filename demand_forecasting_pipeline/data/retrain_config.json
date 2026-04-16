@@ -1,0 +1,8 @@
+{
+  "enabled": false,
+  "frequency_days": 14,
+  "last_auto_retrain": null,
+  "next_scheduled": null,
+  "auto_inference_after_train": true,
+  "history": []
+}

@@ -85,6 +85,12 @@ class Settings(BaseSettings):
     # Cache
     cache_ttl_seconds: int = Field(default=300, ge=0)
 
+    # Auto-retrain
+    retrain_check_interval_hours: int = Field(default=6, ge=1)
+    retrain_config_path: str = Field(default=str(_PIPELINE_ROOT / "data" / "retrain_config.json"))
+    drift_warn_threshold: float = Field(default=3.0, ge=0)
+    drift_alert_threshold: float = Field(default=7.0, ge=0)
+
     # DB push (target table for demand predictions)
     db: DbSettings = Field(default_factory=DbSettings)
     demand_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_demand_forecast]")

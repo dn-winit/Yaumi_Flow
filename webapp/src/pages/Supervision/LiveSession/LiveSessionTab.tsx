@@ -78,7 +78,15 @@ export default function LiveSessionTab() {
   const date = String(sessionData?.date ?? "");
 
   const totals = useMemo(() => {
-    const itemsCount = customers.reduce((n, c) => n + c.items.length, 0);
+    const uniqueItems = new Set<string>();
+    let totalUnits = 0;
+    customers.forEach((c) =>
+      c.items.forEach((it) => {
+        uniqueItems.add(it.itemCode);
+        totalUnits += it.recommendedQty;
+      }),
+    );
+    const itemsCount = uniqueItems.size;
     const custCount = customers.length;
     const visitedCount = Object.keys(visits).length;
     const visitedScores = Object.values(visits).map((v) => v.score.score);
@@ -87,7 +95,7 @@ export default function LiveSessionTab() {
       : null;
     const totalActual = Object.values(visits).reduce((n, v) => n + v.actualQty, 0);
     const totalRecommended = Object.values(visits).reduce((n, v) => n + v.recommendedQty, 0);
-    return { itemsCount, custCount, visitedCount, avgScore, totalActual, totalRecommended };
+    return { itemsCount, totalUnits, custCount, visitedCount, avgScore, totalActual, totalRecommended };
   }, [customers, visits]);
 
   const allVisited = customers.length > 0 && totals.visitedCount === customers.length;
@@ -211,7 +219,7 @@ export default function LiveSessionTab() {
 
       {/* Metric row */}
       <KpiRow>
-        <MetricCard label="Items to carry" value={String(totals.itemsCount)} subtitle="Across all customers" />
+        <MetricCard label="Unique items" value={String(totals.itemsCount)} subtitle={`${totals.totalUnits.toLocaleString()} total units to push`} />
         <MetricCard label="Customers planned" value={String(totals.custCount)} subtitle="On today's route" />
         <MetricCard
           label="Visited"

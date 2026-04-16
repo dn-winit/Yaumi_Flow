@@ -26,7 +26,9 @@ def _future_skeleton(history_df, group_keys, date_col, horizon, granularity):
     return pd.DataFrame(rows)
 
 
-def run_inference(config_path):
+def run_inference(config_path, on_step=None):
+    _step = on_step or (lambda *_: None)
+
     cfg = load_config(config_path)
     ensure_dirs(cfg)
     logger = get_logger("inference", cfg["paths"]["logs_dir"], cfg["project"]["log_level"])
@@ -40,6 +42,7 @@ def run_inference(config_path):
     activity_flag = cfg["data"].get("activity_flag", False)
     horizon = cfg["inference"]["forecast_horizon"]
 
+    _step("data_collection", "running")
     logger.info("Loading data for inference")
     raw = load_raw(cfg["paths"]["raw_data"], date_col)
     all_cols = list(dict.fromkeys(
@@ -55,6 +58,9 @@ def run_inference(config_path):
         causal_cols=causal_cols,
         activity_flag=activity_flag,
     )
+
+    _step("data_collection", "completed")
+    _step("data_processing", "running")
 
     classes_path = os.path.join(cfg["paths"]["explainability_dir"], "pair_classes.csv")
     if not os.path.exists(classes_path):
@@ -75,6 +81,9 @@ def run_inference(config_path):
     full = pd.concat([agg, future], ignore_index=True, sort=False)
     full_date_range = build_date_range(full[date_col].min(), full[date_col].max(), freq)
 
+    _step("data_processing", "completed")
+    _step("feature_engineering", "running")
+
     feats = build_features(
         full, group_keys, date_col, target_col, classes_df, cfg["feature_engineering"],
         holiday_cfg=cfg.get("holidays"),
@@ -82,6 +91,7 @@ def run_inference(config_path):
         full_date_range=full_date_range,
         target_encoding_source=agg,
     )
+    _step("feature_engineering", "completed")
 
     summary = load_json(os.path.join(cfg["paths"]["artifacts_dir"], "training_summary.json"))
     schema = summary.get("schema", {})
@@ -102,6 +112,7 @@ def run_inference(config_path):
         lookup = pd.read_csv(lookup_path)
         logger.info("Loaded per-pair model lookup ({} pairs)".format(len(lookup)))
 
+    _step("inference", "running")
     per_class = summary["per_class"]
     out_parts = []
 
@@ -230,5 +241,6 @@ def run_inference(config_path):
             forecast = forecast.merge(expl, on=group_keys, how="left", suffixes=("", "_expl"))
 
     save_dataframe(forecast, os.path.join(cfg["paths"]["predictions_dir"], "future_forecast.csv"))
+    _step("inference", "completed")
     logger.info("Inference complete: {} rows".format(len(forecast)))
     return forecast

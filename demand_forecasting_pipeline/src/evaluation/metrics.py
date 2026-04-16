@@ -26,10 +26,15 @@ def bias(y_true, y_pred):
 
 
 def wape(y_true, y_pred, eps=1e-9):
-    s = float(np.sum(np.abs(y_true)))
-    if s < eps:
+    # Score only rows where actual > 0, consistent with all runtime accuracy
+    # computations (summary.py, accuracy_service.py, retrain_scheduler.py,
+    # AccuracyDrawer.tsx). Zero-actual rows produce undefined percentage errors
+    # and would skew the metric.
+    mask = y_true > eps
+    if mask.sum() == 0:
         return None
-    return float(np.sum(np.abs(y_true - y_pred)) / s * 100.0)
+    s = float(np.sum(y_true[mask]))
+    return float(np.sum(np.abs(y_true[mask] - y_pred[mask])) / s * 100.0)
 
 
 _FUNCS = {"mae": mae, "rmse": rmse, "mape": mape, "smape": smape, "bias": bias, "wape": wape}

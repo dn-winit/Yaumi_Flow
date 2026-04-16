@@ -156,3 +156,4 @@ class ForecastSummaryResponse(BaseModel):
     future_forecast_count: int
     last_forecast_date: Optional[str] = None
     training_summary_exists: bool
+    training_overview: Optional[Dict[str, Any]] = None

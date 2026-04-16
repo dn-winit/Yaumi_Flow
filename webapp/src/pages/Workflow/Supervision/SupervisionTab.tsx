@@ -1,5 +1,7 @@
 import { useState } from "react";
 import Tabs from "@/components/ui/Tabs";
+import InfoPanel from "@/components/ui/InfoPanel";
+import { SUPERVISION_INFO } from "@/config/module-info";
 import LiveSessionTab from "@/pages/Supervision/LiveSession/LiveSessionTab";
 import ReviewTab from "@/pages/Supervision/Review/ReviewTab";
 
@@ -13,7 +15,12 @@ export default function SupervisionTab() {
 
   return (
     <div className="space-y-6">
-      <Tabs tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
+      <div className="flex items-center gap-3">
+        <div className="flex-1">
+          <Tabs tabs={TABS} activeTab={activeTab} onTabChange={setActiveTab} />
+        </div>
+        <InfoPanel {...SUPERVISION_INFO} />
+      </div>
       {activeTab === "live" && <LiveSessionTab />}
       {activeTab === "review" && <ReviewTab />}
     </div>

@@ -37,6 +37,7 @@ class PipelineRun:
     duration_seconds: float = 0.0
     error: Optional[str] = None
     result: Dict[str, Any] = field(default_factory=dict)
+    steps: Dict[str, str] = field(default_factory=dict)
 
 
 class PipelineService:
@@ -67,6 +68,7 @@ class PipelineService:
                 "duration_seconds": run.duration_seconds,
                 "error": run.error,
                 "result": run.result,
+                "steps": dict(run.steps),
             }
 
     def get_all_status(self) -> Dict[str, Any]:
@@ -92,6 +94,7 @@ class PipelineService:
             run.finished_at = None
             run.error = None
             run.result = {}
+            run.steps = {}
 
         cfg = config_path or self._s.pipeline_config
         thread = threading.Thread(
@@ -103,20 +106,28 @@ class PipelineService:
         thread.start()
         return {"success": True, "message": f"{pipeline} started", "config": cfg}
 
+    def _update_step(self, pipeline: str, step: str, status: str) -> None:
+        """Thread-safe step progress update. Called from the pipeline callback."""
+        with self._lock:
+            self._runs[pipeline].steps[step] = status
+
     def _execute(self, pipeline: str, config_path: str) -> None:
         t0 = time.time()
+
+        def on_step(step: str, status: str = "completed") -> None:
+            self._update_step(pipeline, step, status)
+
         try:
-            # Ensure the pipeline root is on sys.path
             pipeline_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
             if pipeline_root not in sys.path:
                 sys.path.insert(0, pipeline_root)
 
             if pipeline == "train":
                 from src.pipelines.train_pipeline import run_training
-                result = run_training(config_path)
+                result = run_training(config_path, on_step=on_step)
             else:
                 from src.pipelines.inference_pipeline import run_inference
-                result = run_inference(config_path)
+                result = run_inference(config_path, on_step=on_step)
 
             duration = round(time.time() - t0, 2)
             with self._lock:

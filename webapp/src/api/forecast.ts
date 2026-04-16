@@ -10,6 +10,9 @@ import type {
   PipelineStatusResponse,
   ForecastHealthResponse,
   AccuracyComparisonResponse,
+  RetrainConfig,
+  RetrainHistoryEntry,
+  DriftStatus,
 } from "@/types/forecast";
 import type { ForecastSummary } from "@/types/common";
 
@@ -94,4 +97,14 @@ export const forecastApi = {
 
   getHealth: () =>
     c().get<ForecastHealthResponse>("/health").then((r) => r.data),
+
+  // Auto-retrain
+  getRetrainConfig: () =>
+    c().get<RetrainConfig & { drift: DriftStatus }>("/retrain/config").then((r) => r.data),
+
+  updateRetrainConfig: (updates: Partial<RetrainConfig>) =>
+    c().post<RetrainConfig>("/retrain/config", updates).then((r) => r.data),
+
+  getRetrainHistory: () =>
+    c().get<RetrainHistoryEntry[]>("/retrain/history").then((r) => r.data),
 };

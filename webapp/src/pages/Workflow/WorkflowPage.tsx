@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import React, { useEffect } from "react";
 import { NavLink, Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { ROUTES, WORKFLOW_TABS } from "@/config/routes";
 import PageHeader from "@/components/layout/PageHeader";
@@ -26,22 +26,27 @@ function WorkflowTabs() {
 
   return (
     <div className="border-b border-default bg-surface-raised">
-      <div className="flex items-center gap-1 px-6">
+      <div className="flex items-center px-6">
         {WORKFLOW_TABS.map((tab, i) => {
           const active = location.pathname.startsWith(tab.path);
+          const isLast = i === WORKFLOW_TABS.length - 1;
           return (
-            <NavLink
-              key={tab.key}
-              to={tab.path}
-              className={`px-4 py-3 text-body font-medium border-b-2 transition-all duration-base ${
-                active
-                  ? "border-brand-600 text-brand-700"
-                  : "border-transparent text-text-secondary hover:text-text-primary hover:border-strong"
-              }`}
-            >
-              {tab.label}
-              <span className="ml-2 text-caption text-text-tertiary">[{i + 1}]</span>
-            </NavLink>
+            <React.Fragment key={tab.key}>
+              <NavLink
+                to={tab.path}
+                className={`px-4 py-3 text-body font-medium border-b-2 transition-all duration-base ${
+                  active
+                    ? "border-brand-600 text-brand-700"
+                    : "border-transparent text-text-secondary hover:text-text-primary hover:border-strong"
+                }`}
+              >
+                {tab.label}
+                <span className="ml-2 text-caption text-text-tertiary">[{i + 1}]</span>
+              </NavLink>
+              {!isLast && (
+                <span className="text-text-tertiary shrink-0 mx-1 text-sm" aria-hidden>→</span>
+              )}
+            </React.Fragment>
           );
         })}
       </div>

@@ -84,7 +84,7 @@ export interface AccuracySummary {
   total_actual: number;
   mae: number;
   rmse: number;
-  mape: number;
+  wape: number;
   accuracy_pct: number;
 }
 
@@ -93,4 +93,31 @@ export interface AccuracyComparisonResponse {
   rows: AccuracyRow[];
   summary: AccuracySummary;
   error?: string;
+}
+
+/* ---- Auto-retrain ---- */
+
+export interface RetrainConfig {
+  enabled: boolean;
+  frequency_days: number;
+  last_auto_retrain: string | null;
+  next_scheduled: string | null;
+  auto_inference_after_train: boolean;
+}
+
+export interface RetrainHistoryEntry {
+  date: string;
+  trigger: string;
+  accuracy_before: number | null;
+  accuracy_after: number | null;
+  duration_seconds: number;
+  status: string;
+}
+
+export interface DriftStatus {
+  status: "stable" | "drifting" | "significant";
+  recent_accuracy: number | null;
+  baseline_accuracy: number | null;
+  delta: number | null;
+  source: "live" | "test_set" | "unavailable";
 }

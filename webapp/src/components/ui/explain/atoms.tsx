@@ -72,7 +72,5 @@ export function ExplainHeader({ left, right }: { left: HeaderField; right: Heade
   );
 }
 
-export const GRID_4 = "grid grid-cols-2 md:grid-cols-4 gap-2.5";
 export const GRID_3 = "grid grid-cols-3 gap-2.5";
-export const GRID_2 = "grid grid-cols-2 gap-2.5";
 export const MODAL_BODY = "space-y-5";

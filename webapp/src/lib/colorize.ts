@@ -27,22 +27,6 @@ export function toneFromValue(
   return thresholds[thresholds.length - 1]?.[1] ?? "neutral";
 }
 
-/** Churn probability: 0..1, lower is better. */
-export const churnTone = (value: number | null | undefined): Tone =>
-  toneFromValue(value, [
-    [0.2, "success"],
-    [0.5, "warning"],
-    [1,   "danger"],
-  ]);
-
-/** Trend factor: 1.0 flat, >1 growing, <1 shrinking. */
-export const trendTone = (factor: number | null | undefined): Tone => {
-  if (factor == null || !Number.isFinite(factor)) return "neutral";
-  if (factor > 1) return "success";
-  if (factor < 1) return "danger";
-  return "neutral";
-};
-
 /** Forecast accuracy as a signed % error. `<10%` great, `<25%` warn, else bad. */
 export const accuracyTone = (pct: number | null | undefined): Tone => {
   if (pct == null || !Number.isFinite(pct)) return "neutral";
@@ -59,22 +43,3 @@ export const confidenceTone = (value: number | null | undefined): Tone =>
     [0.9, "warning"],
     [1,   "success"],
   ]);
-
-/** Variance sign: positive = success (over), negative = danger (under). */
-export const varianceTone = (value: number | null | undefined): Tone => {
-  if (value == null || !Number.isFinite(value)) return "neutral";
-  if (value > 0) return "success";
-  if (value < 0) return "danger";
-  return "neutral";
-};
-
-/**
- * Pattern-quality score: 0..1, higher is more regular. Uses `info` for weak
- * patterns to avoid crying wolf — they're not bad, just less informative.
- */
-export const patternQualityTone = (value: number | null | undefined): Tone => {
-  if (value == null || !Number.isFinite(value)) return "neutral";
-  if (value >= 0.7) return "success";
-  if (value >= 0.4) return "warning";
-  return "info";
-};

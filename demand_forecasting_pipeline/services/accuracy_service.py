@@ -26,7 +26,7 @@ _EMPTY_SUMMARY: Dict[str, Any] = {
     "total_actual": 0.0,
     "mae": 0.0,
     "rmse": 0.0,
-    "mape": 0.0,
+    "wape": 0.0,
     "accuracy_pct": 0.0,
 }
 
@@ -209,7 +209,8 @@ class AccuracyService:
         if df.empty:
             return _EMPTY_SUMMARY
 
-        # Only score rows where actual occurred (otherwise MAPE is undefined)
+        # Only score rows where actual > 0 (zero-actual rows have undefined
+        # percentage error and would skew the headline).
         scored = df[df["actual_qty"] > 0]
         total_pred = round(float(df["predicted"].sum()), 1)
         total_actual = round(float(df["actual_qty"].sum()), 1)
@@ -218,13 +219,19 @@ class AccuracyService:
             return {**_EMPTY_SUMMARY, "rows_compared": int(len(df)), "total_predicted": total_pred}
 
         diff = scored["actual_qty"] - scored["predicted"]
-        mape = float((diff.abs() / scored["actual_qty"]).mean() * 100)
+
+        # WAPE: robust to demand spikes — errors contribute proportionally to
+        # the business volume that produced them, not as equal-weight per-row
+        # percentages. Consistent with the frontend AccuracyDrawer.
+        scored_actual_sum = float(scored["actual_qty"].sum())
+        wape = float(diff.abs().sum() / scored_actual_sum * 100) if scored_actual_sum > 0 else 0.0
+
         return {
             "rows_compared": int(len(df)),
             "total_predicted": total_pred,
             "total_actual": total_actual,
             "mae": round(float(diff.abs().mean()), 2),
             "rmse": round(float((diff ** 2).mean() ** 0.5), 2),
-            "mape": round(mape, 2),
-            "accuracy_pct": round(max(0.0, 100.0 - mape), 1),
+            "wape": round(wape, 2),
+            "accuracy_pct": round(max(0.0, 100.0 - wape), 1),
         }

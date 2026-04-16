@@ -6,6 +6,7 @@ from .pipeline import router as pipeline_router
 from .health import router as health_router
 from .summary import router as summary_router
 from .accuracy import router as accuracy_router
+from .retrain import router as retrain_router
 
 __all__ = [
     "predictions_router",
@@ -16,4 +17,5 @@ __all__ = [
     "health_router",
     "summary_router",
     "accuracy_router",
+    "retrain_router",
 ]
