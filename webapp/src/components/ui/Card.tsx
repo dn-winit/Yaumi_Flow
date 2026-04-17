@@ -12,11 +12,11 @@ interface CardProps {
 
 const variantClasses: Record<CardVariant, string> = {
   default:
-    "bg-surface-raised rounded-xl shadow-2 border border-default p-6",
+    "bg-surface-raised rounded-xl shadow-1 p-5",
   flat:
-    "bg-surface-raised rounded-xl border border-default p-6",
+    "bg-surface-raised rounded-xl p-5",
   gradient:
-    "bg-gradient-to-r from-brand-50 to-info-50 rounded-xl border border-brand-100 p-6",
+    "bg-gradient-to-r from-brand-50 to-info-50 rounded-xl border border-brand-100 p-5",
 };
 
 export default function Card({
@@ -33,8 +33,8 @@ export default function Card({
         .join(" ")}
     >
       {title && (
-        <div className="flex items-center justify-between mb-4">
-          <h3 className="text-heading font-semibold text-text-primary">{title}</h3>
+        <div className="flex items-center justify-between mb-4 pb-3 border-b border-subtle">
+          <h3 className="text-body font-semibold text-text-primary">{title}</h3>
           {actions && <div className="flex items-center gap-2">{actions}</div>}
         </div>
       )}

@@ -20,6 +20,9 @@ export const analyticsApi = {
   analyzePlanning: (data: Record<string, unknown>) =>
     c().post<AnalysisResponse>("/analyze/planning", data, { timeout: 180000 }).then((r) => r.data),
 
+  preVisitBriefing: (data: { customer_code: string; customer_name: string; route_code: string; date: string; items: Record<string, unknown>[] }) =>
+    c().post<AnalysisResponse>("/analyze/pre-visit", data, { timeout: 60000 }).then((r) => r.data),
+
   getHealth: () =>
     c().get<AnalyticsHealthResponse>("/health").then((r) => r.data),
 

@@ -47,7 +47,7 @@ export default function RouteGrid({
     <div className="space-y-4">
       {(summary || actions) && (
         <div className="flex items-center justify-between gap-3">
-          <div className="text-sm text-text-secondary">{summary}</div>
+          <div className="text-body text-text-secondary">{summary}</div>
           {actions && <div className="flex items-center gap-3">{actions}</div>}
         </div>
       )}
@@ -58,7 +58,7 @@ export default function RouteGrid({
             <button
               key={code}
               onClick={() => onSelect(code)}
-              className="group text-left bg-surface-raised rounded-xl shadow-1 border border-default p-6 hover:border-brand-500 hover:shadow-3 transition-all duration-base cursor-pointer"
+              className="group text-left bg-surface-raised rounded-lg border-l-3 border-brand-100 shadow-1 p-5 hover:border-brand-500 hover:shadow-2 hover:-translate-y-0.5 transition-all duration-base cursor-pointer"
             >
               <div className="flex items-start justify-between mb-3">
                 <span className="text-2xl font-bold text-text-primary group-hover:text-brand-600 transition-colors">
@@ -73,13 +73,13 @@ export default function RouteGrid({
               {s?.lines && s.lines.length > 0 ? (
                 <div className="space-y-0.5">
                   {s.lines.map((ln, i) => (
-                    <p key={i} className="text-sm text-text-tertiary">
+                    <p key={i} className="text-body text-text-tertiary">
                       {ln.label}: <span className="font-medium text-text-secondary">{ln.value}</span>
                     </p>
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-text-tertiary">Loading...</p>
+                <p className="text-body text-text-tertiary">Loading...</p>
               )}
             </button>
           );

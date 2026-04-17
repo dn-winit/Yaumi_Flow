@@ -13,6 +13,7 @@ import {
   usePipelineStatus,
   useTriggerPipeline,
 } from "@/hooks/useForecast";
+import { useToast } from "@/hooks/useToast";
 import AutoRetrainSection from "./AutoRetrainSection";
 import { fmtNum, GOOD_SCORE_THRESHOLD } from "@/lib/format";
 import type { Tone } from "@/lib/colorize";
@@ -177,7 +178,7 @@ function StepMetric({ step, summaryData, classData, trainingData }: {
           {FEATURE_PILLS.map((p) => (
             <span
               key={p}
-              className="inline-block text-[11px] px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-100"
+              className="inline-block text-caption px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-100"
             >
               {p}
             </span>
@@ -248,7 +249,7 @@ function PipelineFlow({
               {/* Number dot */}
               <div
                 className={[
-                  "absolute left-[-29px] top-0.5 flex items-center justify-center w-6 h-6 rounded-full text-xs font-bold leading-none",
+                  "absolute left-[-29px] top-0.5 flex items-center justify-center w-6 h-6 rounded-full text-caption font-bold leading-none",
                   status === "completed"
                     ? "bg-brand-600 text-white"
                     : status === "running"
@@ -284,7 +285,7 @@ function PipelineFlow({
                 <div className="flex flex-col items-end gap-1 shrink-0">
                   <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
                   {ts && (
-                    <span className="text-[11px] text-text-tertiary">{fmtTimestamp(ts)}</span>
+                    <span className="text-caption text-text-tertiary">{fmtTimestamp(ts)}</span>
                   )}
                 </div>
               </div>
@@ -362,6 +363,7 @@ type ActionState = "idle" | "loading" | "done" | "error";
 
 function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
   const { triggerTrain, triggerInference, loading: hookLoading, error } = useTriggerPipeline();
+  const { toast } = useToast();
 
   const [trainState, setTrainState] = useState<ActionState>("idle");
   const [inferState, setInferState] = useState<ActionState>("idle");
@@ -374,12 +376,14 @@ function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
       await triggerTrain();
       setTrainState("done");
       refetchStatus();
+      toast("Training started", "info");
       setTimeout(() => setTrainState("idle"), 3000);
     } catch {
       setTrainState("error");
+      toast("Training failed", "danger");
       setTimeout(() => setTrainState("idle"), 4000);
     }
-  }, [triggerTrain, refetchStatus]);
+  }, [triggerTrain, refetchStatus, toast]);
 
   const handleInference = useCallback(async () => {
     setInferState("loading");
@@ -387,12 +391,14 @@ function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
       await triggerInference();
       setInferState("done");
       refetchStatus();
+      toast("Forecast generation started", "info");
       setTimeout(() => setInferState("idle"), 3000);
     } catch {
       setInferState("error");
+      toast("Forecast generation failed", "danger");
       setTimeout(() => setInferState("idle"), 4000);
     }
-  }, [triggerInference, refetchStatus]);
+  }, [triggerInference, refetchStatus, toast]);
 
   return (
     <Card title="Pipeline Actions">
@@ -407,7 +413,7 @@ function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
             Retrain Models
           </Button>
           {trainState === "done" && (
-            <span className="text-sm font-medium text-success-600">Done</span>
+            <span className="text-body font-medium text-success-600">Done</span>
           )}
         </div>
 
@@ -421,7 +427,7 @@ function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
             Generate Forecasts
           </Button>
           {inferState === "done" && (
-            <span className="text-sm font-medium text-success-600">Done</span>
+            <span className="text-body font-medium text-success-600">Done</span>
           )}
         </div>
       </div>

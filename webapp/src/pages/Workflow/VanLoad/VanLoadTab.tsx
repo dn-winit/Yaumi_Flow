@@ -165,7 +165,7 @@ export default function VanLoadTab() {
             message={`No forecast rows found for route ${routeCode} on ${date}.`}
             icon="📅"
             action={
-              <span className="text-sm text-text-tertiary">
+              <span className="text-body text-text-tertiary">
                 Generate via Admin -&gt; Pipeline
               </span>
             }
@@ -178,7 +178,7 @@ export default function VanLoadTab() {
           <Card
             title="Top 10 items by van load"
             actions={
-              <span className="text-sm text-text-tertiary">click a bar for details</span>
+              <span className="text-body text-text-tertiary">click a bar for details</span>
             }
           >
             {topItems.length === 0 ? (
@@ -196,7 +196,7 @@ export default function VanLoadTab() {
 
           <Card
             title="Van load items"
-            actions={<span className="text-sm text-text-tertiary">{filteredRows.length} items</span>}
+            actions={<span className="text-body text-text-tertiary">{filteredRows.length} items</span>}
           >
             <VanLoadTable rows={filteredRows} />
           </Card>

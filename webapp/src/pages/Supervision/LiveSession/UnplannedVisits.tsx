@@ -32,7 +32,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
         </span>
       }
       actions={
-        <div className="flex items-center gap-3 text-xs text-text-tertiary">
+        <div className="flex items-center gap-3 text-caption text-text-tertiary">
           <FreshnessLabel updatedAt={updatedAt} />
           <button
             onClick={() => refetch()}
@@ -49,7 +49,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
       ) : error ? (
         <p className="text-body text-danger-600">{error}</p>
       ) : customers.length === 0 ? (
-        <p className="text-sm text-text-tertiary">
+        <p className="text-body text-text-tertiary">
           No drop-in visits on this route today &mdash; every live invoice came from a planned customer.
         </p>
       ) : (
@@ -72,10 +72,10 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
                       aria-label="visited"
                     />
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-text-primary truncate">
+                      <p className="text-body font-semibold text-text-primary truncate">
                         {c.customer_name?.trim() || c.customer_code}
                       </p>
-                      <p className="text-xs text-text-tertiary">{c.customer_code}</p>
+                      <p className="text-caption text-text-tertiary">{c.customer_code}</p>
                     </div>
                   </div>
                   <div className="flex items-center gap-2 shrink-0">
@@ -92,9 +92,9 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
 
                 {isOpen && (
                   <div className="border-t border-default bg-surface-sunken/40 px-4 py-3">
-                    <table className="w-full text-sm">
+                    <table className="w-full text-body">
                       <thead>
-                        <tr className="text-left text-xs font-medium text-text-tertiary uppercase tracking-wide">
+                        <tr className="text-left text-caption font-medium text-text-tertiary uppercase tracking-wide">
                           <th className="px-2 py-2 w-32">Item code</th>
                           <th className="px-2 py-2 text-right">Qty sold</th>
                         </tr>

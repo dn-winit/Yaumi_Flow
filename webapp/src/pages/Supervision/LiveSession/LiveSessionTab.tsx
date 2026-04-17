@@ -15,11 +15,26 @@ import RouteAnalysisModal, { type RouteAnalysisContext } from "./RouteAnalysisMo
 import UnplannedVisits from "./UnplannedVisits";
 
 import { GOOD_SCORE_THRESHOLD } from "@/lib/format";
+import { useToast } from "@/hooks/useToast";
+
+interface CustomerItem {
+  itemCode: string;
+  itemName?: string;
+  recommendedQty: number;
+  tier?: string;
+  source?: string;
+  whyItem?: string;
+  whyQuantity?: string;
+  purchaseCycleDays?: number;
+  daysSinceLastPurchase?: number;
+  frequencyPercent?: number;
+  trendFactor?: number;
+}
 
 interface CustomerData {
   customerCode: string;
   customerName: string;
-  items: { itemCode: string; itemName?: string; recommendedQty: number }[];
+  items: CustomerItem[];
 }
 
 interface VisitRecord {
@@ -38,6 +53,7 @@ export default function LiveSessionTab() {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [saveErr, setSaveErr] = useState<string | null>(null);
+  const { toast } = useToast();
 
   // AI modals
   const [custCtx, setCustCtx] = useState<CustomerAnalysisContext | null>(null);
@@ -69,6 +85,14 @@ export default function LiveSessionTab() {
         itemCode: String(pick(rec, "ItemCode", "itemCode", "item_code") ?? ""),
         itemName: pick(rec, "ItemName", "itemName", "item_name") as string | undefined,
         recommendedQty: Number(pick(rec, "RecommendedQuantity", "recommendedQty", "recommended_qty") ?? 0),
+        tier: pick(rec, "Tier", "tier") as string | undefined,
+        source: pick(rec, "Source", "source") as string | undefined,
+        whyItem: pick(rec, "WhyItem", "whyItem") as string | undefined,
+        whyQuantity: pick(rec, "WhyQuantity", "whyQuantity") as string | undefined,
+        purchaseCycleDays: pick(rec, "PurchaseCycleDays", "purchaseCycleDays") as number | undefined,
+        daysSinceLastPurchase: pick(rec, "DaysSinceLastPurchase", "daysSinceLastPurchase") as number | undefined,
+        frequencyPercent: pick(rec, "FrequencyPercent", "frequencyPercent") as number | undefined,
+        trendFactor: pick(rec, "TrendFactor", "trendFactor") as number | undefined,
       });
     }
     return Array.from(grouped.values());
@@ -128,8 +152,11 @@ export default function LiveSessionTab() {
     try {
       await supervisionApi.saveActiveSession(sessionId);
       setSaved(true);
+      toast("Session saved", "success");
     } catch (err) {
-      setSaveErr(err instanceof Error ? err.message : "Save failed");
+      const msg = err instanceof Error ? err.message : "Save failed";
+      setSaveErr(msg);
+      toast(msg, "danger");
     } finally {
       setSaving(false);
     }
@@ -245,6 +272,8 @@ export default function LiveSessionTab() {
               <CustomerVisit
                 key={c.customerCode}
                 sessionId={sessionId}
+                routeCode={routeCode}
+                date={date}
                 customerCode={c.customerCode}
                 customerName={c.customerName}
                 items={c.items}

@@ -22,6 +22,7 @@ interface PieChartProps {
   height?: number;
   title?: string;
   emptyMessage?: string;
+  loading?: boolean;
 }
 
 export default function PieChart({
@@ -32,7 +33,19 @@ export default function PieChart({
   height = DEFAULT_CHART_HEIGHT,
   title,
   emptyMessage = "No data",
+  loading = false,
 }: PieChartProps) {
+  if (loading) {
+    return (
+      <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
+        {title && (
+          <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
+        )}
+        <div className="animate-pulse bg-surface-sunken rounded-lg" style={{ height }} />
+      </div>
+    );
+  }
+
   return (
     <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
       {title && (

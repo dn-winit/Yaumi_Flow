@@ -55,7 +55,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
           dateRange={windowLabel}
           extra={
             data ? (
-              <span className="text-xs text-text-tertiary">
+              <span className="text-caption text-text-tertiary">
                 {fmtNum(data.summary.active_days)} active days
               </span>
             ) : null
@@ -113,7 +113,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
 
             <Card
               title="Daily breakdown"
-              actions={<span className="text-sm text-text-tertiary">{data.daily.length} days</span>}
+              actions={<span className="text-body text-text-tertiary">{data.daily.length} days</span>}
             >
               <Table data={data.daily as unknown as Record<string, unknown>[]} columns={columns} />
             </Card>

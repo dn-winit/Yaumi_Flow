@@ -1,12 +1,24 @@
 import { useState } from "react";
 import { supervisionApi } from "@/api/supervision";
+import { analyticsApi } from "@/api/analytics";
 import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
+import Loading from "@/components/ui/Loading";
+import Modal from "@/components/ui/Modal";
+import AnalysisList from "./AnalysisList";
 
 interface CustomerItem {
   itemCode: string;
   itemName?: string;
   recommendedQty: number;
+  tier?: string;
+  source?: string;
+  whyItem?: string;
+  whyQuantity?: string;
+  purchaseCycleDays?: number;
+  daysSinceLastPurchase?: number;
+  frequencyPercent?: number;
+  trendFactor?: number;
 }
 
 interface VisitScore {
@@ -17,6 +29,8 @@ interface VisitScore {
 
 interface Props {
   sessionId: string;
+  routeCode: string;
+  date: string;
   customerCode: string;
   customerName: string;
   items: CustomerItem[];
@@ -41,6 +55,8 @@ function scoreBadgeVariant(score: number): "success" | "warning" | "danger" | "n
 
 export default function CustomerVisit({
   sessionId,
+  routeCode,
+  date,
   customerCode,
   customerName,
   items,
@@ -52,6 +68,10 @@ export default function CustomerVisit({
   const [loading, setLoading] = useState(false);
   const [visitResult, setVisitResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  const [briefing, setBriefing] = useState<Record<string, unknown> | null>(null);
+  const [briefingOpen, setBriefingOpen] = useState(false);
+  const [briefingLoading, setBriefingLoading] = useState(false);
 
   const score = visitResult?.score as VisitScore | undefined;
   const visited = !!score;
@@ -88,6 +108,37 @@ export default function CustomerVisit({
     }
   };
 
+  const handleBriefing = async () => {
+    setBriefingLoading(true);
+    setBriefingOpen(true);
+    try {
+      const res = await analyticsApi.preVisitBriefing({
+        customer_code: customerCode,
+        customer_name: customerName,
+        route_code: routeCode,
+        date,
+        items: items.map((i) => ({
+          itemCode: i.itemCode,
+          itemName: i.itemName,
+          recommendedQty: i.recommendedQty,
+          tier: i.tier,
+          source: i.source,
+          whyItem: i.whyItem,
+          whyQuantity: i.whyQuantity,
+          purchaseCycleDays: i.purchaseCycleDays,
+          daysSinceLastPurchase: i.daysSinceLastPurchase,
+          frequencyPercent: i.frequencyPercent,
+          trendFactor: i.trendFactor,
+        })),
+      });
+      setBriefing(res.data);
+    } catch {
+      setBriefing({ briefing: "Briefing unavailable. Please try again.", key_items: [], heads_up: "" });
+    } finally {
+      setBriefingLoading(false);
+    }
+  };
+
   const handleAiClick = (e: React.MouseEvent) => {
     e.stopPropagation();
     onRequestAnalysis({
@@ -118,8 +169,8 @@ export default function CustomerVisit({
             />
           )}
           <div className="min-w-0">
-            <p className="text-sm font-semibold text-text-primary truncate">{customerName || customerCode}</p>
-            <p className="text-xs text-text-tertiary">{customerCode}</p>
+            <p className="text-body font-semibold text-text-primary truncate">{customerName || customerCode}</p>
+            <p className="text-caption text-text-tertiary">{customerCode}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
@@ -154,9 +205,9 @@ export default function CustomerVisit({
 
       {expanded && (
         <div className="border-t border-default bg-surface-sunken/40 px-4 py-3 space-y-3">
-          <table className="w-full text-sm">
+          <table className="w-full text-body">
             <thead>
-              <tr className="text-left text-xs font-medium text-text-tertiary uppercase tracking-wide">
+              <tr className="text-left text-caption font-medium text-text-tertiary uppercase tracking-wide">
                 <th className="px-2 py-2 w-32">Item code</th>
                 <th className="px-2 py-2">Name</th>
                 <th className="px-2 py-2 w-28 text-right">Recommended</th>
@@ -199,7 +250,17 @@ export default function CustomerVisit({
 
           {!visited && (
             <div className="flex items-center gap-3">
-              <Button variant="primary" size="sm" loading={loading} onClick={handleVisit}>
+              <Button variant="secondary" size="sm" loading={briefingLoading} onClick={handleBriefing}>
+                Briefing
+              </Button>
+              <Button
+                variant="primary"
+                size="sm"
+                loading={loading}
+                disabled={!briefing}
+                className={briefing ? "" : "opacity-40"}
+                onClick={handleVisit}
+              >
                 Mark visited
               </Button>
               {error && <span className="text-caption text-danger-600">{error}</span>}
@@ -207,7 +268,7 @@ export default function CustomerVisit({
           )}
 
           {visited && score && (
-            <div className="flex items-center gap-5 text-sm bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
+            <div className="flex items-center gap-5 text-body bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
               <span title="Weighted visit score combining coverage and quantity accuracy">
                 <span className="text-brand-700 font-semibold">{score.score.toFixed(1)}%</span>
                 <span className="text-brand-600 ml-1 text-caption">overall</span>
@@ -225,21 +286,21 @@ export default function CustomerVisit({
 
           {alsoBought.length > 0 && (
             <div>
-              <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider mb-1">
+              <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">
                 Also bought (not on plan)
               </p>
               <div className="flex flex-wrap gap-2">
                 {alsoBought.map((r) => (
                   <div
                     key={r.item_code}
-                    className="inline-flex items-center gap-2 text-xs bg-warning-50 border border-warning-100 text-warning-700 rounded-full px-2 py-1"
+                    className="inline-flex items-center gap-2 text-caption bg-warning-50 border border-warning-100 text-warning-700 rounded-full px-2 py-1"
                   >
                     <span className="font-medium">{r.item_code}</span>
                     <span className="text-warning-700">x {r.qty}</span>
                   </div>
                 ))}
               </div>
-              <p className="mt-1 text-[11px] text-text-tertiary">
+              <p className="mt-1 text-caption text-text-tertiary">
                 Off-plan purchases don't affect the score -- shown for visibility only.
               </p>
             </div>
@@ -247,10 +308,10 @@ export default function CustomerVisit({
 
           {redistributions.length > 0 && (
             <div>
-              <p className="text-xs font-medium text-text-tertiary uppercase tracking-wider mb-1">Moved to other customers</p>
+              <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">Moved to other customers</p>
               <div className="space-y-1">
                 {redistributions.map((r, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-xs text-text-secondary">
+                  <div key={idx} className="flex items-center gap-2 text-caption text-text-secondary">
                     <Badge variant="info">{r.itemCode}</Badge>
                     <span>{r.quantity} units: {r.from} &rarr; {r.to}</span>
                   </div>
@@ -260,6 +321,46 @@ export default function CustomerVisit({
           )}
         </div>
       )}
+
+      <Modal
+        open={briefingOpen}
+        onClose={() => setBriefingOpen(false)}
+        title={`Pre-visit briefing — ${customerName || customerCode}`}
+        size="xl"
+      >
+        {briefingLoading ? (
+          <Loading message="Preparing briefing..." />
+        ) : briefing ? (
+          <div className="space-y-5">
+            <div className="flex flex-wrap items-center gap-3 pb-3 border-b border-subtle">
+              <span className="text-body text-text-tertiary">Route</span>
+              <Badge variant="info">{routeCode}</Badge>
+              <span className="text-body text-text-tertiary">Date</span>
+              <Badge variant="neutral">{date}</Badge>
+              <span className="ml-auto text-body text-text-tertiary">
+                {items.length} items · {items.reduce((n, i) => n + i.recommendedQty, 0)} units
+              </span>
+            </div>
+
+            {typeof briefing.briefing === "string" && briefing.briefing && (
+              <div className="bg-surface-sunken rounded-lg border border-subtle px-4 py-3 text-body text-text-secondary leading-relaxed">
+                {briefing.briefing}
+              </div>
+            )}
+
+            <AnalysisList
+              title="Key items to push"
+              tone="success"
+              items={Array.isArray(briefing.key_items) ? briefing.key_items.map(String) : []}
+            />
+            <AnalysisList
+              title="Heads up"
+              tone="warning"
+              items={typeof briefing.heads_up === "string" && briefing.heads_up ? [briefing.heads_up] : []}
+            />
+          </div>
+        ) : null}
+      </Modal>
     </div>
   );
 }

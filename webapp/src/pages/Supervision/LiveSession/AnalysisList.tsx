@@ -21,10 +21,10 @@ export default function AnalysisList({ title, items, tone }: Props) {
   const cls = TONE_CLASSES[tone];
   return (
     <div className={`${cls.bg} ${cls.border} border rounded-lg px-4 py-3`}>
-      <h4 className={`text-xs font-semibold uppercase tracking-wider mb-2 ${cls.title}`}>{title}</h4>
+      <h4 className={`text-caption font-semibold uppercase tracking-wider mb-2 ${cls.title}`}>{title}</h4>
       <ul className="space-y-1.5">
         {items.map((it, i) => (
-          <li key={i} className="flex items-start gap-2 text-sm text-text-secondary leading-snug">
+          <li key={i} className="flex items-start gap-2 text-body text-text-secondary leading-snug">
             <span className={`mt-1.5 w-1.5 h-1.5 rounded-full shrink-0 ${cls.dot}`} />
             <span>{it}</span>
           </li>

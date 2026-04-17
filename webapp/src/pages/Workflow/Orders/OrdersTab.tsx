@@ -7,6 +7,7 @@ import Select from "@/components/ui/Select";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
 import { useFilterOptions, useRecommendations, useGenerate } from "@/hooks/useRecommendedOrder";
+import { useToast } from "@/hooks/useToast";
 import RoutePickerGrid from "@/pages/RecommendedOrders/RoutePickerGrid";
 import CustomerRecommendationsPanel from "@/pages/RecommendedOrders/CustomerRecommendationsPanel";
 
@@ -40,11 +41,17 @@ export default function OrdersTab() {
 
   const [adoptionOpen, setAdoptionOpen] = useState(false);
   const [upcomingOpen, setUpcomingOpen] = useState(false);
+  const { toast } = useToast();
 
   const handleGenerateRoute = async () => {
     if (!routeCode) return;
-    await generate(date, [routeCode], true);
-    refetchRecs();
+    try {
+      await generate(date, [routeCode], true);
+      refetchRecs();
+      toast("Recommendations generated", "success");
+    } catch (err) {
+      toast(err instanceof Error ? err.message : "Generation failed", "danger");
+    }
   };
 
   const routeStats = useMemo(() => {

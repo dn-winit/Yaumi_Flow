@@ -31,3 +31,9 @@ class PlanningInsights(BaseModel):
     van_load_alerts: List[str] = Field(default_factory=list)
     opportunities: List[str] = Field(default_factory=list)
     quick_tips: List[str] = Field(default_factory=list)
+
+
+class PreVisitBriefing(BaseModel):
+    briefing: str = ""
+    key_items: List[str] = Field(default_factory=list)
+    heads_up: str = ""

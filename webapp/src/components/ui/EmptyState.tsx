@@ -21,7 +21,7 @@ export default function EmptyState({
         </span>
       )}
       <h3 className="text-base font-semibold text-text-primary mb-1">{title}</h3>
-      {message && <p className="text-sm text-text-tertiary mb-4">{message}</p>}
+      {message && <p className="text-body text-text-tertiary mb-4">{message}</p>}
       {action && <div>{action}</div>}
     </div>
   );

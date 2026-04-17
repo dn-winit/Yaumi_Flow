@@ -1,4 +1,4 @@
-import React, { useEffect, useCallback } from "react";
+import React, { useEffect, useCallback, useState } from "react";
 
 type ModalSize = "sm" | "md" | "lg" | "xl";
 
@@ -24,6 +24,17 @@ export default function Modal({
   children,
   size = "md",
 }: ModalProps) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setVisible(true);
+    } else {
+      const t = setTimeout(() => setVisible(false), 200);
+      return () => clearTimeout(t);
+    }
+  }, [open]);
+
   const handleEscape = useCallback(
     (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -42,27 +53,28 @@ export default function Modal({
     };
   }, [open, handleEscape]);
 
-  if (!open) return null;
+  if (!visible && !open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
       {/* Backdrop */}
       <div
-        className="absolute inset-0 bg-neutral-900/50 backdrop-blur-sm"
+        className={`absolute inset-0 bg-neutral-900/50 backdrop-blur-sm transition-opacity duration-base ${open ? "opacity-100" : "opacity-0"}`}
         onClick={onClose}
       />
 
       {/* Panel */}
       <div
         className={[
-          "relative w-full bg-surface-raised rounded-xl shadow-4 flex flex-col",
+          "relative w-full mx-4 sm:mx-auto bg-surface-raised rounded-xl shadow-4 flex flex-col transition-all duration-base",
+          open ? "scale-100 opacity-100" : "scale-95 opacity-0",
           "max-h-[90vh]",
           sizeClasses[size],
         ].join(" ")}
       >
         {/* Header (sticky) */}
         <div className="flex items-center justify-between px-6 py-4 border-b border-subtle flex-shrink-0">
-          <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
+          <h2 className="text-heading font-semibold text-text-primary">{title}</h2>
           <button
             onClick={onClose}
             aria-label="Close"

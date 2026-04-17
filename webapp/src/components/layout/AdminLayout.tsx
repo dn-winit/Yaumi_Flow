@@ -1,5 +1,6 @@
-import React from "react";
+import { Suspense, useState, useEffect } from "react";
 import { Link, Outlet, useLocation } from "react-router-dom";
+import Loading from "@/components/ui/Loading";
 import { ADMIN_NAV_ITEMS, ROUTES } from "@/config/routes";
 
 const iconPaths: Record<string, string> = {
@@ -27,14 +28,45 @@ function NavIcon({ icon }: { icon: string }) {
 
 export default function AdminLayout() {
   const location = useLocation();
+  const [sidebarOpen, setSidebarOpen] = useState(false);
+
+  // Close sidebar on route change (mobile)
+  useEffect(() => {
+    setSidebarOpen(false);
+  }, [location.pathname]);
+
+  // Close on Escape key (mobile)
+  useEffect(() => {
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSidebarOpen(false);
+    };
+    if (sidebarOpen) {
+      document.addEventListener("keydown", handleKey);
+      return () => document.removeEventListener("keydown", handleKey);
+    }
+  }, [sidebarOpen]);
 
   return (
     <div className="min-h-screen bg-surface-sunken">
-      <aside className="fixed left-0 top-0 bottom-0 w-60 bg-neutral-900 text-neutral-100 flex flex-col z-40">
+      {/* Backdrop (mobile only) */}
+      {sidebarOpen && (
+        <div
+          className="md:hidden fixed inset-0 bg-neutral-900/40 z-40 transition-opacity duration-base"
+          onClick={() => setSidebarOpen(false)}
+        />
+      )}
+
+      <aside
+        className={[
+          "fixed left-0 top-0 bottom-0 w-60 bg-neutral-900 text-neutral-100 flex flex-col z-40",
+          "transition-transform duration-base md:translate-x-0",
+          sidebarOpen ? "translate-x-0" : "-translate-x-full",
+        ].join(" ")}
+      >
         {/* Brand */}
         <div className="flex items-center gap-2 px-6 h-16 border-b border-neutral-800 shrink-0">
           <div className="h-8 w-8 rounded-lg bg-warning-500 flex items-center justify-center">
-            <span className="text-neutral-900 font-bold text-sm">YF</span>
+            <span className="text-neutral-900 font-bold text-body">YF</span>
           </div>
           <span className="text-lg font-bold">Yaumi Admin</span>
         </div>
@@ -49,7 +81,7 @@ export default function AdminLayout() {
                   <Link
                     to={item.path}
                     className={[
-                      "flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors",
+                      "flex items-center gap-3 px-3 py-2.5 rounded-lg text-body font-medium transition-colors",
                       isActive
                         ? "bg-warning-500/10 text-warning-500"
                         : "text-text-tertiary hover:bg-neutral-800 hover:text-neutral-100",
@@ -68,7 +100,7 @@ export default function AdminLayout() {
         <div className="border-t border-neutral-800 p-3">
           <Link
             to={ROUTES.dashboard}
-            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium text-text-tertiary hover:bg-neutral-800 hover:text-neutral-100 transition-colors"
+            className="flex items-center gap-3 px-3 py-2.5 rounded-lg text-body font-medium text-text-tertiary hover:bg-neutral-800 hover:text-neutral-100 transition-colors"
           >
             <NavIcon icon="home" />
             Back to App
@@ -76,14 +108,27 @@ export default function AdminLayout() {
         </div>
       </aside>
 
-      <main className="ml-60 min-h-screen">
-        <header className="bg-surface-raised border-b border-default px-8 py-4">
-          <h2 className="text-sm font-semibold uppercase tracking-wider text-warning-600">
+      {/* Hamburger button (mobile only) */}
+      <button
+        onClick={() => setSidebarOpen(true)}
+        className="md:hidden fixed top-4 left-4 z-50 p-2 rounded-lg bg-surface-raised shadow-2 border border-default"
+        aria-label="Open menu"
+      >
+        <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+
+      <main className="md:ml-60 ml-0 min-h-screen">
+        <header className="bg-surface-raised border-b border-default px-4 md:px-8 py-4">
+          <h2 className="text-body font-semibold uppercase tracking-wider text-warning-600">
             Admin
           </h2>
         </header>
-        <div className="p-8">
-          <Outlet />
+        <div className="p-4 md:p-8">
+          <Suspense fallback={<div className="animate-fadeIn"><Loading message="Loading..." /></div>}>
+            <Outlet />
+          </Suspense>
         </div>
       </main>
     </div>

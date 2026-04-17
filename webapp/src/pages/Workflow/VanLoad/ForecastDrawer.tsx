@@ -128,7 +128,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
           dateRange={windowLabel}
           extra={
             filteredRows.length > 0 && (
-              <span className="text-xs text-text-tertiary">
+              <span className="text-caption text-text-tertiary">
                 {fmtNum(filteredRows.length)} lines
               </span>
             )
@@ -181,7 +181,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
 
             <Card
               title="Line-item detail"
-              actions={<span className="text-sm text-text-tertiary">{tableRows.length} rows</span>}
+              actions={<span className="text-body text-text-tertiary">{tableRows.length} rows</span>}
             >
               <Table data={tableRows} columns={columns} />
             </Card>

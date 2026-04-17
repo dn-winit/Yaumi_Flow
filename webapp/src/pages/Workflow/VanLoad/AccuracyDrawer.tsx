@@ -305,7 +305,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
           dateRange={windowLabel}
           extra={
             filteredRows.length > 0 && (
-              <span className="text-xs text-text-tertiary">
+              <span className="text-caption text-text-tertiary">
                 {fmtNum(filteredRows.length)} scored rows
               </span>
             )

@@ -1,4 +1,4 @@
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 
 interface DrawerProps {
   open: boolean;
@@ -15,6 +15,17 @@ const WIDTHS: Record<string, string> = {
 };
 
 export default function Drawer({ open, onClose, title, children, width = "lg" }: DrawerProps) {
+  const [visible, setVisible] = useState(false);
+
+  useEffect(() => {
+    if (open) {
+      setVisible(true);
+    } else {
+      const t = setTimeout(() => setVisible(false), 200);
+      return () => clearTimeout(t);
+    }
+  }, [open]);
+
   useEffect(() => {
     if (!open) return;
     const handler = (e: KeyboardEvent) => {
@@ -24,17 +35,22 @@ export default function Drawer({ open, onClose, title, children, width = "lg" }:
     return () => document.removeEventListener("keydown", handler);
   }, [open, onClose]);
 
-  if (!open) return null;
+  if (!visible && !open) return null;
 
   return (
     <div className="fixed inset-0 z-50 flex">
       {/* Backdrop */}
-      <div className="flex-1 bg-neutral-900/40 backdrop-blur-sm" onClick={onClose} />
+      <div
+        className={`flex-1 bg-neutral-900/40 backdrop-blur-sm transition-opacity duration-base ${open ? "opacity-100" : "opacity-0"}`}
+        onClick={onClose}
+      />
 
       {/* Drawer panel -- slides from right */}
-      <div className={`w-full ${WIDTHS[width]} bg-surface-raised shadow-5 h-full flex flex-col`}>
+      <div
+        className={`w-full ${WIDTHS[width]} bg-surface-raised shadow-5 h-full flex flex-col transition-transform duration-base ease-out ${open ? "translate-x-0" : "translate-x-full"}`}
+      >
         <div className="flex items-center justify-between px-6 py-4 border-b border-default">
-          <h2 className="text-lg font-semibold text-text-primary">{title}</h2>
+          <h2 className="text-heading font-semibold text-text-primary">{title}</h2>
           <button
             onClick={onClose}
             className="text-text-tertiary hover:text-text-secondary transition-colors"

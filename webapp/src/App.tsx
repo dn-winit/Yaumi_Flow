@@ -1,12 +1,14 @@
+import React from "react";
 import { Routes, Route, Navigate } from "react-router-dom";
 import AppLayout from "@/components/layout/AppLayout";
 import AdminLayout from "@/components/layout/AdminLayout";
 import { ROUTES } from "@/config/routes";
-import DashboardPage from "@/pages/Dashboard/DashboardPage";
-import PipelinePage from "@/pages/Pipeline/PipelinePage";
-import WorkflowPage from "@/pages/Workflow/WorkflowPage";
-import DataAdminPage from "@/pages/Admin/DataAdminPage";
-import CacheAdminPage from "@/pages/Admin/CacheAdminPage";
+
+const DashboardPage = React.lazy(() => import("@/pages/Dashboard/DashboardPage"));
+const WorkflowPage = React.lazy(() => import("@/pages/Workflow/WorkflowPage"));
+const PipelinePage = React.lazy(() => import("@/pages/Pipeline/PipelinePage"));
+const DataAdminPage = React.lazy(() => import("@/pages/Admin/DataAdminPage"));
+const CacheAdminPage = React.lazy(() => import("@/pages/Admin/CacheAdminPage"));
 
 export default function App() {
   return (

@@ -61,12 +61,12 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
       ) : (
         <div className="space-y-5">
           <div className="flex flex-wrap items-center gap-3 pb-3 border-b border-subtle">
-            <span className="text-sm text-text-tertiary">Route</span>
+            <span className="text-body text-text-tertiary">Route</span>
             <Badge variant="info">{ctx.routeCode}</Badge>
-            <span className="text-sm text-text-tertiary">Date</span>
+            <span className="text-body text-text-tertiary">Date</span>
             <Badge variant="neutral">{ctx.date}</Badge>
             <span
-              className="ml-auto text-sm text-text-tertiary"
+              className="ml-auto text-body text-text-tertiary"
               title="Overall = weighted score. Items matched = share of recommended items bought. Qty accuracy = how close actual quantities were to recommended."
             >
               Overall {ctx.score.score.toFixed(1)}% - Items matched {ctx.score.coverage.toFixed(1)}% - Qty accuracy {ctx.score.accuracy.toFixed(1)}%
@@ -74,7 +74,7 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
           </div>
 
           {typeof a.performance_summary === "string" && a.performance_summary && (
-            <div className="bg-surface-sunken rounded-lg border border-subtle px-4 py-3 text-sm text-text-secondary leading-relaxed">
+            <div className="bg-surface-sunken rounded-lg border border-subtle px-4 py-3 text-body text-text-secondary leading-relaxed">
               {String(a.performance_summary)}
             </div>
           )}

@@ -26,6 +26,7 @@ interface BarChartProps {
   title?: string;
   emptyMessage?: string;
   onBarClick?: (payload: Record<string, unknown>) => void;
+  loading?: boolean;
 }
 
 export default function BarChart({
@@ -37,7 +38,19 @@ export default function BarChart({
   title,
   emptyMessage = "No data",
   onBarClick,
+  loading = false,
 }: BarChartProps) {
+  if (loading) {
+    return (
+      <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
+        {title && (
+          <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
+        )}
+        <div className="animate-pulse bg-surface-sunken rounded-lg" style={{ height }} />
+      </div>
+    );
+  }
+
   return (
     <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
       {title && (

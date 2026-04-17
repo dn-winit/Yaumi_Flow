@@ -47,7 +47,7 @@ export default function VanLoadSummary({ rows, lastForecastDate }: Props) {
   return (
     <div className="space-y-2">
       {lastForecastDate && (
-        <p className="text-xs text-text-tertiary">
+        <p className="text-caption text-text-tertiary">
           Recommendations available through <span className="font-medium text-text-secondary">{lastForecastDate}</span>
         </p>
       )}

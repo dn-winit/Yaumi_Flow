@@ -65,7 +65,7 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
       <DatePicker label="Date" value={date} onChange={setDate} className="min-w-[180px]" />
 
       <div className="flex flex-col gap-1">
-        <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
+        <label className="text-caption font-medium text-text-tertiary uppercase tracking-wider">
           SKUs
         </label>
         <Button
@@ -101,7 +101,7 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
         size="lg"
       >
         <div className="space-y-3">
-          <div className="flex items-center justify-between text-sm">
+          <div className="flex items-center justify-between text-body">
             <span className="text-text-tertiary">
               {draftItems.length} of {sortedItems.length} selected
             </span>
@@ -114,7 +114,7 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
               </button>
               <button
                 onClick={() => setDraftItems([])}
-                className="text-text-tertiary hover:text-text-secondary text-xs font-medium"
+                className="text-text-tertiary hover:text-text-secondary text-caption font-medium"
               >
                 Clear
               </button>
@@ -122,7 +122,7 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
           </div>
           <div className="max-h-96 overflow-auto border border-default rounded-lg divide-y divide-subtle">
             {sortedItems.length === 0 ? (
-              <p className="text-sm text-text-tertiary p-4 text-center">
+              <p className="text-body text-text-tertiary p-4 text-center">
                 No items available for this route/date.
               </p>
             ) : (
@@ -137,7 +137,7 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
                     onChange={() => toggleDraft(item)}
                     className="rounded border-strong text-brand-600 focus:ring-brand-500"
                   />
-                  <span className="text-sm text-text-secondary">{item}</span>
+                  <span className="text-body text-text-secondary">{item}</span>
                 </label>
               ))
             )}

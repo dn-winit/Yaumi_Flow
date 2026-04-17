@@ -15,6 +15,7 @@ from llm_analytics.api.schemas import (
     HealthResponse,
     LlmSummaryResponse,
     PlanningAnalysisRequest,
+    PreVisitRequest,
     RouteAnalysisRequest,
 )
 from llm_analytics.core.analyzer import Analyzer
@@ -70,6 +71,25 @@ def analyze_route(
     )
 
     return AnalysisResponse(success=True, analysis_type="route", data=result)
+
+
+# ------------------------------------------------------------------
+# Pre-visit briefing
+# ------------------------------------------------------------------
+
+@router.post("/analyze/pre-visit", response_model=AnalysisResponse)
+def pre_visit_briefing(
+    req: PreVisitRequest,
+    analyzer: Analyzer = Depends(get_analyzer),
+):
+    result = analyzer.pre_visit_briefing(
+        customer_code=req.customer_code,
+        customer_name=req.customer_name,
+        route_code=req.route_code,
+        date=req.date,
+        items=req.items,
+    )
+    return AnalysisResponse(success=True, analysis_type="pre_visit", data=result)
 
 
 # ------------------------------------------------------------------

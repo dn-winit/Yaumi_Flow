@@ -36,7 +36,7 @@ export default function ReviewTab() {
       {loading && <Loading message="Loading session details..." />}
 
       {error && (
-        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-sm text-danger-700">
+        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
           {error}
         </div>
       )}

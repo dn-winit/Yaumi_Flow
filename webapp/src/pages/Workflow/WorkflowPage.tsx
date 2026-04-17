@@ -44,7 +44,7 @@ function WorkflowTabs() {
                 <span className="ml-2 text-caption text-text-tertiary">[{i + 1}]</span>
               </NavLink>
               {!isLast && (
-                <span className="text-text-tertiary shrink-0 mx-1 text-sm" aria-hidden>→</span>
+                <span className="text-text-tertiary shrink-0 mx-1 text-body" aria-hidden>→</span>
               )}
             </React.Fragment>
           );

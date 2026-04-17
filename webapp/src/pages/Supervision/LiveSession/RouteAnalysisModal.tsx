@@ -61,13 +61,13 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
           <div className="flex flex-wrap items-center gap-3 pb-3 border-b border-subtle">
             <Badge variant="info">Route {ctx.routeCode}</Badge>
             <Badge variant="neutral">{ctx.date}</Badge>
-            <span className="ml-auto text-sm text-text-tertiary">
+            <span className="ml-auto text-body text-text-tertiary">
               {ctx.visitedCustomers.length} / {ctx.totalCustomers} visited - Actual {ctx.totalActual} / {ctx.totalRecommended}
             </span>
           </div>
 
           {typeof a.route_summary === "string" && a.route_summary && (
-            <div className="bg-surface-sunken rounded-lg border border-subtle px-4 py-3 text-sm text-text-secondary leading-relaxed">
+            <div className="bg-surface-sunken rounded-lg border border-subtle px-4 py-3 text-body text-text-secondary leading-relaxed">
               {String(a.route_summary)}
             </div>
           )}

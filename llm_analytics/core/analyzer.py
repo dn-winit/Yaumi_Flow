@@ -15,7 +15,7 @@ from llm_analytics.core.client import LLMClient
 from llm_analytics.core.formatter import DataFormatter
 from llm_analytics.core.prompt_loader import PromptLoader
 from llm_analytics.core.validator import sanitize_customer_codes
-from llm_analytics.models.schemas import CustomerAnalysis, RouteAnalysis, PlanningInsights
+from llm_analytics.models.schemas import CustomerAnalysis, PreVisitBriefing, RouteAnalysis, PlanningInsights
 from llm_analytics.services.cache import LLMCache
 from llm_analytics.services.rate_limiter import RateLimiter
 
@@ -166,6 +166,95 @@ class Analyzer:
 
         result = self._call_with_retry(system, user, PlanningInsights, "planning_analysis")
         self._cache.set("planning_analysis", result, **cache_kwargs)
+        return result
+
+    # ------------------------------------------------------------------
+    # Pre-visit briefing
+    # ------------------------------------------------------------------
+
+    def pre_visit_briefing(
+        self,
+        customer_code: str,
+        customer_name: str,
+        route_code: str,
+        date: str,
+        items: List[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        cache_kwargs = dict(customer_code=customer_code, route_code=route_code, date=date, analysis_type="pre_visit")
+        cached = self._cache.get("pre_visit_briefing", **cache_kwargs)
+        if cached:
+            return cached
+
+        if not self._limiter.acquire():
+            return self._fallback("pre_visit", customer_code=customer_code, reason="Rate limit exceeded")
+
+        # Build a rich items table with all explainability fields so the LLM
+        # can weave cycle days, frequency, trend, and reasoning into the briefing.
+        def _get(d: Dict, *keys: str, default: Any = "") -> Any:
+            for k in keys:
+                v = d.get(k)
+                if v is not None:
+                    return v
+            return default
+
+        lines = []
+        total_qty = 0
+        for it in items:
+            qty = int(_get(it, "recommendedQty", "RecommendedQuantity", default=0))
+            total_qty += qty
+            cycle = _get(it, "purchaseCycleDays", "PurchaseCycleDays")
+            days_since = _get(it, "daysSinceLastPurchase", "DaysSinceLastPurchase")
+            freq = _get(it, "frequencyPercent", "FrequencyPercent")
+            trend = _get(it, "trendFactor", "TrendFactor")
+            why_item = _get(it, "whyItem", "WhyItem")
+            why_qty = _get(it, "whyQuantity", "WhyQuantity")
+
+            parts = [
+                f"  Item: {_get(it, 'itemCode', 'ItemCode', default='?')} — {_get(it, 'itemName', 'ItemName')}",
+                f"  Recommended qty: {qty} | Tier: {_get(it, 'tier', 'Tier')} | Source: {_get(it, 'source', 'Source')}",
+            ]
+            facts = []
+            if cycle:
+                facts.append(f"buys every {cycle} days")
+            if days_since:
+                facts.append(f"last bought {days_since} days ago")
+            if freq:
+                facts.append(f"buys this on {freq}% of visits")
+            if trend and str(trend) != "1.0":
+                facts.append(f"trend factor {trend}")
+            if facts:
+                parts.append(f"  Facts: {', '.join(facts)}")
+            if why_item:
+                parts.append(f"  Why recommended: {why_item}")
+            if why_qty:
+                parts.append(f"  Why this quantity: {why_qty}")
+            lines.append("\n".join(parts))
+        items_table = "\n\n".join(lines) if lines else "No items"
+
+        # Customer-level context summary
+        context_parts = []
+        for it in items:
+            why = _get(it, "whyItem", "WhyItem")
+            if why:
+                context_parts.append(f"- {_get(it, 'itemCode', 'ItemCode')}: {why}")
+        customer_context = "\n".join(context_parts) if context_parts else "No additional context"
+
+        system = self._prompts.get_system_prompt("pre_visit_briefing")
+        user = self._prompts.render(
+            "pre_visit_briefing", "pre_visit_template",
+            customer_code=customer_code,
+            customer_name=customer_name or customer_code,
+            route_code=route_code,
+            date=date,
+            item_count=len(items),
+            total_qty=total_qty,
+            items_table=items_table,
+            customer_context=customer_context,
+        )
+
+        result = self._call_with_retry(system, user, PreVisitBriefing, "pre_visit_briefing")
+        result["customer_code"] = customer_code
+        self._cache.set("pre_visit_briefing", result, **cache_kwargs)
         return result
 
     # ------------------------------------------------------------------

@@ -49,7 +49,7 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
       value={
         <>
           {w.avg.toFixed(1)}
-          <span className="text-xs font-normal text-text-tertiary"> /day</span>
+          <span className="text-caption font-normal text-text-tertiary"> /day</span>
         </>
       }
       hint={`${w.active_days} selling days out of ${w.days} · total ${w.total.toFixed(0)} units`}
@@ -93,7 +93,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           <SectionTitle>
             Forecast
             {cls && (
-              <Badge tone={patternTone(cls)} className="ml-2 text-[10px]">
+              <Badge tone={patternTone(cls)} className="ml-2 text-caption">
                 {cls} — {classDesc(cls)}
               </Badge>
             )}
@@ -160,7 +160,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
             Demand history
           </SectionTitle>
           {stats.data?.available === false ? (
-            <div className="text-sm text-text-tertiary bg-surface-sunken rounded-lg px-3 py-2 border border-subtle">
+            <div className="text-body text-text-tertiary bg-surface-sunken rounded-lg px-3 py-2 border border-subtle">
               {stats.data.message ?? "No historical sales for this item"}
             </div>
           ) : (

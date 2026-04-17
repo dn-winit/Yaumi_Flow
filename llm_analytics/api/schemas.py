@@ -35,6 +35,14 @@ class RouteAnalysisRequest(BaseModel):
     actual_customer_codes: Optional[List[str]] = None
 
 
+class PreVisitRequest(BaseModel):
+    customer_code: str
+    customer_name: str = ""
+    route_code: str
+    date: str
+    items: List[Dict[str, Any]] = Field(description="Recommendation items with qty, tier, source, whyItem")
+
+
 class PlanningAnalysisRequest(BaseModel):
     route_code: str
     date: str

@@ -33,6 +33,7 @@ const sizeClasses: Record<ButtonSize, string> = {
 
 const Spinner = () => (
   <svg
+    aria-hidden="true"
     className="animate-spin -ml-1 mr-2 h-4 w-4 text-current"
     xmlns="http://www.w3.org/2000/svg"
     fill="none"
@@ -72,7 +73,7 @@ export default function Button({
       onClick={onClick}
       disabled={isDisabled}
       className={[
-        "inline-flex items-center justify-center rounded-lg font-medium transition-all duration-base focus:outline-none focus:ring-2 focus:ring-offset-2",
+        "inline-flex items-center justify-center rounded-lg font-medium transition-all duration-base active:scale-[0.98] focus:outline-none focus:ring-2 focus:ring-offset-2",
         variantClasses[variant],
         sizeClasses[size],
         isDisabled ? "opacity-50 cursor-not-allowed" : "cursor-pointer",

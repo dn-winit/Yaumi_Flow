@@ -164,7 +164,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           dateRange={windowLabel}
           extra={
             s ? (
-              <span className="text-xs text-text-tertiary">
+              <span className="text-caption text-text-tertiary">
                 {fmtNum(s.rows_recommended)} recommendations reviewed
               </span>
             ) : null
@@ -269,11 +269,11 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                         >
                           <div className="flex items-center justify-between">
                             <Badge variant="info">{t.tier}</Badge>
-                            <span className="text-sm font-semibold text-text-primary">
+                            <span className="text-body font-semibold text-text-primary">
                               {t.adoption_pct.toFixed(1)}%
                             </span>
                           </div>
-                          <div className="mt-1 text-[11px] text-text-tertiary">
+                          <div className="mt-1 text-caption text-text-tertiary">
                             {fmtNum(t.adopted)} of {fmtNum(t.recommended)} sold
                           </div>
                         </div>

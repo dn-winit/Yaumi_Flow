@@ -25,7 +25,7 @@ export default function Select({
   return (
     <div className={`flex flex-col gap-1 ${className}`}>
       {label && (
-        <label className="text-xs font-medium text-text-tertiary uppercase tracking-wider">
+        <label className="text-caption font-medium text-text-tertiary uppercase tracking-wider">
           {label}
         </label>
       )}

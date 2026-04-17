@@ -12,7 +12,7 @@ interface ContextStripProps {
 
 export default function ContextStrip({ items, actions }: ContextStripProps) {
   return (
-    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 bg-gradient-to-r from-brand-50 to-info-50 border border-brand-100 rounded-xl px-5 py-3 text-sm">
+    <div className="flex flex-wrap items-center gap-x-4 gap-y-2 bg-gradient-to-r from-brand-50 to-info-50 border border-brand-100 rounded-xl px-5 py-3 text-body">
       {items.map((item, idx) => (
         <Fragment key={`${item.label}-${idx}`}>
           {idx > 0 && <span className="text-neutral-300">|</span>}

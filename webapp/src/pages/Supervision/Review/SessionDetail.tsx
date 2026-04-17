@@ -33,13 +33,13 @@ const ANALYSIS_SECTIONS: { key: string; title: string; tone: string }[] = [
 function renderValue(value: unknown): React.ReactNode {
   if (value === null || value === undefined) return null;
   if (typeof value === "string") {
-    return <p className="text-sm text-text-secondary whitespace-pre-wrap">{value}</p>;
+    return <p className="text-body text-text-secondary whitespace-pre-wrap">{value}</p>;
   }
   if (Array.isArray(value)) {
     return (
       <ul className="list-disc ml-5 space-y-1">
         {value.map((v, i) => (
-          <li key={i} className="text-sm text-text-secondary">
+          <li key={i} className="text-body text-text-secondary">
             {typeof v === "string" ? v : JSON.stringify(v)}
           </li>
         ))}
@@ -48,12 +48,12 @@ function renderValue(value: unknown): React.ReactNode {
   }
   if (typeof value === "object") {
     return (
-      <pre className="text-xs text-text-secondary whitespace-pre-wrap font-mono">
+      <pre className="text-caption text-text-secondary whitespace-pre-wrap font-mono">
         {JSON.stringify(value, null, 2)}
       </pre>
     );
   }
-  return <p className="text-sm text-text-secondary">{String(value)}</p>;
+  return <p className="text-body text-text-secondary">{String(value)}</p>;
 }
 
 function AnalysisView({
@@ -68,7 +68,7 @@ function AnalysisView({
   if (loading) return <Loading message="Running AI analysis..." />;
   if (error) {
     return (
-      <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-sm text-danger-700">
+      <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
         {error}
       </div>
     );
@@ -89,7 +89,7 @@ function AnalysisView({
             key={section.key}
             className={`rounded-lg border p-4 ${section.tone}`}
           >
-            <h4 className="text-sm font-semibold text-text-primary mb-2">
+            <h4 className="text-body font-semibold text-text-primary mb-2">
               {section.title}
             </h4>
             {renderValue(value)}
@@ -101,14 +101,14 @@ function AnalysisView({
           key={key}
           className="rounded-lg border border-default bg-surface-sunken p-4"
         >
-          <h4 className="text-sm font-semibold text-text-primary mb-2 capitalize">
+          <h4 className="text-body font-semibold text-text-primary mb-2 capitalize">
             {key.replace(/_/g, " ")}
           </h4>
           {renderValue(data[key])}
         </div>
       ))}
       {result.cached && (
-        <p className="text-xs text-text-tertiary italic">Cached result</p>
+        <p className="text-caption text-text-tertiary italic">Cached result</p>
       )}
     </div>
   );
@@ -162,6 +162,7 @@ export default function SessionDetail({ session }: SessionDetailProps) {
     {
       key: "score",
       label: "Score",
+      sortable: true,
       render: (row: Record<string, unknown>) => {
         const s = row.score as Record<string, unknown> | number | undefined;
         if (typeof s === "number") return `${(s * 100).toFixed(1)}%`;

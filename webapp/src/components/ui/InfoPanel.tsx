@@ -21,7 +21,7 @@ export function InfoButton({ onClick }: { onClick: () => void }) {
       title="How this works"
       aria-label="How this works"
     >
-      <span className="text-xs font-semibold leading-none">i</span>
+      <span className="text-caption font-semibold leading-none">i</span>
     </button>
   );
 }
@@ -44,7 +44,7 @@ export default function InfoPanel({ title, subtitle, steps }: InfoPanelProps) {
                   {!isLast && (
                     <div className="absolute left-[-21px] top-4 bottom-0 w-px bg-brand-100" />
                   )}
-                  <div className="absolute left-[-25px] top-0.5 flex items-center justify-center w-[18px] h-[18px] rounded-full bg-brand-600 text-white text-[10px] font-bold leading-none">
+                  <div className="absolute left-[-25px] top-0.5 flex items-center justify-center w-[18px] h-[18px] rounded-full bg-brand-600 text-white text-caption font-bold leading-none">
                     {i + 1}
                   </div>
                   <div>
@@ -57,7 +57,7 @@ export default function InfoPanel({ title, subtitle, steps }: InfoPanelProps) {
                         {step.highlights.map((h) => (
                           <span
                             key={h}
-                            className="inline-block text-[11px] px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-100"
+                            className="inline-block text-caption px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-100"
                           >
                             {h}
                           </span>

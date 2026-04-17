@@ -130,6 +130,14 @@
   --sidebar-width: 240px;
 }
 
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(4px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.animate-fadeIn {
+  animation: fadeIn 150ms ease-out;
+}
+
 html {
   font-family: var(--font-family-sans);
   color: var(--color-text-primary);
