@@ -12,11 +12,11 @@ export function useOrdersSummary() {
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useFilterOptions() {
+export function useFilterOptions(date?: string) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["orders-filter-options"],
-    queryFn: () => recommendedOrderApi.getFilterOptions(),
-    ...tier("static"),
+    queryKey: ["orders-filter-options", date ?? ""],
+    queryFn: () => recommendedOrderApi.getFilterOptions(date),
+    ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }

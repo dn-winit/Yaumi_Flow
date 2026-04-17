@@ -31,15 +31,54 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # Pre-warm EDA aggregations so the first dashboard request is instant
         # (otherwise the user pays for the 50MB CSV parse on initial load).
         try:
-            from data_import.api.dependencies import get_eda_service
+            from data_import.api.dependencies import get_eda_service, get_importer
             import threading
-            def _warm() -> None:
+            from datetime import datetime
+            from pathlib import Path
+
+            def _startup_refresh() -> None:
+                """Check CSV freshness on boot. If any dataset is stale (max
+                date < today), run a full import before warming the EDA cache.
+                This covers the case where the server was down overnight and
+                the scheduled cron missed its window. Runs off the request
+                path so startup isn't blocked."""
+                try:
+                    importer = get_importer()
+                    today = datetime.now().strftime("%Y-%m-%d")
+
+                    # Quick freshness check: peek at the most recent date in
+                    # sales_recent.csv (the fastest-changing dataset).
+                    sales_csv = Path(settings.data_dir) / "sales_recent.csv"
+                    stale = True
+                    if sales_csv.exists():
+                        import pandas as pd
+                        try:
+                            df = pd.read_csv(sales_csv, usecols=["TrxDate"], nrows=0)
+                            # Read last 100 rows for max date (cheaper than full scan)
+                            tail = pd.read_csv(sales_csv, usecols=["TrxDate"]).tail(500)
+                            max_date = str(tail["TrxDate"].max()).strip()[:10]
+                            # Stale if max date is more than 1 day behind today
+                            stale = max_date < today
+                            _logger.info("Sales CSV max date: %s, today: %s, stale: %s", max_date, today, stale)
+                        except Exception as exc:
+                            _logger.warning("CSV freshness check failed, assuming stale: %s", exc)
+
+                    if stale:
+                        _logger.info("Data is stale — running full import on startup")
+                        results = importer.import_all("full")
+                        new_rows = sum(r.get("new_rows", 0) for r in results.values())
+                        _logger.info("Startup import complete: %d new rows across all datasets", new_rows)
+                    else:
+                        _logger.info("Data is fresh — skipping startup import")
+
+                except Exception as exc:
+                    _logger.warning("Startup data refresh failed: %s", exc)
+
+                # Warm the EDA cache (always, regardless of import)
                 try:
                     svc = get_eda_service()
-                    # Dashboard-critical aggregates -- pay the cold cost here so
-                    # the first browser hit is served from cache. Any exception
-                    # in an individual aggregate is logged and skipped so a
-                    # single slow query can't block the rest.
+                    if stale:
+                        svc.invalidate()
                     for label, fn in (
                         ("sales_overview", svc.get_sales_overview),
                         ("item_catalog", svc.get_item_catalog),
@@ -53,10 +92,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     _logger.info("EDA cache warmed")
                 except Exception as exc:
                     _logger.warning("EDA warm-up skipped: %s", exc)
-            # Off the request path so startup isn't blocked.
-            threading.Thread(target=_warm, daemon=True, name="eda-warmup").start()
+
+            threading.Thread(target=_startup_refresh, daemon=True, name="startup-refresh").start()
         except Exception as exc:
-            _logger.warning("EDA warm-up scheduling failed: %s", exc)
+            _logger.warning("Startup refresh scheduling failed: %s", exc)
 
         sched = None
         if settings.scheduler_enabled:

@@ -73,6 +73,7 @@ export interface GenerationInfoResponse {
 
 export interface FilterOptionsResponse {
   routes: string[];
+  journey_counts: Record<string, number>;
 }
 
 export interface OrderHealthResponse {

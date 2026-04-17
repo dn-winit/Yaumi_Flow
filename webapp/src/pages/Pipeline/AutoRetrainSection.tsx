@@ -165,7 +165,15 @@ export default function AutoRetrainSection() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Drift status */}
           <div>
-            <span className="text-caption text-text-tertiary block mb-1">Drift status</span>
+            <span className="text-caption text-text-tertiary flex items-center gap-1 mb-1">
+              Drift status
+              <span
+                className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-default text-[9px] font-semibold text-text-tertiary cursor-help"
+                title="Monitors how well predictions match real sales over the last 7 days. If performance drops, you'll see a warning here."
+              >
+                i
+              </span>
+            </span>
             {drift ? (
               <Badge tone={driftTone(drift.status)}>{driftLabel(drift.status)}</Badge>
             ) : configLoading ? (
@@ -177,15 +185,21 @@ export default function AutoRetrainSection() {
 
           {/* Recent vs baseline accuracy */}
           <div>
-            <span className="text-caption text-text-tertiary block mb-1">
+            <span className="text-caption text-text-tertiary flex items-center gap-1 mb-1">
               Recent accuracy
+              <span
+                className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-default text-[9px] font-semibold text-text-tertiary cursor-help"
+                title="How closely our predictions matched what customers actually bought in the last 7 days, compared to the accuracy when the model was trained."
+              >
+                i
+              </span>
             </span>
             <span className="text-body font-semibold text-text-primary">
               {fmtPct(drift?.recent_accuracy ?? null)}
             </span>
             {drift?.baseline_accuracy != null && (
               <span className="text-caption text-text-tertiary ml-2">
-                Baseline: {fmtPct(drift.baseline_accuracy)}
+                vs {fmtPct(drift.baseline_accuracy)} at training
               </span>
             )}
             {drift?.delta != null && (

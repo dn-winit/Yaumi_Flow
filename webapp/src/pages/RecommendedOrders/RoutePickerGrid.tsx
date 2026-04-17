@@ -7,6 +7,7 @@ interface Props {
   date: string;
   routes: string[];
   routeStats?: Record<string, { customers: number; skus: number; totalQty: number }>;
+  journeyCounts?: Record<string, number>;
   onRouteSelect: (routeCode: string) => void;
   onGenerated?: () => void;
 }
@@ -15,6 +16,7 @@ export default function RoutePickerGrid({
   date,
   routes,
   routeStats,
+  journeyCounts,
   onRouteSelect,
   onGenerated,
 }: Props) {
@@ -30,19 +32,36 @@ export default function RoutePickerGrid({
   };
 
   // Shape order-specific stats into the generic RouteStat contract.
+  // Routes with recs show stats; routes with journey but no recs show
+  // "Click to generate"; routes with no journey show "No visits planned".
   const stats = useMemo<Record<string, RouteStat>>(() => {
     const out: Record<string, RouteStat> = {};
-    for (const [code, s] of Object.entries(routeStats ?? {})) {
-      out[code] = {
-        badge: { label: `${s.customers} cust`, variant: "info" },
-        lines: [
-          { label: "SKUs", value: s.skus.toLocaleString() },
-          { label: "Total qty", value: s.totalQty.toLocaleString() },
-        ],
-      };
+    for (const code of routes) {
+      const s = routeStats?.[code];
+      const jc = journeyCounts?.[code] ?? 0;
+
+      if (s) {
+        out[code] = {
+          badge: { label: `${s.customers} cust`, variant: "info" },
+          lines: [
+            { label: "SKUs", value: s.skus.toLocaleString() },
+            { label: "Total qty", value: s.totalQty.toLocaleString() },
+          ],
+        };
+      } else if (jc > 0) {
+        out[code] = {
+          badge: { label: `${jc} planned`, variant: "warning" },
+          lines: [{ label: "", value: "Click to generate" }],
+        };
+      } else {
+        out[code] = {
+          badge: { label: "No visits", variant: "neutral" },
+          lines: [{ label: "", value: "No customers planned today" }],
+        };
+      }
     }
     return out;
-  }, [routeStats]);
+  }, [routes, routeStats, journeyCounts]);
 
   const totals = useMemo(() => {
     const vals = Object.values(routeStats ?? {});

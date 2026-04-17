@@ -126,6 +126,7 @@ class HealthResponse(BaseModel):
 class FilterOptionsResponse(BaseModel):
     routes: List[str]
     dates: List[str] = []
+    journey_counts: Dict[str, int] = {}  # {route: customer_count} for the requested date
 
 
 class RecommendationSummaryResponse(BaseModel):

@@ -18,6 +18,7 @@ from recommended_order.api.dependencies import (
     get_data_manager,
     get_db_pusher,
     get_engine,
+    get_fresh_data_manager,
     get_planning_service,
     get_store,
 )
@@ -106,7 +107,7 @@ def summary(
 
 @router.get("/health", response_model=HealthResponse)
 def health(
-    dm: DataManager = Depends(get_data_manager),
+    dm: DataManager = Depends(get_fresh_data_manager),
     engine: RecommendationEngine = Depends(get_engine),
 ):
     fresh = dm.freshness()
@@ -137,8 +138,18 @@ def metrics_last_generation():
 
 
 @router.get("/filter-options", response_model=FilterOptionsResponse)
-def filter_options(dm: DataManager = Depends(get_data_manager)):
-    return FilterOptionsResponse(routes=dm.get_route_codes())
+def filter_options(
+    date: Optional[str] = Query(None, description="Date to check journey counts for"),
+    dm: DataManager = Depends(get_fresh_data_manager),
+):
+    routes = dm.get_route_codes()
+    journey_counts: Dict[str, int] = {}
+    if date:
+        for rc in routes:
+            custs = dm.get_journey_customers(rc, date)
+            if custs:
+                journey_counts[rc] = len(custs)
+    return FilterOptionsResponse(routes=routes, journey_counts=journey_counts)
 
 
 # ------------------------------------------------------------------
@@ -246,7 +257,7 @@ def _generate_routes(
     """
     t0 = time.time()
 
-    # Sprint-1: ensure CSVs are fresh before doing work (Friday allowed as no-journey)
+    # Ensure CSVs contain data for the target date (Friday allowed as no-journey)
     try:
         dm.assert_fresh(target_date)
     except RuntimeError as exc:
@@ -329,7 +340,7 @@ def _generate_routes(
 @router.post("/generate", response_model=GenerateResponse)
 def generate_recommendations(
     req: GenerateRequest,
-    dm: DataManager = Depends(get_data_manager),
+    dm: DataManager = Depends(get_fresh_data_manager),
     engine: RecommendationEngine = Depends(get_engine),
     store: RecommendationStore = Depends(get_store),
     pusher: DbPusher = Depends(get_db_pusher),
@@ -370,7 +381,7 @@ def generate_recommendations(
 @router.post("/get", response_model=RetrieveResponse)
 def get_recommendations(
     req: RetrieveRequest,
-    dm: DataManager = Depends(get_data_manager),
+    dm: DataManager = Depends(get_fresh_data_manager),
     engine: RecommendationEngine = Depends(get_engine),
     store: RecommendationStore = Depends(get_store),
     pusher: DbPusher = Depends(get_db_pusher),
@@ -493,7 +504,7 @@ def get_recommendations(
 def check_exists(
     req: ExistsRequest,
     store: RecommendationStore = Depends(get_store),
-    dm: DataManager = Depends(get_data_manager),
+    dm: DataManager = Depends(get_fresh_data_manager),
 ):
     routes = req.route_codes or dm.get_route_codes()
     exists_map = store.exists_batch(req.date, routes)

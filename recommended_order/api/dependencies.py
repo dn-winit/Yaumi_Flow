@@ -26,6 +26,15 @@ def get_data_manager() -> DataManager:
     return DataManager(get_settings())
 
 
+def get_fresh_data_manager() -> DataManager:
+    """DataManager with auto-freshness check. Use this for any endpoint that
+    reads journey/customer/demand data so stale CSVs are detected and reloaded
+    before the request is served. The stat check is O(1) per file (~0.001ms)."""
+    dm = get_data_manager()
+    dm.ensure_fresh()
+    return dm
+
+
 @lru_cache(maxsize=1)
 def get_store() -> RecommendationStore:
     return RecommendationStore(get_settings())

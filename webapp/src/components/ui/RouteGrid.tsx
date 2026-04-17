@@ -79,7 +79,7 @@ export default function RouteGrid({
                   ))}
                 </div>
               ) : (
-                <p className="text-sm text-text-tertiary">Click to load</p>
+                <p className="text-sm text-text-tertiary">Loading...</p>
               )}
             </button>
           );

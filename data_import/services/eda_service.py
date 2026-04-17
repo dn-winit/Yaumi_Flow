@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -24,11 +25,13 @@ class EdaService:
 
     # 24h TTL is safe because the importer's scheduler explicitly invalidates
     # the cache after each incremental pull (see data_import.scheduler).
+    _MAX_CACHE_ENTRIES = 2000  # safety cap so per-item keys can't grow unbounded
+
     def __init__(self, settings: Optional[Settings] = None, ttl_seconds: int = 24 * 3600) -> None:
         self._s = settings or get_settings()
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
-        self._cache: Dict[str, tuple[float, Any]] = {}
+        self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
 
     # ------------------------------------------------------------------
     # Cache helpers
@@ -39,10 +42,14 @@ class EdaService:
         with self._lock:
             entry = self._cache.get(key)
             if entry and (now - entry[0]) < self._ttl:
+                self._cache.move_to_end(key)
                 return entry[1]
         value = loader()
         with self._lock:
             self._cache[key] = (now, value)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._MAX_CACHE_ENTRIES:
+                self._cache.popitem(last=False)
         return value
 
     def invalidate(self) -> None:
@@ -216,8 +223,9 @@ class EdaService:
         # Forecast accuracy (7d)
         forecast_accuracy = self._forecast_accuracy_recent(days=7, anchor=anchor)
 
-        # Today's planned operations
-        today_ops = self._today_operations(anchor)
+        # Operations summary — 7-day rolling window matching the other KPIs.
+        # Uses actual current date so it stays fresh regardless of sales lag.
+        today_ops = self._operations_summary(days=7)
 
         return {
             "available": True,
@@ -266,24 +274,34 @@ class EdaService:
             "accuracy_pct": round(max(0.0, 100.0 - wape), 1),
         }
 
-    def _today_operations(self, anchor: pd.Timestamp) -> Dict[str, Any]:
-        """Routes & customers planned for today, from journey_plan.csv."""
+    def _operations_summary(self, days: int = 7) -> Dict[str, Any]:
+        """Routes & customers from the journey plan over a rolling window.
+
+        Uses the actual current date (not the sales anchor) so it stays fresh
+        even when sales data lags. Consistent with the 7-day window used by
+        the other dashboard KPIs.
+        """
         path = self._s.data_path(self._s.journey_plan_file)
         if not path.exists():
             return {"available": False, "message": "journey_plan.csv not found"}
         df = pd.read_csv(path, low_memory=False)
         if df.empty:
-            return {"available": True, "routes": 0, "customers": 0}
+            return {"available": True, "routes": 0, "customers": 0, "days_active": 0}
         date_col = "JourneyDate" if "JourneyDate" in df.columns else "TrxDate"
         if date_col not in df.columns:
             return {"available": False, "message": f"{date_col} missing"}
         df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        today = df[df[date_col].dt.normalize() == anchor.normalize()]
+        now = pd.Timestamp.now().normalize()
+        start = now - pd.Timedelta(days=days - 1)
+        window = df[(df[date_col].dt.normalize() >= start) & (df[date_col].dt.normalize() <= now)]
         return {
             "available": True,
-            "date": anchor.strftime("%Y-%m-%d"),
-            "routes": int(today["RouteCode"].nunique()) if "RouteCode" in today.columns else 0,
-            "customers": int(today["CustomerCode"].nunique()) if "CustomerCode" in today.columns else 0,
+            "window_days": days,
+            "start_date": start.strftime("%Y-%m-%d"),
+            "end_date": now.strftime("%Y-%m-%d"),
+            "routes": int(window["RouteCode"].nunique()) if "RouteCode" in window.columns else 0,
+            "customers": int(window["CustomerCode"].nunique()) if "CustomerCode" in window.columns else 0,
+            "days_active": int(window[date_col].dt.normalize().nunique()),
         }
 
     # ------------------------------------------------------------------
@@ -477,10 +495,14 @@ class EdaService:
         with self._lock:
             entry = self._cache.get(key)
             if entry and (now - entry[0]) < ttl_seconds:
+                self._cache.move_to_end(key)
                 return entry[1]
         value = loader()
         with self._lock:
             self._cache[key] = (now, value)
+            self._cache.move_to_end(key)
+            while len(self._cache) > self._MAX_CACHE_ENTRIES:
+                self._cache.popitem(last=False)
         return value
 
     # ------------------------------------------------------------------

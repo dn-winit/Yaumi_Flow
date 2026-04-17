@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from "@tanstack/react-query";
 import { analyticsApi } from "@/api/analytics";
+import { tier } from "./refresh";
 
 export function useAnalyzeCustomer() {
   const m = useMutation({
@@ -29,6 +30,7 @@ export function useCacheStats() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["cache-stats"],
     queryFn: () => analyticsApi.getCacheStats(),
+    ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }

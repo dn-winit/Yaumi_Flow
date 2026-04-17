@@ -103,9 +103,12 @@ export interface BusinessKpis {
   today_operations?: {
     available: boolean;
     message?: string;
-    date?: string;
+    window_days?: number;
+    start_date?: string;
+    end_date?: string;
     routes?: number;
     customers?: number;
+    days_active?: number;
   };
 }
 

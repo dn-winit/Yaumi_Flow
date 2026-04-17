@@ -22,8 +22,8 @@ export const recommendedOrderApi = {
   getRecommendations: (data: RetrieveRequest) =>
     c().post<RetrieveResponse>("/get", data, { timeout: 180000 }).then((r) => r.data),
 
-  getFilterOptions: () =>
-    c().get<FilterOptionsResponse>("/filter-options").then((r) => r.data),
+  getFilterOptions: (date?: string) =>
+    c().get<FilterOptionsResponse>("/filter-options", { params: date ? { date } : {} }).then((r) => r.data),
 
   getAdoption: (params: { start_date: string; end_date: string; route_code?: string }) =>
     c().get<AdoptionResponse>("/analytics/adoption", { params }).then((r) => r.data),

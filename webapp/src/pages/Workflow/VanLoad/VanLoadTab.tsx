@@ -42,7 +42,7 @@ export default function VanLoadTab() {
 
   // Only fetch the forecast once a route is chosen; the grid itself has no data deps.
   const forecast = useFutureForecast(params, Boolean(routeCode));
-  const filterOpts = useFilterOptions();
+  const filterOpts = useFilterOptions(date);
   const catalog = useItemCatalog();
 
   // Price lookup from catalog (populated from sales_recent.csv)
@@ -127,6 +127,7 @@ export default function VanLoadTab() {
         <VanLoadFilters availableItems={[]} routeCode={routeCode} setRouteCode={setRouteCode} />
         <VanLoadRouteGrid
           routes={filterOpts.data?.routes ?? []}
+          journeyCounts={filterOpts.data?.journey_counts}
           loading={filterOpts.loading}
           date={date}
           onSelect={setRouteCode}
@@ -229,11 +230,13 @@ export default function VanLoadTab() {
  */
 function VanLoadRouteGrid({
   routes,
+  journeyCounts,
   loading,
   date,
   onSelect,
 }: {
   routes: string[];
+  journeyCounts?: Record<string, number>;
   loading: boolean;
   date: string;
   onSelect: (route: string) => void;
@@ -241,14 +244,35 @@ function VanLoadRouteGrid({
   const summaryQ = useForecastRouteSummary(date);
   const stats = useMemo<Record<string, RouteStat>>(() => {
     const out: Record<string, RouteStat> = {};
+    const forecastByRoute: Record<string, { skus: number; qty: number }> = {};
     for (const r of summaryQ.data?.routes ?? []) {
-      out[r.route_code] = {
-        badge: { label: `${r.skus} items`, variant: "info" },
-        lines: [{ label: "Van load", value: r.predicted_qty.toLocaleString() }],
-      };
+      forecastByRoute[r.route_code] = { skus: r.skus, qty: r.predicted_qty };
+    }
+    for (const code of routes) {
+      const f = forecastByRoute[code];
+      const jc = journeyCounts?.[code] ?? 0;
+      if (jc > 0 && f) {
+        out[code] = {
+          badge: { label: `${jc} customers`, variant: "info" },
+          lines: [
+            { label: "Items", value: String(f.skus) },
+            { label: "Van load", value: f.qty.toLocaleString() },
+          ],
+        };
+      } else if (jc > 0) {
+        out[code] = {
+          badge: { label: `${jc} planned`, variant: "warning" },
+          lines: [{ label: "", value: "No forecast yet" }],
+        };
+      } else {
+        out[code] = {
+          badge: { label: "No visits", variant: "neutral" },
+          lines: [{ label: "", value: "No customers planned today" }],
+        };
+      }
     }
     return out;
-  }, [summaryQ.data]);
+  }, [routes, summaryQ.data, journeyCounts]);
 
   if (loading || summaryQ.loading) {
     return <Loading message="Loading routes..." />;

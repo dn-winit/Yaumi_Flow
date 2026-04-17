@@ -22,7 +22,7 @@ export default function OrdersTab() {
   // starts at the route-picker grid.
   const [routeCode, setRouteCode] = useState("");
 
-  const { data: filterOptions, loading: optionsLoading } = useFilterOptions();
+  const { data: filterOptions, loading: optionsLoading } = useFilterOptions(date);
 
   const params = useMemo(
     () => ({ date, route_code: routeCode || undefined, limit: 5000, offset: 0 }),
@@ -91,6 +91,7 @@ export default function OrdersTab() {
           date={date}
           routes={routes}
           routeStats={routeStats}
+          journeyCounts={filterOptions?.journey_counts}
           onRouteSelect={setRouteCode}
           onGenerated={refetchRecs}
         />

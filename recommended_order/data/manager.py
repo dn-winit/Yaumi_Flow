@@ -28,7 +28,11 @@ logger = logging.getLogger(__name__)
 
 
 class DataManager:
-    """Loads data from databases and caches in memory for fast access."""
+    """Loads data from shared CSVs and caches in memory for fast access.
+
+    Watches CSV modification times so it auto-reloads when data_import writes
+    newer files — no manual refresh needed, no race conditions on startup.
+    """
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
@@ -37,6 +41,7 @@ class DataManager:
         self._customer_df: Optional[pd.DataFrame] = None
         self._journey_df: Optional[pd.DataFrame] = None
         self._last_refresh: Optional[datetime] = None
+        self._csv_mtimes: Dict[str, float] = {}
         self._lock = threading.Lock()
 
         self._meta_path = Path(self._settings.shared_data_dir) / ".ro_manager_meta.json"
@@ -60,10 +65,28 @@ class DataManager:
         """Re-read from shared CSVs (call after data_import has refreshed them)."""
         return self._load_from_shared_csvs()
 
-    def refresh_incremental(self) -> Dict[str, Any]:
-        """Re-read shared CSVs. Incremental semantics are owned by data_import;
-        here we just reload what's already on disk."""
-        return self._load_from_shared_csvs()
+    def ensure_fresh(self) -> None:
+        """Auto-reload if any source CSV was modified since the last load.
+
+        Called before every generation run so the engine always works with
+        current data — even if data_import's startup import finished after
+        this service booted. The mtime check is O(1) per file (stat call
+        only, no read) so calling it on every request is cheap.
+        """
+        loaders = {
+            "demand":   self._settings.demand_forecast_file,
+            "customer": self._settings.customer_data_file,
+            "journey":  self._settings.journey_plan_file,
+        }
+        for name, filename in loaders.items():
+            path = Path(self._settings.shared_data_dir) / filename
+            if not path.exists():
+                continue
+            current_mtime = path.stat().st_mtime
+            if current_mtime != self._csv_mtimes.get(name, 0):
+                logger.info("CSV changed on disk (%s) — auto-reloading all data", name)
+                self._load_from_shared_csvs()
+                return
 
     def _load_from_shared_csvs(self) -> Dict[str, Any]:
         """Load demand / customer / journey from shared ``data/`` CSVs."""
@@ -110,6 +133,7 @@ class DataManager:
 
                 with self._lock:
                     setattr(self, f"_{attr}", df)
+                    self._csv_mtimes[name] = path.stat().st_mtime
                 results[name] = len(df)
                 logger.info("Loaded %s: %d rows from %s", name, len(df), path.name)
             except Exception as exc:

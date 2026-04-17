@@ -9,12 +9,11 @@ import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
 import BarChart from "@/components/charts/BarChart";
 import PieChart from "@/components/charts/PieChart";
-
-import ServiceHealthCard from "./ServiceHealthCard";
-import { useHealth } from "@/hooks/useHealth";
 import { useSalesOverview, useCustomerOverview, useBusinessKpis } from "@/hooks/useDataImport";
+import { useRetrainConfig } from "@/hooks/useForecast";
 import { fmtNum, fmtCurrency, fmtDelta, GOOD_SCORE_THRESHOLD } from "@/lib/format";
 import type { BusinessKpis } from "@/types/data-import";
+import type { DriftStatus } from "@/types/forecast";
 
 const CUSTOMER_LOOKBACK_DAYS = 90;
 
@@ -24,10 +23,13 @@ function toneToTrend(tone: "up" | "down" | "flat"): "up" | "down" | undefined {
   return undefined;
 }
 
-function DashboardKpis({ k }: { k: BusinessKpis | null }) {
+function DashboardKpis({ k, drift }: { k: BusinessKpis | null; drift?: DriftStatus | null }) {
   const yDelta = fmtDelta(k?.yesterday?.delta_pct_vs_last_week);
   const wDelta = fmtDelta(k?.last_7_days?.delta_pct_vs_prior_7d);
-  const accuracy = k?.forecast_accuracy_7d?.accuracy_pct;
+  // Use live accuracy from drift detection (same source as Pipeline page)
+  // so the number is consistent everywhere. Falls back to CSV-based accuracy
+  // when the forecast service is unavailable.
+  const accuracy = drift?.recent_accuracy ?? k?.forecast_accuracy_7d?.accuracy_pct ?? null;
   const ops = k?.today_operations;
 
   return (
@@ -48,26 +50,26 @@ function DashboardKpis({ k }: { k: BusinessKpis | null }) {
         label="Forecast accuracy (7d)"
         value={accuracy != null ? `${accuracy.toFixed(1)}%` : "--"}
         subtitle={
-          k?.forecast_accuracy_7d?.rows_compared
-            ? `${fmtNum(k.forecast_accuracy_7d.rows_compared)} recommendations checked`
-            : "nothing to compare yet"
+          drift?.baseline_accuracy != null
+            ? `vs ${drift.baseline_accuracy.toFixed(1)}% at training`
+            : "live predictions vs actual sales"
         }
         trend={accuracy != null && accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down"}
       />
       <MetricCard
-        label="Today's operations"
+        label="Operations (7d)"
         value={`${ops?.routes ?? 0} routes`}
-        subtitle={`${fmtNum(ops?.customers)} customers planned`}
+        subtitle={`${fmtNum(ops?.customers)} customers · ${ops?.days_active ?? 0} active days`}
       />
     </KpiRow>
   );
 }
 
 export default function DashboardPage() {
-  const health = useHealth();
   const sales = useSalesOverview();
   const customers = useCustomerOverview(CUSTOMER_LOOKBACK_DAYS);
   const kpis = useBusinessKpis();
+  const { data: retrainConfig } = useRetrainConfig();
 
   const salesData = sales.data?.available ? sales.data : null;
   const customerData = customers.data?.available ? customers.data : null;
@@ -77,7 +79,6 @@ export default function DashboardPage() {
     sales.refetch();
     customers.refetch();
     kpis.refetch();
-    health.refetch();
   };
 
   return (
@@ -86,7 +87,7 @@ export default function DashboardPage() {
         title="Dashboard"
         subtitle={
           k?.anchor_date
-            ? `Operations pulse - data through ${k.anchor_date}`
+            ? `Operations pulse — data through ${k.anchor_date}`
             : "Operations pulse"
         }
         actions={
@@ -96,7 +97,7 @@ export default function DashboardPage() {
         }
       />
 
-      {kpis.loading ? <Loading message="Loading KPIs..." /> : <DashboardKpis k={k} />}
+      {kpis.loading ? <Loading message="Loading KPIs..." /> : <DashboardKpis k={k} drift={retrainConfig?.drift} />}
 
       <Card title="Daily Sales Trend (last 90 days)">
         {sales.loading ? (
@@ -210,32 +211,6 @@ export default function DashboardPage() {
           />
         </Card>
       )}
-
-      <Card
-        title="Service Health"
-        actions={
-          <span className="text-sm text-text-tertiary">
-            {health.loading
-              ? "Checking..."
-              : `${health.services.filter((s) => s.ok).length}/${health.services.length} up`}
-          </span>
-        }
-      >
-        {health.loading ? (
-          <Loading message="Checking services..." />
-        ) : (
-          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-3">
-            {health.services.map((s) => (
-              <ServiceHealthCard
-                key={s.service}
-                service={s.service}
-                status={s.status}
-                ok={s.ok}
-              />
-            ))}
-          </div>
-        )}
-      </Card>
     </div>
   );
 }
