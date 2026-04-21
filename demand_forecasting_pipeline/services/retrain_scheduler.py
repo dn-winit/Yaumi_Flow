@@ -18,6 +18,7 @@ import numpy as np
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
+from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
 
 logger = logging.getLogger(__name__)
 
@@ -278,12 +279,8 @@ def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
             actual = actual[mask]
             pred = pred[mask]
 
-    scored = actual > 0
-    total_actual = float(actual[scored].sum())
-    if total_actual <= 0:
-        return None
-    total_err = float((actual[scored] - pred[scored]).abs().sum())
-    return round(max(0.0, 100.0 - (total_err / total_actual) * 100), 2)
+    stats = wape_summary(actual.to_numpy(), pred.to_numpy())
+    return stats["accuracy_pct"] if stats["rows_compared"] > 0 else None
 
 
 # ---------------------------------------------------------------------------

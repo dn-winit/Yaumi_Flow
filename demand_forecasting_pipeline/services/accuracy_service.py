@@ -16,6 +16,7 @@ import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
+from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
 
 logger = logging.getLogger(__name__)
 
@@ -209,29 +210,28 @@ class AccuracyService:
         if df.empty:
             return _EMPTY_SUMMARY
 
-        # Only score rows where actual > 0 (zero-actual rows have undefined
-        # percentage error and would skew the headline).
-        scored = df[df["actual_qty"] > 0]
-        total_pred = round(float(df["predicted"].sum()), 1)
-        total_actual = round(float(df["actual_qty"].sum()), 1)
+        # WAPE uses the canonical helper: scores rows where actual > 0 AND
+        # predicted > 0, ensuring every accuracy display reads the same number.
+        stats = wape_summary(df["actual_qty"].to_numpy(), df["predicted"].to_numpy())
 
+        # MAE / RMSE are informational side-metrics — compute over the same
+        # scored subset so they're interpretable alongside WAPE.
+        scored = df[(df["actual_qty"] > 0) & (df["predicted"] > 0)]
         if scored.empty:
-            return {**_EMPTY_SUMMARY, "rows_compared": int(len(df)), "total_predicted": total_pred}
-
+            return {
+                **_EMPTY_SUMMARY,
+                "rows_compared": int(len(df)),
+                "total_predicted": round(stats["total_predicted"], 1),
+                "total_actual": round(stats["total_actual"], 1),
+            }
         diff = scored["actual_qty"] - scored["predicted"]
-
-        # WAPE: robust to demand spikes — errors contribute proportionally to
-        # the business volume that produced them, not as equal-weight per-row
-        # percentages. Consistent with the frontend AccuracyDrawer.
-        scored_actual_sum = float(scored["actual_qty"].sum())
-        wape = float(diff.abs().sum() / scored_actual_sum * 100) if scored_actual_sum > 0 else 0.0
 
         return {
             "rows_compared": int(len(df)),
-            "total_predicted": total_pred,
-            "total_actual": total_actual,
+            "total_predicted": round(stats["total_predicted"], 1),
+            "total_actual": round(stats["total_actual"], 1),
             "mae": round(float(diff.abs().mean()), 2),
             "rmse": round(float((diff ** 2).mean() ** 0.5), 2),
-            "wape": round(wape, 2),
-            "accuracy_pct": round(max(0.0, 100.0 - wape), 1),
+            "wape": stats["wape"],
+            "accuracy_pct": stats["accuracy_pct"],
         }

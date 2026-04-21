@@ -197,6 +197,12 @@ class Analyzer:
                     return v
             return default
 
+        def _safe(v: Any) -> str:
+            # Strip characters that break Groq's JSON validation when echoed
+            # back in output strings — notably inch marks in item names like
+            # 'Fresh Tortilla Plain 8" 6PC'.
+            return str(v).replace('"', " inch").replace("\\", "/") if v is not None else ""
+
         lines = []
         total_qty = 0
         for it in items:
@@ -210,8 +216,8 @@ class Analyzer:
             why_qty = _get(it, "whyQuantity", "WhyQuantity")
 
             parts = [
-                f"  Item: {_get(it, 'itemCode', 'ItemCode', default='?')} — {_get(it, 'itemName', 'ItemName')}",
-                f"  Recommended qty: {qty} | Tier: {_get(it, 'tier', 'Tier')} | Source: {_get(it, 'source', 'Source')}",
+                f"  Item: {_safe(_get(it, 'itemCode', 'ItemCode', default='?'))} — {_safe(_get(it, 'itemName', 'ItemName'))}",
+                f"  Recommended qty: {qty} | Tier: {_safe(_get(it, 'tier', 'Tier'))} | Source: {_safe(_get(it, 'source', 'Source'))}",
             ]
             facts = []
             if cycle:
@@ -225,9 +231,9 @@ class Analyzer:
             if facts:
                 parts.append(f"  Facts: {', '.join(facts)}")
             if why_item:
-                parts.append(f"  Why recommended: {why_item}")
+                parts.append(f"  Why recommended: {_safe(why_item)}")
             if why_qty:
-                parts.append(f"  Why this quantity: {why_qty}")
+                parts.append(f"  Why this quantity: {_safe(why_qty)}")
             lines.append("\n".join(parts))
         items_table = "\n\n".join(lines) if lines else "No items"
 
@@ -236,14 +242,14 @@ class Analyzer:
         for it in items:
             why = _get(it, "whyItem", "WhyItem")
             if why:
-                context_parts.append(f"- {_get(it, 'itemCode', 'ItemCode')}: {why}")
+                context_parts.append(f"- {_safe(_get(it, 'itemCode', 'ItemCode'))}: {_safe(why)}")
         customer_context = "\n".join(context_parts) if context_parts else "No additional context"
 
         system = self._prompts.get_system_prompt("pre_visit_briefing")
         user = self._prompts.render(
             "pre_visit_briefing", "pre_visit_template",
             customer_code=customer_code,
-            customer_name=customer_name or customer_code,
+            customer_name=_safe(customer_name) or customer_code,
             route_code=route_code,
             date=date,
             item_count=len(items),

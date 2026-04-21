@@ -248,8 +248,9 @@ class EdaService:
         """Mean accuracy for forecast rows in the trailing `days` window.
 
         Uses ``demand_forecast.csv`` which carries ``Predicted`` + ``ActualQty``.
-        Computes (1 - WAPE) over rows where actual > 0, mirroring the accuracy
-        service's formula so this card and the drawer agree.
+        Scores rows where actual > 0 AND predicted > 0 -- identical filter to
+        the DFP service's ``wape_summary`` helper, so this card, the drawer,
+        and the drift endpoint all report the same number.
         """
         path = self._s.data_path(self._s.demand_forecast_file)
         if not path.exists():
@@ -261,17 +262,22 @@ class EdaService:
         df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce")
         cutoff = anchor - pd.Timedelta(days=days - 1)
         window = df[(df["TrxDate"] >= cutoff) & (df["TrxDate"] <= anchor)]
-        scored = window[pd.to_numeric(window["ActualQty"], errors="coerce") > 0]
-        if scored.empty:
+        actual = pd.to_numeric(window["ActualQty"], errors="coerce").fillna(0)
+        predicted = pd.to_numeric(window["Predicted"], errors="coerce").fillna(0)
+        mask = (actual > 0) & (predicted > 0)
+        if not mask.any():
             return {"available": True, "rows_compared": 0, "accuracy_pct": None}
-        actual = pd.to_numeric(scored["ActualQty"], errors="coerce")
-        predicted = pd.to_numeric(scored["Predicted"], errors="coerce")
-        wape = float((actual - predicted).abs().sum() / actual.sum() * 100)
+        scored_actual = actual[mask]
+        scored_pred = predicted[mask]
+        total = float(scored_actual.sum())
+        if total <= 0:
+            return {"available": True, "rows_compared": int(mask.sum()), "accuracy_pct": None}
+        wape = float((scored_actual - scored_pred).abs().sum() / total * 100)
         return {
             "available": True,
             "window_days": days,
-            "rows_compared": int(len(scored)),
-            "accuracy_pct": round(max(0.0, 100.0 - wape), 1),
+            "rows_compared": int(mask.sum()),
+            "accuracy_pct": round(max(0.0, 100.0 - wape), 2),
         }
 
     def _operations_summary(self, days: int = 7) -> Dict[str, Any]:

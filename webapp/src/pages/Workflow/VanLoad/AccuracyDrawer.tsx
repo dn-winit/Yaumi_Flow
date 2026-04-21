@@ -97,8 +97,9 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       const a = toNum(r.actual_qty) ?? 0;
       totalPred += p;
       totalActual += a;
-      // WAPE numerator/denominator: only rows where actual > 0, matching backend
-      if (a > 0) {
+      // WAPE numerator/denominator: score rows where actual > 0 AND predicted > 0.
+      // Mirrors the backend wape_summary helper so drawer + drift + dashboard agree.
+      if (a > 0 && p > 0) {
         scoredAbsErr += Math.abs(a - p);
         scoredActual += a;
       }
@@ -111,9 +112,10 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       }
     });
 
-    // Sort days chronologically so streaks + trend are well-defined.
+    // Sort days chronologically so streaks + trend are well-defined. Score
+    // only days with actual > 0 AND predicted > 0 (same filter as per-row).
     const dayEntries = Array.from(byDay.entries())
-      .filter(([, v]) => v.a > 0)
+      .filter(([, v]) => v.a > 0 && v.p > 0)
       .sort(([a], [b]) => a.localeCompare(b));
 
     let daysOnTarget = 0;
