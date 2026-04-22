@@ -2,8 +2,6 @@ import { useMemo } from "react";
 import Drawer from "@/components/ui/Drawer";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
-import Card from "@/components/ui/Card";
-import Badge from "@/components/ui/Badge";
 import DrawerContextBar from "@/components/ui/DrawerContextBar";
 import KpiRow from "@/components/ui/KpiRow";
 import HighlightsStrip, { type Highlight } from "@/components/ui/HighlightsStrip";
@@ -14,12 +12,7 @@ import { CHART_COLOR } from "@/components/charts/theme";
 
 import { useAdoption } from "@/hooks/useRecommendedOrder";
 import { addDays, todayIso } from "@/lib/date";
-import {
-  fmtNum,
-  HIT_RATE_GOOD,
-  COVERAGE_GOOD,
-  TREND_STEP_PP,
-} from "@/lib/format";
+import { fmtNum, fmtCurrency, DELIVERY_GOOD } from "@/lib/format";
 
 interface Props {
   open: boolean;
@@ -28,70 +21,53 @@ interface Props {
 }
 
 export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
-  const end_date = todayIso();
-  const start_date = addDays(end_date, -29);
-
-  const params = { start_date, end_date, ...(routeCode ? { route_code: routeCode } : {}) };
+  const { params, windowLabel } = useMemo(() => {
+    const endDate = todayIso();
+    const days = 30;
+    const startDate = addDays(endDate, -(days - 1));
+    return {
+      params: {
+        start_date: startDate,
+        end_date: endDate,
+        ...(routeCode ? { route_code: routeCode } : {}),
+      },
+      windowLabel: `${startDate} to ${endDate}`,
+    };
+  }, [routeCode]);
   const { data, loading } = useAdoption(params, open);
-
-  const windowLabel = `${start_date} to ${end_date}`;
   const s = data?.summary ?? null;
 
-  // Derived stats + highlights: single memo so the four tiles and the strip
-  // read from the same snapshot of `data`.
+  // All four tiles derive from the same backend summary snapshot.
+  // Arrows are computed once so the JSX stays declarative.
   const derived = useMemo(() => {
     if (!s) return null;
 
-    // Coverage: of every item customers bought on recommended days, what
-    // fraction was on our list? adopted + missed == total-bought-items in the
-    // window for scored rows, so this is a clean precision complement.
-    const coverageDenom = s.rows_adopted + s.rows_missed;
-    const coveragePct = coverageDenom > 0 ? (s.rows_adopted / coverageDenom) * 100 : null;
+    // Tile 2: pick accuracy (unique-SKU hit rate)
+    const pickAccuracyPct =
+      s.skus_recommended > 0 ? (s.skus_adopted / s.skus_recommended) * 100 : null;
 
-    // Trend: late-half avg adoption_pct minus early-half. Needs >=2 scored
-    // days (days with at least one recommendation) to be meaningful.
-    const daily = (data?.daily ?? []).filter((d) => d.recommended > 0);
-    let trendPP: number | null = null;
-    if (daily.length >= 2) {
-      const mid = Math.floor(daily.length / 2);
-      const avg = (slice: typeof daily) =>
-        slice.reduce((n, d) => n + (d.adoption_pct ?? 0), 0) / slice.length;
-      trendPP = avg(daily.slice(mid)) - avg(daily.slice(0, mid));
-    }
+    // Tile 3: share of adopted SKUs whose quantity landed inside the backend
+    // tolerance band. Denominator = adopted SKUs (Tile 2 numerator).
+    const perfectPickPct =
+      s.skus_adopted > 0 ? (s.skus_perfect / s.skus_adopted) * 100 : null;
 
-    // Highlights -- positive framing pulled from the same dataset.
+    // Best day highlight reads from the daily breakdown (row-grain) -- still
+    // meaningful for trend spotting even though the tiles are SKU-grain.
     let bestDayDate = "";
     let bestDayPct = -1;
-    daily.forEach((d) => {
-      if (d.adoption_pct > bestDayPct) {
+    (data?.daily ?? []).forEach((d) => {
+      if (d.recommended > 0 && d.adoption_pct > bestDayPct) {
         bestDayPct = d.adoption_pct;
         bestDayDate = d.date;
       }
     });
 
-    let bestTier = "";
-    let bestTierPct = -1;
-    let bestTierAdopted = 0;
-    let bestTierRecommended = 0;
-    (data?.by_tier ?? []).forEach((t) => {
-      if (t.recommended <= 0) return;
-      if (t.adoption_pct > bestTierPct) {
-        bestTierPct = t.adoption_pct;
-        bestTier = t.tier;
-        bestTierAdopted = t.adopted;
-        bestTierRecommended = t.recommended;
-      }
-    });
-
     return {
-      coveragePct,
-      trendPP,
+      pickAccuracyPct,
+      perfectPickPct,
       bestDay: bestDayPct >= 0 ? { date: bestDayDate, pct: bestDayPct } : null,
-      bestTier: bestTierPct >= 0
-        ? { tier: bestTier, pct: bestTierPct, adopted: bestTierAdopted, recommended: bestTierRecommended }
-        : null,
     };
-  }, [s, data?.daily, data?.by_tier]);
+  }, [s, data?.daily]);
 
   const highlights = useMemo<Highlight[]>(() => {
     if (!derived || !s) return [];
@@ -103,58 +79,32 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
         detail: derived.bestDay.date,
       });
     }
-    if (derived.bestTier) {
+    if (s.skus_adopted > 0) {
       items.push({
-        label: "Strongest band",
-        value: derived.bestTier.tier,
-        detail: `${derived.bestTier.pct.toFixed(1)}% · ${fmtNum(derived.bestTier.adopted)} of ${fmtNum(derived.bestTier.recommended)} sold`,
-      });
-    }
-    if (s.rows_adopted > 0) {
-      items.push({
-        label: "Sales captured",
-        value: `${fmtNum(s.rows_adopted)} items`,
+        label: "Items captured",
+        value: `${fmtNum(s.skus_adopted)} items`,
         detail: "Recommended and bought in the window",
       });
     }
     return items;
   }, [derived, s]);
 
-  const trendValue =
-    !derived || derived.trendPP == null
-      ? "-"
-      : derived.trendPP >= TREND_STEP_PP
-      ? "Improving"
-      : derived.trendPP <= -TREND_STEP_PP
-      ? "Slipping"
-      : "Steady";
-  const trendSubtitle =
-    !derived || derived.trendPP == null
-      ? "Need more history"
-      : `${Math.abs(derived.trendPP).toFixed(1)}% shift, last 15 days vs prior 15`;
-  const trendArrow: "up" | "down" | undefined =
-    !derived || derived.trendPP == null
+  // Arrows only on tiles where "up = unambiguously good." Lost sales
+  // carries no arrow -- it's a loss magnitude, not a direction.
+  const revenueArrow: "up" | "down" | undefined =
+    s?.actual_revenue != null && s.actual_revenue > 0 ? "up" : undefined;
+  const accuracyArrow: "up" | "down" | undefined =
+    derived?.pickAccuracyPct == null
       ? undefined
-      : derived.trendPP >= TREND_STEP_PP
-      ? "up"
-      : derived.trendPP <= -TREND_STEP_PP
-      ? "down"
-      : undefined;
-
-  const hitArrow: "up" | "down" | undefined =
-    s?.adoption_pct == null
-      ? undefined
-      : s.adoption_pct >= HIT_RATE_GOOD
+      : derived.pickAccuracyPct >= DELIVERY_GOOD
       ? "up"
       : "down";
-  const coverageArrow: "up" | "down" | undefined =
-    derived?.coveragePct == null
+  const perfectPickArrow: "up" | "down" | undefined =
+    derived?.perfectPickPct == null
       ? undefined
-      : derived.coveragePct >= COVERAGE_GOOD
+      : derived.perfectPickPct >= DELIVERY_GOOD
       ? "up"
       : "down";
-  const liftArrow: "up" | "down" | undefined =
-    s?.uplift_pct == null ? undefined : s.uplift_pct > 0 ? "up" : "down";
 
   return (
     <Drawer open={open} onClose={onClose} title="Last 30 days - recommendation follow-through" width="xl">
@@ -165,7 +115,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           extra={
             s ? (
               <span className="text-caption text-text-tertiary">
-                {fmtNum(s.rows_recommended)} recommendations reviewed
+                {fmtNum(s.skus_recommended)} unique items recommended
               </span>
             ) : null
           }
@@ -183,36 +133,63 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           <>
             <KpiRow>
               <MetricCard
-                label="Hit rate"
-                value={s?.adoption_pct != null ? `${s.adoption_pct.toFixed(1)}%` : "-"}
-                subtitle={`${fmtNum(s?.rows_adopted)} of ${fmtNum(s?.rows_recommended)} recommendations sold`}
-                trend={hitArrow}
-              />
-              <MetricCard
-                label="Coverage"
-                value={derived?.coveragePct != null ? `${derived.coveragePct.toFixed(1)}%` : "-"}
-                subtitle={
-                  derived?.coveragePct != null && s
-                    ? `${fmtNum(s.rows_adopted)} of ${fmtNum(s.rows_adopted + s.rows_missed)} customer buys on our list`
-                    : "Of items customers bought, share on our list"
-                }
-                trend={coverageArrow}
-              />
-              <MetricCard
-                label="Sales lift"
+                label="Revenue driven by our list"
                 value={
-                  s?.uplift_pct != null
-                    ? `${s.uplift_pct > 0 ? "+" : ""}${s.uplift_pct.toFixed(1)}%`
+                  s?.actual_revenue != null && s.actual_revenue > 0
+                    ? fmtCurrency(s.actual_revenue)
+                    : s?.actual_volume
+                    ? `${fmtNum(s.actual_volume)} units`
                     : "-"
                 }
-                subtitle="Extra units sold when recommended vs when not"
-                trend={liftArrow}
+                subtitle={
+                  s && s.actual_volume > 0
+                    ? `${fmtNum(s.actual_volume)} units sold across ${fmtNum(s.skus_adopted)} items`
+                    : "No recommendations converted yet"
+                }
+                trend={revenueArrow}
               />
               <MetricCard
-                label="Accuracy trend"
-                value={trendValue}
-                subtitle={trendSubtitle}
-                trend={trendArrow}
+                label="Pick accuracy"
+                value={
+                  derived?.pickAccuracyPct != null
+                    ? `${derived.pickAccuracyPct.toFixed(1)}%`
+                    : "-"
+                }
+                subtitle={
+                  s && s.skus_recommended > 0
+                    ? `${fmtNum(s.skus_adopted)} of ${fmtNum(s.skus_recommended)} recommended items sold`
+                    : "No recommendations to score"
+                }
+                trend={accuracyArrow}
+              />
+              <MetricCard
+                label="Perfect picks"
+                value={
+                  derived?.perfectPickPct != null
+                    ? `${derived.perfectPickPct.toFixed(1)}%`
+                    : "-"
+                }
+                subtitle={
+                  s && s.skus_adopted > 0
+                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} adopted items within ±${Math.round(s.perfect_pick_tolerance * 100)}% of actual`
+                    : "No adopted items to score"
+                }
+                trend={perfectPickArrow}
+              />
+              <MetricCard
+                label="Lost sales"
+                value={
+                  s?.lost_revenue != null && s.lost_revenue > 0
+                    ? fmtCurrency(s.lost_revenue)
+                    : s?.lost_sales_units
+                    ? `${fmtNum(s.lost_sales_units)} units`
+                    : "0"
+                }
+                subtitle={
+                  !s?.skus_over_recommended
+                    ? "Every recommended item sold"
+                    : `${fmtNum(s.skus_over_recommended)} items · ${fmtNum(s.lost_sales_units)} units never sold`
+                }
               />
             </KpiRow>
 
@@ -258,29 +235,6 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                     />
                   )}
                 </div>
-
-                {data.by_tier.length > 0 && (
-                  <Card title="Follow-through by recommendation band">
-                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-                      {data.by_tier.map((t) => (
-                        <div
-                          key={t.tier}
-                          className="bg-surface-sunken rounded-lg px-3 py-2.5 border border-subtle"
-                        >
-                          <div className="flex items-center justify-between">
-                            <Badge variant="info">{t.tier}</Badge>
-                            <span className="text-body font-semibold text-text-primary">
-                              {t.adoption_pct.toFixed(1)}%
-                            </span>
-                          </div>
-                          <div className="mt-1 text-caption text-text-tertiary">
-                            {fmtNum(t.adopted)} of {fmtNum(t.recommended)} sold
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </Card>
-                )}
               </div>
             </div>
           </>

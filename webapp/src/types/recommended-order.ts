@@ -84,14 +84,22 @@ export interface OrderHealthResponse {
 
 // ---------- Analytics: Adoption ----------
 export interface AdoptionSummary {
-  rows_recommended: number;
-  rows_adopted: number;
-  rows_over_recommended: number;
-  rows_missed: number;
-  adoption_pct: number | null;
-  uplift_pct: number | null;
-  total_recommended_qty: number;
-  total_sold_qty: number;
+  // Tile 1: Revenue driven by our list (volume + revenue on adopted rows)
+  actual_volume: number;
+  actual_revenue: number | null;
+  // Tile 3: Perfect picks (adopted SKUs within tolerance of actual qty).
+  // Tolerance flows from backend so the "within X% of actual" label stays
+  // in sync with the server-side definition.
+  skus_perfect: number;
+  perfect_pick_tolerance: number;
+  // Tile 4: Lost sales (SKUs we recommended that never sold)
+  skus_over_recommended: number;
+  lost_sales_units: number;
+  lost_revenue: number | null;
+  // Context bar + highlights + Tile 2 denominator
+  skus_recommended: number;
+  skus_adopted: number;
+  skus_bought: number;
 }
 export interface AdoptionDailyPoint {
   date: string;

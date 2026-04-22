@@ -255,6 +255,24 @@ class DataManager:
             return {}
         return df.drop_duplicates("CustomerCode").set_index("CustomerCode")["CustomerName"].to_dict()
 
+    def get_item_prices(self, route_code: Optional[str] = None) -> Dict[str, float]:
+        """Return {ItemCode: avg unit price} from customer sales data.
+
+        Averaged across all rows for each item so a single outlier invoice
+        can't skew the lookup. Zero/NaN prices are dropped -- the caller
+        should treat a missing key as "price unknown".
+        """
+        df = self.get_customer_data(route_code)
+        if df.empty or "ItemCode" not in df.columns or "AvgUnitPrice" not in df.columns:
+            return {}
+        prices = (
+            df[["ItemCode", "AvgUnitPrice"]]
+            .dropna()
+            .groupby("ItemCode", as_index=True)["AvgUnitPrice"]
+            .mean()
+        )
+        return {str(k): float(v) for k, v in prices.items() if pd.notna(v) and float(v) > 0}
+
     def get_journey_customers(self, route_code: str, target_date: str) -> List[str]:
         """Return list of customer codes planned for a route on a date."""
         jp = self.get_journey_plan(route_code, target_date)

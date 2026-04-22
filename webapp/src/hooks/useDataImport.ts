@@ -49,6 +49,19 @@ export function useCustomerOverview(lookbackDays = 90) {
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
+// Shared item-price lookup ({ItemCode: avg_unit_price}). Cached under the
+// "static" tier since prices change slowly and every caller can dedupe via
+// react-query. Callers treat a missing key as "price unknown".
+export function useItemPrices(enabled = true) {
+  const { data } = useQuery({
+    queryKey: ["item-prices"],
+    queryFn: () => dataImportApi.getItemPrices(),
+    enabled,
+    ...tier("static"),
+  });
+  return data ?? {};
+}
+
 export function useDataStatus() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["data-status"],

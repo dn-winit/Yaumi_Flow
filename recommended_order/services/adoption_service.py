@@ -28,6 +28,12 @@ logger = logging.getLogger(__name__)
 
 _JOIN_KEYS = ["trx_date", "route_code", "customer_code", "item_code"]
 
+# "Perfect pick" tolerance: total recommended quantity for an adopted SKU is
+# within this fraction of total actual quantity. Mirrors the ±20% convention
+# used in the VanLoad accuracy drawer (webapp/src/lib/format.ts TOLERANCE_PCT)
+# so both dashboards reason about "on target" the same way.
+_PERFECT_PICK_TOLERANCE = 0.20
+
 
 class AdoptionService:
     """Compute adoption KPIs over a date window.
@@ -85,6 +91,16 @@ class AdoptionService:
 
         sales = self._load_sales(start_date, end_date, route_code, recs)
         merged = self._merge(recs, sales)
+
+        # Attach avg unit price per SKU so revenue metrics can be computed
+        # over the same merged frame. Missing prices map to 0 -- callers check
+        # whether any price > 0 before emitting revenue fields.
+        prices = self._dm.get_item_prices()
+        merged["unit_price"] = (
+            merged["item_code"].map(prices).fillna(0.0)
+            if prices
+            else pd.Series(0.0, index=merged.index)
+        )
 
         return {
             "available": True,
@@ -185,33 +201,80 @@ class AdoptionService:
 
     @staticmethod
     def _summary(merged: pd.DataFrame) -> Dict[str, Any]:
-        recommended = merged[merged["_merge"].isin(["left_only", "both"])]
-        rows_recommended = int(len(recommended))
-        rows_adopted = int(merged["adopted"].sum())
-        rows_over = int(merged["over_recommended"].sum())
-        rows_missed = int(merged["missed"].sum())
+        """Business-facing summary: volume/revenue achievement + opportunity gaps.
 
-        adoption_pct = round(rows_adopted / rows_recommended * 100, 1) if rows_recommended else None
+        Every field is consumed by a tile or subtitle -- no legacy carry-over.
+        Revenue fields are null when no prices are available so the UI can
+        fall back to unit counts without inventing currency numbers.
+        """
+        recommended_rows = merged[merged["_merge"].isin(["left_only", "both"])]
+        adopted_rows = merged[merged["adopted"]]
+        prices_available = (
+            "unit_price" in merged.columns and float(merged["unit_price"].sum()) > 0
+        )
 
-        # "Uplift": qty sold when we recommended, vs qty we DIDN'T recommend but was still sold.
-        # Using mean-per-row keeps it meaningful regardless of period length.
-        sold_when_rec = merged.loc[merged["adopted"], "actual_qty"]
-        sold_when_not_rec = merged.loc[merged["missed"], "actual_qty"]
-        rec_mean = float(sold_when_rec.mean()) if not sold_when_rec.empty else 0.0
-        not_rec_mean = float(sold_when_not_rec.mean()) if not sold_when_not_rec.empty else 0.0
-        uplift_pct = round((rec_mean - not_rec_mean) / not_rec_mean * 100, 1) if not_rec_mean > 0 else None
+        # --- Unique-SKU sets (drive the tile counts) ---
+        rec_skus = set(recommended_rows["item_code"].astype(str).unique())
+        bought_skus = set(
+            merged.loc[
+                merged["_merge"].isin(["right_only", "both"]) & (merged["actual_qty"] > 0),
+                "item_code",
+            ].astype(str).unique()
+        )
+        adopted_skus = rec_skus & bought_skus
+        over_rec_skus = rec_skus - bought_skus
 
-        total_recommended_qty = float(recommended["recommended_qty"].sum())
-        total_sold_qty = float(merged["actual_qty"].sum())
+        # --- Tile 1: Revenue driven / Tile 2: Pick accuracy (volume + revenue
+        # on the recommended intersection with sales). ---
+        actual_volume = float(adopted_rows["actual_qty"].sum())
+        actual_revenue = (
+            float((adopted_rows["actual_qty"] * adopted_rows["unit_price"]).sum())
+            if prices_available
+            else None
+        )
+
+        # --- Tile 3: Perfect picks (adopted SKUs within ±20% of actual) ---
+        # Aggregate predicted+actual per adopted SKU, then count SKUs whose
+        # totals land inside the tolerance band. SKU-grain keeps the count
+        # comparable to skus_adopted (the denominator the tile uses).
+        if not adopted_rows.empty:
+            by_sku = adopted_rows.groupby("item_code").agg(
+                rec=("recommended_qty", "sum"),
+                act=("actual_qty", "sum"),
+            )
+            by_sku = by_sku[by_sku["act"] > 0]
+            within = (by_sku["rec"] - by_sku["act"]).abs() / by_sku["act"] <= _PERFECT_PICK_TOLERANCE
+            skus_perfect = int(within.sum())
+        else:
+            skus_perfect = 0
+
+        # --- Tile 4: Lost sales (SKUs we recommended that never sold) ---
+        dud_rows = merged[
+            merged["_merge"].isin(["left_only", "both"])
+            & merged["item_code"].isin(over_rec_skus)
+        ]
+        lost_units = float(dud_rows["recommended_qty"].sum())
+        lost_revenue = (
+            float((dud_rows["recommended_qty"] * dud_rows["unit_price"]).sum())
+            if prices_available
+            else None
+        )
+
         return {
-            "rows_recommended": rows_recommended,
-            "rows_adopted": rows_adopted,
-            "rows_over_recommended": rows_over,
-            "rows_missed": rows_missed,
-            "adoption_pct": adoption_pct,
-            "uplift_pct": uplift_pct,
-            "total_recommended_qty": round(total_recommended_qty, 1),
-            "total_sold_qty": round(total_sold_qty, 1),
+            # Tile 1: Revenue driven
+            "actual_volume": round(actual_volume, 1),
+            "actual_revenue": round(actual_revenue, 2) if actual_revenue is not None else None,
+            # Tile 3: Perfect picks
+            "skus_perfect": skus_perfect,
+            "perfect_pick_tolerance": _PERFECT_PICK_TOLERANCE,
+            # Tile 4: Lost sales
+            "skus_over_recommended": len(over_rec_skus),
+            "lost_sales_units": round(lost_units, 1),
+            "lost_revenue": round(lost_revenue, 2) if lost_revenue is not None else None,
+            # Context bar + highlights + Tile 2 denominator
+            "skus_recommended": len(rec_skus),
+            "skus_adopted": len(adopted_skus),
+            "skus_bought": len(bought_skus),
         }
 
     @staticmethod

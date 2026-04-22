@@ -155,3 +155,9 @@ def eda_refresh(svc: EdaService = Depends(get_eda_service)):
     """Force-refresh cached EDA aggregates."""
     svc.invalidate()
     return {"success": True, "message": "EDA cache cleared"}
+
+
+@router.get("/item-prices")
+def item_prices(svc: EdaService = Depends(get_eda_service)):
+    """Shared price lookup -- {ItemCode: avg unit price} across the app."""
+    return svc.get_item_prices()

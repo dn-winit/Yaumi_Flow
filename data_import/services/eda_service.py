@@ -57,6 +57,31 @@ class EdaService:
             self._cache.clear()
 
     # ------------------------------------------------------------------
+    # Shared reference data
+    # ------------------------------------------------------------------
+
+    def get_item_prices(self) -> Dict[str, float]:
+        """Return {ItemCode: avg unit price} from customer_data.csv.
+
+        Single source of truth for item pricing across the app; cached like
+        every other derivation so repeat callers don't re-read the CSV.
+        """
+        return self._cached("item_prices", self._compute_item_prices)
+
+    def _compute_item_prices(self) -> Dict[str, float]:
+        path = self._s.data_path(self._s.customer_data_file)
+        if not path.exists():
+            return {}
+        df = pd.read_csv(path, low_memory=False, usecols=["ItemCode", "AvgUnitPrice"])
+        df["AvgUnitPrice"] = pd.to_numeric(df["AvgUnitPrice"], errors="coerce")
+        df = df.dropna(subset=["ItemCode", "AvgUnitPrice"])
+        df = df[df["AvgUnitPrice"] > 0]
+        if df.empty:
+            return {}
+        grouped = df.groupby("ItemCode")["AvgUnitPrice"].mean()
+        return {str(k): round(float(v), 2) for k, v in grouped.items()}
+
+    # ------------------------------------------------------------------
     # Sales overview (from local sales_recent.csv)
     # ------------------------------------------------------------------
 

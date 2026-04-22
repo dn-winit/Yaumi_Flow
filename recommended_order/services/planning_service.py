@@ -85,7 +85,7 @@ class PlanningService:
 
         journey = self._dm.get_journey_plan(route_code=route_code)
         demand = self._dm.get_demand_data(route_code=route_code)
-        prices = self._price_lookup()
+        prices = self._dm.get_item_prices()
 
         daily: List[Dict[str, Any]] = []
         for day in horizon:
@@ -130,19 +130,6 @@ class PlanningService:
             "summary": summary,
             "daily": daily,
         }
-
-    def _price_lookup(self) -> Dict[str, float]:
-        """Average unit price per item code from the customer-level sales cache."""
-        df = self._dm.get_customer_data()
-        if df.empty or "ItemCode" not in df.columns or "AvgUnitPrice" not in df.columns:
-            return {}
-        prices = (
-            df[["ItemCode", "AvgUnitPrice"]]
-            .dropna()
-            .groupby("ItemCode", as_index=True)["AvgUnitPrice"]
-            .mean()
-        )
-        return {str(k): float(v) for k, v in prices.items() if pd.notna(v) and float(v) > 0}
 
     @staticmethod
     def _summary(daily: List[Dict[str, Any]]) -> Dict[str, Any]:

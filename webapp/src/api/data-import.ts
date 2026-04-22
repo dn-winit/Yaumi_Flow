@@ -35,6 +35,8 @@ export const dataImportApi = {
   getCustomerOverview: (lookbackDays = 90) =>
     c().get<CustomerOverviewResponse>("/eda/customers", { params: { lookback_days: lookbackDays } }).then((r) => r.data),
 
+  getItemPrices: () => c().get<Record<string, number>>("/item-prices").then((r) => r.data),
+
   refreshEda: () => c().post("/eda/refresh").then((r) => r.data),
 
   importDataset: (dataset: string, mode = "incremental") =>

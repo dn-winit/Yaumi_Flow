@@ -56,24 +56,20 @@ export const AT_RISK_CONFIDENCE = 0.7;
  * Kept here so every tile + tooltip reads from the same place.
  *  - TOLERANCE_PCT: a day is "on target" when |predicted - actual| / actual is
  *    within this fraction. 20% mirrors the supervision perfect-zone ±20% band.
- *  - BIAS_GOOD_PCT / BIAS_WARN_PCT: van-load bias tone breakpoints in percent.
- *  - LEAKAGE_SHARE_WARN: lost-sales or dead-weight above this share of actuals
- *    is flagged as danger.
+ *  - LEAKAGE_SHARE_WARN: an item's 30-day volume must exceed this share of
+ *    route totals before it's eligible for the "most accurate item" highlight
+ *    (keeps a 1-unit SKU from hijacking the strip).
  */
 export const TOLERANCE_PCT = 0.2;
-export const BIAS_GOOD_PCT = 5;
-export const BIAS_WARN_PCT = 15;
 export const LEAKAGE_SHARE_WARN = 0.05;
 
 /**
- * Recommendation-adoption thresholds (used in the Last-30-Days drawer).
- *  - HIT_RATE_GOOD: green when share of recs that sold >= this %.
- *  - COVERAGE_GOOD: green when share of customer sales captured by recs >= this %.
+ * Recommendation-adoption thresholds (used in the Last-30-Days drawers).
+ *  - DELIVERY_GOOD: green when volume/revenue delivered >= this % of recommended.
  *  - TREND_STEP_PP: percentage-point change that counts as improving/declining;
  *    smaller deltas are shown as "stable".
  */
-export const HIT_RATE_GOOD = 50;
-export const COVERAGE_GOOD = 50;
+export const DELIVERY_GOOD = 80;
 export const TREND_STEP_PP = 2;
 
 /** Pull the date out of any row that uses TrxDate / trx_date / ds / date. */

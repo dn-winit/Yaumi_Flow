@@ -12,15 +12,14 @@ import { CHART_COLOR } from "@/components/charts/theme";
 import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
 
 import { useAccuracyComparison } from "@/hooks/useForecast";
+import { useItemPrices } from "@/hooks/useDataImport";
 import {
   fmtNum,
+  fmtCurrency,
   toNum,
   GOOD_SCORE_THRESHOLD,
   TOLERANCE_PCT,
-  BIAS_GOOD_PCT,
-  BIAS_WARN_PCT,
   LEAKAGE_SHARE_WARN,
-  TREND_STEP_PP,
 } from "@/lib/format";
 import { addDays, todayIso } from "@/lib/date";
 import type { Row } from "@/types/common";
@@ -41,10 +40,10 @@ interface Props {
 
 export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: Props) {
   const [explainRow, setExplainRow] = useState<Row | null>(null);
-  const params = useMemo(() => {
+  const { params, windowDays } = useMemo(() => {
     const endDate = todayIso();
-    // Inclusive 30-day window: today + previous 29 days = 30 calendar days.
-    const startDate = addDays(endDate, -29);
+    const days = 30;
+    const startDate = addDays(endDate, -(days - 1));
     const p: Record<string, unknown> = {
       start_date: startDate,
       end_date: endDate,
@@ -54,11 +53,12 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     // the API can only filter one, so we fetch the route-wide window and filter
     // client-side below; the backend summary in that case isn't useful.
     if (itemCodes && itemCodes.length === 1) p.item_code = itemCodes[0];
-    return p;
+    return { params: p, windowDays: days };
   }, [routeCode, itemCodes]);
 
   // Only run the cross-DB join when the drawer is actually open.
   const { data, loading } = useAccuracyComparison(params, open);
+  const prices = useItemPrices(open);
 
   const multiItemFilter = !!(itemCodes && itemCodes.length > 1);
 
@@ -71,38 +71,37 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
 
   // Single-pass client-side stats.
   //
-  // Accuracy uses WAPE (weighted absolute percentage error) = 100 - sum|err| /
-  // sum(actual). Robust to spike days: a day with a tiny actual can't explode
-  // into a 9,900% per-day error the way plain MAPE would -- errors contribute
-  // proportionally to the business volume that produced them.
+  // Four tiles:
+  //   * demandServed  -- Σ min(predicted, actual): units our forecast covered
+  //   * accuracyPct   -- WAPE-based quality; scored where both > 0
+  //   * daysOnTarget  -- count of days with |pred − actual|/actual ≤ TOLERANCE_PCT
+  //   * Lost sales    -- dud SKUs (forecast but never sold): item count + units
+  //                      + revenue when prices are available
   //
-  // Derivatives surfaced so the scorecard + highlights strip + opportunities
-  // section all read from the same memoised object:
-  //   * daysOnTarget / daysScored       -- count of days within TOLERANCE_PCT
-  //   * trendPP                          -- late-window WAPE-acc minus early
-  //   * bestDay                          -- the most-accurate scored day
-  //   * bestStreak                       -- longest run of consecutive on-target days
+  // Highlights strip reuses bestDay + bestStreak from the same pass.
   const wapeAccuracy = (absErr: number, actual: number) =>
     actual > 0 ? Math.max(0, 100 - (absErr / actual) * 100) : null;
 
   const stats = useMemo(() => {
     const byDay = new Map<string, { p: number; a: number }>();
-    let totalPred = 0;
-    let totalActual = 0;
+    const byItem = new Map<string, { predicted: number; actual: number }>();
     let scoredAbsErr = 0;
     let scoredActual = 0;
+    let totalActual = 0;
+    let demandServed = 0;
 
     filteredRows.forEach((r) => {
       const p = toNum(r.predicted) ?? 0;
       const a = toNum(r.actual_qty) ?? 0;
-      totalPred += p;
       totalActual += a;
-      // WAPE numerator/denominator: score rows where actual > 0 AND predicted > 0.
-      // Mirrors the backend wape_summary helper so drawer + drift + dashboard agree.
+      // Score rows where actual > 0 AND predicted > 0 -- same filter the
+      // backend wape_summary helper uses so every accuracy display agrees.
       if (a > 0 && p > 0) {
         scoredAbsErr += Math.abs(a - p);
         scoredActual += a;
       }
+      if (a > 0) demandServed += Math.min(p, a);
+
       const d = String(r.trx_date ?? "").slice(0, 10);
       if (d) {
         const cur = byDay.get(d) ?? { p: 0, a: 0 };
@@ -110,10 +109,34 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
         cur.a += a;
         byDay.set(d, cur);
       }
+      const code = String(r.item_code ?? "");
+      if (code) {
+        const agg = byItem.get(code) ?? { predicted: 0, actual: 0 };
+        agg.predicted += p;
+        agg.actual += a;
+        byItem.set(code, agg);
+      }
     });
 
-    // Sort days chronologically so streaks + trend are well-defined. Score
-    // only days with actual > 0 AND predicted > 0 (same filter as per-row).
+    // Dud SKUs: we forecast them but customers never bought them this window.
+    // Parallels the Adoption drawer's Lost sales (items recommended yet unsold).
+    let dudSkuCount = 0;
+    let dudUnits = 0;
+    let dudRevenue = 0;
+    let pricesSeen = false;
+    byItem.forEach(({ predicted, actual }, code) => {
+      if (predicted > 0 && actual === 0) {
+        dudSkuCount += 1;
+        dudUnits += predicted;
+        const price = prices[code] ?? 0;
+        if (price > 0) {
+          dudRevenue += predicted * price;
+          pricesSeen = true;
+        }
+      }
+    });
+
+    // Day entries for on-target count, streak + best-day highlights.
     const dayEntries = Array.from(byDay.entries())
       .filter(([, v]) => v.a > 0 && v.p > 0)
       .sort(([a], [b]) => a.localeCompare(b));
@@ -125,8 +148,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     let bestDayAcc = -1;
 
     dayEntries.forEach(([date, { p, a }]) => {
-      const onTarget = Math.abs(p - a) / a <= TOLERANCE_PCT;
-      if (onTarget) {
+      if (Math.abs(p - a) / a <= TOLERANCE_PCT) {
         daysOnTarget += 1;
         currentStreak += 1;
         if (currentStreak > bestStreak) bestStreak = currentStreak;
@@ -141,44 +163,19 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     });
     const bestDay = bestDayAcc >= 0 ? { date: bestDayDate, accuracy: bestDayAcc } : null;
 
-    // Trend: compare the late half of the window against the early half using
-    // the same WAPE formula. Needs >= 2 scored days to be meaningful.
-    let trendPP: number | null = null;
-    if (dayEntries.length >= 2) {
-      const mid = Math.floor(dayEntries.length / 2);
-      const halfAcc = (slice: typeof dayEntries) => {
-        let err = 0, act = 0;
-        slice.forEach(([, { p, a }]) => { err += Math.abs(p - a); act += a; });
-        return wapeAccuracy(err, act);
-      };
-      const early = halfAcc(dayEntries.slice(0, mid));
-      const late = halfAcc(dayEntries.slice(mid));
-      if (early != null && late != null) trendPP = late - early;
-    }
-
-    // Demand served = units where our forecast matched or exceeded actual need.
-    // For each row: min(predicted, actual) — the portion we got right.
-    let demandServed = 0;
-    filteredRows.forEach((r) => {
-      const p = toNum(r.predicted) ?? 0;
-      const a = toNum(r.actual_qty) ?? 0;
-      demandServed += Math.min(p, a);
-    });
-    const sellThroughPct = totalPred > 0 ? (Math.min(totalActual, totalPred) / totalPred) * 100 : null;
-
     return {
       accuracyPct: wapeAccuracy(scoredAbsErr, scoredActual),
-      biasPct: totalActual > 0 ? ((totalPred - totalActual) / totalActual) * 100 : null,
       demandServed,
-      sellThroughPct,
       totalActual,
       daysOnTarget,
       daysScored: dayEntries.length,
       bestStreak,
       bestDay,
-      trendPP,
+      dudSkuCount,
+      dudUnits,
+      dudRevenue: pricesSeen ? dudRevenue : null,
     };
-  }, [filteredRows]);
+  }, [filteredRows, prices]);
 
   // Daily aggregated chart
   const dailyChart = useMemo(() => {
@@ -228,10 +225,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
 
   const windowLabel = `${params.start_date} to ${params.end_date}`;
 
-  const biasAbs = stats.biasPct != null ? Math.abs(stats.biasPct) : null;
-  const biasTrend =
-    biasAbs == null ? undefined : biasAbs < BIAS_GOOD_PCT ? "up" : biasAbs < BIAS_WARN_PCT ? undefined : "down";
-
   // Smallest |variance| / actual across items -- our "most accurate item" win.
   // Only considers items whose 30-day actual volume crosses the same
   // significance threshold we use for lost-sales / dead-weight, so a SKU that
@@ -277,24 +270,23 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     return items;
   }, [stats.bestDay, stats.bestStreak, mostAccurateItem]);
 
-  const trendValue =
-    stats.trendPP == null
-      ? "-"
-      : stats.trendPP >= TREND_STEP_PP
-      ? "Improving"
-      : stats.trendPP <= -TREND_STEP_PP
-      ? "Slipping"
-      : "Steady";
-  const trendSubtitle =
-    stats.trendPP == null
-      ? "Need more history"
-      : `${Math.abs(stats.trendPP).toFixed(1)}% shift, last 15 days vs prior 15`;
-  const trendArrow: "up" | "down" | undefined =
-    stats.trendPP == null
+  // Arrows only on tiles where "up = unambiguously good." Lost sales tile
+  // carries no arrow -- it's a loss magnitude, not a direction.
+  const servedArrow: "up" | "down" | undefined = stats.demandServed > 0 ? "up" : undefined;
+  const accuracyArrow: "up" | "down" | undefined =
+    stats.accuracyPct == null
       ? undefined
-      : stats.trendPP >= TREND_STEP_PP
+      : stats.accuracyPct >= GOOD_SCORE_THRESHOLD
       ? "up"
-      : stats.trendPP <= -TREND_STEP_PP
+      : "down";
+  const onTargetRatio =
+    stats.daysScored > 0 ? stats.daysOnTarget / stats.daysScored : null;
+  const onTargetArrow: "up" | "down" | undefined =
+    onTargetRatio == null
+      ? undefined
+      : onTargetRatio >= 0.7
+      ? "up"
+      : onTargetRatio < 0.4
       ? "down"
       : undefined;
 
@@ -335,78 +327,49 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
           <>
             <KpiRow>
               <MetricCard
+                label="Demand served by our forecast"
+                value={`${fmtNum(stats.demandServed)} units`}
+                subtitle={
+                  stats.totalActual > 0
+                    ? `${fmtNum(stats.demandServed)} of ${fmtNum(stats.totalActual)} units customers bought were in the van`
+                    : "No sales in this window"
+                }
+                trend={servedArrow}
+              />
+              <MetricCard
                 label="Forecast accuracy"
                 value={stats.accuracyPct != null ? `${stats.accuracyPct.toFixed(1)}%` : "-"}
                 subtitle={
                   stats.daysScored > 0
-                    ? `On target ${stats.daysOnTarget} of ${stats.daysScored} days`
-                    : "No scored days"
+                    ? `${stats.daysScored} of ${windowDays} days with records`
+                    : `No records in last ${windowDays} days`
                 }
-                trend={
-                  stats.accuracyPct == null
-                    ? undefined
-                    : stats.accuracyPct >= GOOD_SCORE_THRESHOLD
-                    ? "up"
-                    : "down"
-                }
+                trend={accuracyArrow}
               />
               <MetricCard
                 label="On-target days"
                 value={stats.daysScored > 0 ? `${stats.daysOnTarget} / ${stats.daysScored}` : "-"}
-                subtitle={`Within ${Math.round(TOLERANCE_PCT * 100)}% of actual`}
-                trend={
-                  stats.daysScored === 0
-                    ? undefined
-                    : stats.daysOnTarget / stats.daysScored >= 0.7
-                    ? "up"
-                    : stats.daysOnTarget / stats.daysScored < 0.4
-                    ? "down"
-                    : undefined
-                }
+                subtitle={`Days within ${Math.round(TOLERANCE_PCT * 100)}% of actual`}
+                trend={onTargetArrow}
               />
               <MetricCard
-                label="Van-load bias"
+                label="Lost sales"
                 value={
-                  stats.biasPct != null
-                    ? `${stats.biasPct > 0 ? "+" : ""}${stats.biasPct.toFixed(1)}%`
-                    : "-"
+                  stats.dudRevenue != null && stats.dudRevenue > 0
+                    ? fmtCurrency(stats.dudRevenue)
+                    : stats.dudUnits > 0
+                    ? `${fmtNum(stats.dudUnits)} units`
+                    : "0"
                 }
-                subtitle="+ loaded too many, − too few"
-                trend={biasTrend}
-              />
-              <MetricCard
-                label="Accuracy trend"
-                value={trendValue}
-                subtitle={trendSubtitle}
-                trend={trendArrow}
+                subtitle={
+                  stats.dudSkuCount === 0
+                    ? "Every forecasted item sold at least once"
+                    : `${fmtNum(stats.dudSkuCount)} items · ${fmtNum(stats.dudUnits)} units never sold`
+                }
               />
             </KpiRow>
 
             <HighlightsStrip items={highlights} />
-
-            <div>
-              <p className="mb-2 text-caption uppercase tracking-wide text-text-tertiary">
-                What our forecast delivered
-              </p>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                <MetricCard
-                  label="Demand served"
-                  value={fmtNum(stats.demandServed)}
-                  subtitle="Units of customer demand our forecast correctly covered"
-                  trend="up"
-                />
-                <MetricCard
-                  label="Sell-through rate"
-                  value={stats.sellThroughPct != null ? `${stats.sellThroughPct.toFixed(1)}%` : "-"}
-                  subtitle="Share of recommended load customers actually bought"
-                  trend={
-                    stats.sellThroughPct != null && stats.sellThroughPct >= GOOD_SCORE_THRESHOLD
-                      ? "up"
-                      : undefined
-                  }
-                />
-              </div>
-            </div>
 
             <LineChart
               title="Recommended vs actual (daily)"
