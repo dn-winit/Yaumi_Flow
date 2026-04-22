@@ -12,7 +12,7 @@ import { CHART_COLOR } from "@/components/charts/theme";
 
 import { useAdoption } from "@/hooks/useRecommendedOrder";
 import { addDays, todayIso } from "@/lib/date";
-import { fmtNum, fmtCurrency, DELIVERY_GOOD } from "@/lib/format";
+import { fmtNum, fmtCurrency, DELIVERY_GOOD, LAST_30_DAYS } from "@/lib/format";
 
 interface Props {
   open: boolean;
@@ -23,8 +23,7 @@ interface Props {
 export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   const { params, windowLabel } = useMemo(() => {
     const endDate = todayIso();
-    const days = 30;
-    const startDate = addDays(endDate, -(days - 1));
+    const startDate = addDays(endDate, -(LAST_30_DAYS - 1));
     return {
       params: {
         start_date: startDate,
@@ -92,7 +91,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   // Arrows only on tiles where "up = unambiguously good." Lost sales
   // carries no arrow -- it's a loss magnitude, not a direction.
   const revenueArrow: "up" | "down" | undefined =
-    s?.actual_revenue != null && s.actual_revenue > 0 ? "up" : undefined;
+    s?.driven_revenue != null && s.driven_revenue > 0 ? "up" : undefined;
   const accuracyArrow: "up" | "down" | undefined =
     derived?.pickAccuracyPct == null
       ? undefined
@@ -135,16 +134,16 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
               <MetricCard
                 label="Revenue driven by our list"
                 value={
-                  s?.actual_revenue != null && s.actual_revenue > 0
-                    ? fmtCurrency(s.actual_revenue)
-                    : s?.actual_volume
-                    ? `${fmtNum(s.actual_volume)} units`
+                  s?.driven_revenue != null && s.driven_revenue > 0
+                    ? fmtCurrency(s.driven_revenue)
+                    : s?.driven_volume
+                    ? `${fmtNum(s.driven_volume)} units`
                     : "-"
                 }
                 subtitle={
-                  s && s.actual_volume > 0
-                    ? `${fmtNum(s.actual_volume)} units sold across ${fmtNum(s.skus_adopted)} items`
-                    : "No recommendations converted yet"
+                  !s || s.recommended_volume <= 0
+                    ? "No recommendations converted yet"
+                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} recommended units sold · ${fmtNum(s.skus_adopted)} items`
                 }
                 trend={revenueArrow}
               />
@@ -179,16 +178,16 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
               <MetricCard
                 label="Lost sales"
                 value={
-                  s?.lost_revenue != null && s.lost_revenue > 0
-                    ? fmtCurrency(s.lost_revenue)
-                    : s?.lost_sales_units
-                    ? `${fmtNum(s.lost_sales_units)} units`
+                  s?.unsold_revenue != null && s.unsold_revenue > 0
+                    ? fmtCurrency(s.unsold_revenue)
+                    : s?.unsold_volume
+                    ? `${fmtNum(s.unsold_volume)} units`
                     : "0"
                 }
                 subtitle={
-                  !s?.skus_over_recommended
-                    ? "Every recommended item sold"
-                    : `${fmtNum(s.skus_over_recommended)} items · ${fmtNum(s.lost_sales_units)} units never sold`
+                  !s || s.unsold_volume === 0
+                    ? "Every recommended unit sold"
+                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items we recommended that didn't sell`
                 }
               />
             </KpiRow>

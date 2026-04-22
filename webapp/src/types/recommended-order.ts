@@ -84,19 +84,22 @@ export interface OrderHealthResponse {
 
 // ---------- Analytics: Adoption ----------
 export interface AdoptionSummary {
-  // Tile 1: Revenue driven by our list (volume + revenue on adopted rows)
-  actual_volume: number;
-  actual_revenue: number | null;
-  // Tile 3: Perfect picks (adopted SKUs within tolerance of actual qty).
-  // Tolerance flows from backend so the "within X% of actual" label stays
-  // in sync with the server-side definition.
+  // Decomposition of recommended volume/revenue:
+  //   driven_*  + unsold_*  = recommended_*    (reconciles exactly)
+  // driven  -> Σ min(rec, actual)  -- recs that converted (Tile 1)
+  // unsold  -> Σ max(0, rec - act) -- recs that didn't convert (Tile 4)
+  driven_volume: number;
+  driven_revenue: number | null;
+  unsold_volume: number;
+  unsold_revenue: number | null;
+  unsold_sku_count: number;
+  recommended_volume: number;
+  recommended_revenue: number | null;
+  // Tile 3: Perfect picks; tolerance flows from backend to keep "within X%"
+  // label in sync with the server-side definition.
   skus_perfect: number;
   perfect_pick_tolerance: number;
-  // Tile 4: Lost sales (SKUs we recommended that never sold)
-  skus_over_recommended: number;
-  lost_sales_units: number;
-  lost_revenue: number | null;
-  // Context bar + highlights + Tile 2 denominator
+  // Tile 2 denominator + context bar + highlights
   skus_recommended: number;
   skus_adopted: number;
   skus_bought: number;

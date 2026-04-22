@@ -68,9 +68,21 @@ export const LEAKAGE_SHARE_WARN = 0.05;
  *  - DELIVERY_GOOD: green when volume/revenue delivered >= this % of recommended.
  *  - TREND_STEP_PP: percentage-point change that counts as improving/declining;
  *    smaller deltas are shown as "stable".
+ *  - ON_TARGET_GOOD_RATIO / ON_TARGET_POOR_RATIO: arrow direction on the
+ *    "On-target days" tile -- up when at least this share of scored days
+ *    landed within tolerance, down when below the poor cutoff.
  */
 export const DELIVERY_GOOD = 80;
 export const TREND_STEP_PP = 2;
+export const ON_TARGET_GOOD_RATIO = 0.7;
+export const ON_TARGET_POOR_RATIO = 0.4;
+
+/**
+ * Shared Last-30-Days window size. Both the Adoption drawer and VanLoad
+ * accuracy drawer query the same span, so they import the same constant.
+ * Changing here updates both dashboards + their context-bar labels.
+ */
+export const LAST_30_DAYS = 30;
 
 /** Pull the date out of any row that uses TrxDate / trx_date / ds / date. */
 export function pickDate(row: Record<string, unknown>): string {

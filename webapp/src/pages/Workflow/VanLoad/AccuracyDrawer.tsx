@@ -20,6 +20,9 @@ import {
   GOOD_SCORE_THRESHOLD,
   TOLERANCE_PCT,
   LEAKAGE_SHARE_WARN,
+  ON_TARGET_GOOD_RATIO,
+  ON_TARGET_POOR_RATIO,
+  LAST_30_DAYS,
 } from "@/lib/format";
 import { addDays, todayIso } from "@/lib/date";
 import type { Row } from "@/types/common";
@@ -42,8 +45,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
   const [explainRow, setExplainRow] = useState<Row | null>(null);
   const { params, windowDays } = useMemo(() => {
     const endDate = todayIso();
-    const days = 30;
-    const startDate = addDays(endDate, -(days - 1));
+    const startDate = addDays(endDate, -(LAST_30_DAYS - 1));
     const p: Record<string, unknown> = {
       start_date: startDate,
       end_date: endDate,
@@ -53,7 +55,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     // the API can only filter one, so we fetch the route-wide window and filter
     // client-side below; the backend summary in that case isn't useful.
     if (itemCodes && itemCodes.length === 1) p.item_code = itemCodes[0];
-    return { params: p, windowDays: days };
+    return { params: p, windowDays: LAST_30_DAYS };
   }, [routeCode, itemCodes]);
 
   // Only run the cross-DB join when the drawer is actually open.
@@ -71,12 +73,17 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
 
   // Single-pass client-side stats.
   //
-  // Four tiles:
-  //   * demandServed  -- Σ min(predicted, actual): units our forecast covered
-  //   * accuracyPct   -- WAPE-based quality; scored where both > 0
-  //   * daysOnTarget  -- count of days with |pred − actual|/actual ≤ TOLERANCE_PCT
-  //   * Lost sales    -- dud SKUs (forecast but never sold): item count + units
-  //                      + revenue when prices are available
+  // Four tiles — arithmetic identity on the FORECAST dimension:
+  //   demandServed + unsoldForecast = totalPredicted (every forecasted unit
+  //   either sold through or stayed in the van). Tile 1 and Tile 4 reconcile
+  //   exactly on what we told the van to carry.
+  //
+  //   * demandServed    -- Σ min(predicted, actual): forecast units that sold
+  //   * accuracyPct     -- WAPE-based quality; scored where both > 0
+  //   * daysOnTarget    -- days with |pred − actual|/actual ≤ TOLERANCE_PCT
+  //   * Lost sales      -- Σ max(0, predicted − actual): forecast units that
+  //                        DIDN'T sell -- stock we loaded, customers didn't take,
+  //                        valued at avg unit price
   //
   // Highlights strip reuses bestDay + bestStreak from the same pass.
   const wapeAccuracy = (absErr: number, actual: number) =>
@@ -88,19 +95,35 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     let scoredAbsErr = 0;
     let scoredActual = 0;
     let totalActual = 0;
+    let totalPredicted = 0;
     let demandServed = 0;
+    let unsoldForecast = 0;
+    let unsoldRevenue = 0;
+    let pricesSeen = false;
 
     filteredRows.forEach((r) => {
       const p = toNum(r.predicted) ?? 0;
       const a = toNum(r.actual_qty) ?? 0;
       totalActual += a;
+      totalPredicted += p;
       // Score rows where actual > 0 AND predicted > 0 -- same filter the
       // backend wape_summary helper uses so every accuracy display agrees.
       if (a > 0 && p > 0) {
         scoredAbsErr += Math.abs(a - p);
         scoredActual += a;
       }
-      if (a > 0) demandServed += Math.min(p, a);
+      // Decompose forecast into sold-through + unsold.
+      demandServed += Math.min(p, a);
+      const excess = Math.max(0, p - a);
+      if (excess > 0) {
+        unsoldForecast += excess;
+        const code = String(r.item_code ?? "");
+        const price = code ? prices[code] ?? 0 : 0;
+        if (price > 0) {
+          unsoldRevenue += excess * price;
+          pricesSeen = true;
+        }
+      }
 
       const d = String(r.trx_date ?? "").slice(0, 10);
       if (d) {
@@ -118,22 +141,19 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       }
     });
 
-    // Dud SKUs: we forecast them but customers never bought them this window.
-    // Parallels the Adoption drawer's Lost sales (items recommended yet unsold).
-    let dudSkuCount = 0;
-    let dudUnits = 0;
-    let dudRevenue = 0;
-    let pricesSeen = false;
-    byItem.forEach(({ predicted, actual }, code) => {
-      if (predicted > 0 && actual === 0) {
-        dudSkuCount += 1;
-        dudUnits += predicted;
-        const price = prices[code] ?? 0;
-        if (price > 0) {
-          dudRevenue += predicted * price;
-          pricesSeen = true;
-        }
-      }
+    // SKU counts for the context bar + tile subtitles:
+    //   forecastedSkuCount -- master set: items our forecast told the van to carry
+    //   servedSkuCount     -- subset: forecast items that sold at least some units
+    //   unsoldSkuCount     -- subset: items where forecast exceeded actual
+    // A partially-over-forecast SKU can appear in served AND unsold; that's
+    // honest since it contributed units to served AND to the unsold remainder.
+    let forecastedSkuCount = 0;
+    let servedSkuCount = 0;
+    let unsoldSkuCount = 0;
+    byItem.forEach(({ predicted, actual }) => {
+      if (predicted > 0) forecastedSkuCount += 1;
+      if (predicted > 0 && actual > 0) servedSkuCount += 1;
+      if (predicted > actual) unsoldSkuCount += 1;
     });
 
     // Day entries for on-target count, streak + best-day highlights.
@@ -167,13 +187,16 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       accuracyPct: wapeAccuracy(scoredAbsErr, scoredActual),
       demandServed,
       totalActual,
+      totalPredicted,
+      forecastedSkuCount,
+      servedSkuCount,
       daysOnTarget,
       daysScored: dayEntries.length,
       bestStreak,
       bestDay,
-      dudSkuCount,
-      dudUnits,
-      dudRevenue: pricesSeen ? dudRevenue : null,
+      unsoldForecast,
+      unsoldSkuCount,
+      unsoldRevenue: pricesSeen ? unsoldRevenue : null,
     };
   }, [filteredRows, prices]);
 
@@ -284,9 +307,9 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
   const onTargetArrow: "up" | "down" | undefined =
     onTargetRatio == null
       ? undefined
-      : onTargetRatio >= 0.7
+      : onTargetRatio >= ON_TARGET_GOOD_RATIO
       ? "up"
-      : onTargetRatio < 0.4
+      : onTargetRatio < ON_TARGET_POOR_RATIO
       ? "down"
       : undefined;
 
@@ -298,9 +321,9 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
           itemCodes={itemCodes}
           dateRange={windowLabel}
           extra={
-            filteredRows.length > 0 && (
+            stats.forecastedSkuCount > 0 && (
               <span className="text-caption text-text-tertiary">
-                {fmtNum(filteredRows.length)} scored rows
+                {fmtNum(stats.forecastedSkuCount)} unique items forecast
               </span>
             )
           }
@@ -330,9 +353,9 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
                 label="Demand served by our forecast"
                 value={`${fmtNum(stats.demandServed)} units`}
                 subtitle={
-                  stats.totalActual > 0
-                    ? `${fmtNum(stats.demandServed)} of ${fmtNum(stats.totalActual)} units customers bought were in the van`
-                    : "No sales in this window"
+                  stats.totalPredicted > 0
+                    ? `${fmtNum(stats.demandServed)} of ${fmtNum(stats.totalPredicted)} forecast units sold · ${fmtNum(stats.servedSkuCount)} items`
+                    : "No forecast in this window"
                 }
                 trend={servedArrow}
               />
@@ -355,16 +378,16 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
               <MetricCard
                 label="Lost sales"
                 value={
-                  stats.dudRevenue != null && stats.dudRevenue > 0
-                    ? fmtCurrency(stats.dudRevenue)
-                    : stats.dudUnits > 0
-                    ? `${fmtNum(stats.dudUnits)} units`
+                  stats.unsoldRevenue != null && stats.unsoldRevenue > 0
+                    ? fmtCurrency(stats.unsoldRevenue)
+                    : stats.unsoldForecast > 0
+                    ? `${fmtNum(stats.unsoldForecast)} units`
                     : "0"
                 }
                 subtitle={
-                  stats.dudSkuCount === 0
-                    ? "Every forecasted item sold at least once"
-                    : `${fmtNum(stats.dudSkuCount)} items · ${fmtNum(stats.dudUnits)} units never sold`
+                  stats.unsoldForecast === 0
+                    ? "Every forecasted unit sold"
+                    : `${fmtNum(stats.unsoldForecast)} units · ${fmtNum(stats.unsoldSkuCount)} items we forecast that didn't sell`
                 }
               />
             </KpiRow>

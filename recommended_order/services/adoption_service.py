@@ -18,6 +18,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional
 
+import numpy as np
 import pandas as pd
 
 from recommended_order.config.constants import ANALYTICS_CACHE_TTL_SECONDS
@@ -201,11 +202,16 @@ class AdoptionService:
 
     @staticmethod
     def _summary(merged: pd.DataFrame) -> Dict[str, Any]:
-        """Business-facing summary: volume/revenue achievement + opportunity gaps.
+        """Business-facing summary with a clean arithmetic identity.
 
-        Every field is consumed by a tile or subtitle -- no legacy carry-over.
-        Revenue fields are null when no prices are available so the UI can
-        fall back to unit counts without inventing currency numbers.
+        Decomposes total recommended volume/revenue on the SAME rows using the
+        SAME base so Tile 1 and Tile 4 reconcile:
+
+            driven_* + unsold_* = recommended_*   (per SKU and in aggregate)
+
+        driven = Σ min(recommended_qty, actual_qty)  -- recs that converted
+        unsold = Σ max(0, recommended_qty − actual)  -- recs that didn't
+        This mirrors the VanLoad drawer's decomposition on the forecast side.
         """
         recommended_rows = merged[merged["_merge"].isin(["left_only", "both"])]
         adopted_rows = merged[merged["adopted"]]
@@ -222,56 +228,67 @@ class AdoptionService:
             ].astype(str).unique()
         )
         adopted_skus = rec_skus & bought_skus
-        over_rec_skus = rec_skus - bought_skus
 
-        # --- Tile 1: Revenue driven / Tile 2: Pick accuracy (volume + revenue
-        # on the recommended intersection with sales). ---
-        actual_volume = float(adopted_rows["actual_qty"].sum())
-        actual_revenue = (
-            float((adopted_rows["actual_qty"] * adopted_rows["unit_price"]).sum())
-            if prices_available
-            else None
-        )
+        # --- Vectorised decomposition of recommended volume/revenue ---
+        # Both tiles pull from the same rec_qty and actual_qty columns on the
+        # same row set, so there's no base-mismatch or universe-mismatch.
+        rec_q = recommended_rows["recommended_qty"]
+        act_q = recommended_rows["actual_qty"]
+        driven_q = np.minimum(rec_q, act_q)
+        unsold_q = np.maximum(0.0, rec_q - act_q)
 
-        # --- Tile 3: Perfect picks (adopted SKUs within ±20% of actual) ---
-        # Aggregate predicted+actual per adopted SKU, then count SKUs whose
-        # totals land inside the tolerance band. SKU-grain keeps the count
-        # comparable to skus_adopted (the denominator the tile uses).
-        if not adopted_rows.empty:
-            by_sku = adopted_rows.groupby("item_code").agg(
+        driven_volume = float(driven_q.sum())
+        unsold_volume = float(unsold_q.sum())
+        recommended_volume = float(rec_q.sum())
+
+        if prices_available:
+            price = recommended_rows["unit_price"]
+            driven_revenue: Optional[float] = float((driven_q * price).sum())
+            unsold_revenue: Optional[float] = float((unsold_q * price).sum())
+            recommended_revenue: Optional[float] = float((rec_q * price).sum())
+        else:
+            driven_revenue = None
+            unsold_revenue = None
+            recommended_revenue = None
+
+        # Items with any shortfall (aggregate rec > aggregate actual). Broader
+        # than strict dud SKUs -- captures partial over-recommendation too.
+        if not recommended_rows.empty:
+            by_sku = recommended_rows.groupby("item_code").agg(
                 rec=("recommended_qty", "sum"),
                 act=("actual_qty", "sum"),
             )
-            by_sku = by_sku[by_sku["act"] > 0]
-            within = (by_sku["rec"] - by_sku["act"]).abs() / by_sku["act"] <= _PERFECT_PICK_TOLERANCE
+            unsold_sku_count = int((by_sku["rec"] > by_sku["act"]).sum())
+        else:
+            unsold_sku_count = 0
+
+        # --- Tile 3: Perfect picks (adopted SKUs within ±tolerance of actual) ---
+        if not adopted_rows.empty:
+            ad_sku = adopted_rows.groupby("item_code").agg(
+                rec=("recommended_qty", "sum"),
+                act=("actual_qty", "sum"),
+            )
+            ad_sku = ad_sku[ad_sku["act"] > 0]
+            within = (ad_sku["rec"] - ad_sku["act"]).abs() / ad_sku["act"] <= _PERFECT_PICK_TOLERANCE
             skus_perfect = int(within.sum())
         else:
             skus_perfect = 0
 
-        # --- Tile 4: Lost sales (SKUs we recommended that never sold) ---
-        dud_rows = merged[
-            merged["_merge"].isin(["left_only", "both"])
-            & merged["item_code"].isin(over_rec_skus)
-        ]
-        lost_units = float(dud_rows["recommended_qty"].sum())
-        lost_revenue = (
-            float((dud_rows["recommended_qty"] * dud_rows["unit_price"]).sum())
-            if prices_available
-            else None
-        )
-
         return {
-            # Tile 1: Revenue driven
-            "actual_volume": round(actual_volume, 1),
-            "actual_revenue": round(actual_revenue, 2) if actual_revenue is not None else None,
+            # Tile 1: Revenue driven by our list (recs that converted)
+            "driven_volume": round(driven_volume, 1),
+            "driven_revenue": round(driven_revenue, 2) if driven_revenue is not None else None,
+            # Tile 4: Lost sales (recs that didn't convert)
+            "unsold_volume": round(unsold_volume, 1),
+            "unsold_revenue": round(unsold_revenue, 2) if unsold_revenue is not None else None,
+            "unsold_sku_count": unsold_sku_count,
+            # Totals so the UI can show the "X of Y" ratio honestly
+            "recommended_volume": round(recommended_volume, 1),
+            "recommended_revenue": round(recommended_revenue, 2) if recommended_revenue is not None else None,
             # Tile 3: Perfect picks
             "skus_perfect": skus_perfect,
             "perfect_pick_tolerance": _PERFECT_PICK_TOLERANCE,
-            # Tile 4: Lost sales
-            "skus_over_recommended": len(over_rec_skus),
-            "lost_sales_units": round(lost_units, 1),
-            "lost_revenue": round(lost_revenue, 2) if lost_revenue is not None else None,
-            # Context bar + highlights + Tile 2 denominator
+            # Tile 2 + context bar + highlights
             "skus_recommended": len(rec_skus),
             "skus_adopted": len(adopted_skus),
             "skus_bought": len(bought_skus),
