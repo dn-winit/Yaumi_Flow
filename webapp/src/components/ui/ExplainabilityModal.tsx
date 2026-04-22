@@ -43,13 +43,17 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
   if (!w || w.avg == null) {
     return <Stat label={label} value="-" hint="No demand in this window" />;
   }
+  // Backend computes avg as total / active_days, so the displayed figure is
+  // the typical quantity on days the item actually sold -- not a calendar-day
+  // average. Labelling it "/selling day" keeps the math honest: the user can
+  // verify avg × active_days ≈ total from the hint.
   return (
     <Stat
       label={label}
       value={
         <>
           {w.avg.toFixed(1)}
-          <span className="text-caption font-normal text-text-tertiary"> /day</span>
+          <span className="text-caption font-normal text-text-tertiary"> /selling day</span>
         </>
       }
       hint={`${w.active_days} selling days out of ${w.days} · total ${w.total.toFixed(0)} units`}
