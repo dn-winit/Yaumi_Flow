@@ -1,4 +1,4 @@
-import { useState, useCallback } from "react";
+import { useMemo, useState, useCallback } from "react";
 import PageHeader from "@/components/layout/PageHeader";
 import Card from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -8,7 +8,6 @@ import MetricCard from "@/components/charts/MetricCard";
 import Loading from "@/components/ui/Loading";
 import {
   useForecastSummary,
-  useTrainingSummary,
   useClassSummary,
   usePipelineStatus,
   useTriggerPipeline,
@@ -20,63 +19,43 @@ import type { Tone } from "@/lib/colorize";
 import type { PipelineStatusResponse } from "@/types/forecast";
 
 /* ------------------------------------------------------------------ */
-/*  Step metadata                                                      */
+/*  Step metadata + helpers                                            */
 /* ------------------------------------------------------------------ */
 
 interface StepDef {
   key: string;
   name: string;
-  description: string;
   /** Pipeline names from the API that map to this logical step. */
   pipelineKeys: string[];
 }
 
 const STEPS: StepDef[] = [
-  {
-    key: "collection",
-    name: "Data collection",
-    description: "Sales history gathered from multiple sources",
-    pipelineKeys: ["data_collection", "collection"],
-  },
-  {
-    key: "processing",
-    name: "Data processing",
-    description: "Cleaned, validated, and normalised",
-    pipelineKeys: ["data_processing", "processing"],
-  },
-  {
-    key: "features",
-    name: "Feature engineering",
-    description: "47 contextual signals built automatically",
-    pipelineKeys: ["feature_engineering", "features"],
-  },
-  {
-    key: "classification",
-    name: "Demand classification",
-    description: "Items grouped by buying pattern",
-    pipelineKeys: ["classification", "demand_classification"],
-  },
-  {
-    key: "training",
-    name: "Model training",
-    description: "Multiple models compete per item type",
-    pipelineKeys: ["training", "train"],
-  },
-  {
-    key: "forecast",
-    name: "Forecast generation",
-    description: "Predictions for the next 28 days",
-    pipelineKeys: ["inference", "forecast"],
-  },
+  { key: "collection",     name: "Data collection",       pipelineKeys: ["data_collection", "collection"] },
+  { key: "processing",     name: "Data processing",       pipelineKeys: ["data_processing", "processing"] },
+  { key: "features",       name: "Feature engineering",   pipelineKeys: ["feature_engineering", "features"] },
+  { key: "classification", name: "Demand classification", pipelineKeys: ["classification", "demand_classification"] },
+  { key: "training",       name: "Model training",        pipelineKeys: ["training", "train"] },
+  { key: "forecast",       name: "Forecast generation",   pipelineKeys: ["inference", "forecast"] },
 ];
 
-const FEATURE_PILLS = ["Holidays", "Seasonality", "Lag patterns", "Rolling trends", "Route signals"];
-
-/* ------------------------------------------------------------------ */
-/*  Helpers                                                            */
-/* ------------------------------------------------------------------ */
-
 type StepStatus = "completed" | "running" | "idle" | "failed";
+
+// Single mapping from raw API status strings to our internal step state.
+// Defined once so both branches of resolveStatus share it -- no duplicated
+// "completed/success", "running/pending", "failed/error" handling.
+const STATUS_MAP: Record<string, StepStatus> = {
+  completed: "completed",
+  success: "completed",
+  running: "running",
+  pending: "running",
+  failed: "failed",
+  error: "failed",
+};
+
+function mapStatus(raw: string | null | undefined): StepStatus | null {
+  if (!raw) return null;
+  return STATUS_MAP[raw.toLowerCase()] ?? null;
+}
 
 function resolveStatus(
   step: StepDef,
@@ -84,34 +63,24 @@ function resolveStatus(
 ): { status: StepStatus; info: PipelineStatusResponse | null } {
   if (!statuses) return { status: "idle", info: null };
 
-  // First check per-step statuses from the live pipeline run. These give
-  // granular "data_collection: completed, feature_engineering: running" updates
-  // while a pipeline is in progress.
+  // Per-step statuses from the live pipeline run take priority -- they give
+  // granular "X: completed, Y: running" updates while a pipeline is in flight.
   for (const pipeline of ["train", "inference"]) {
-    const run = statuses[pipeline] as PipelineStatusResponse & { steps?: Record<string, string> } | undefined;
+    const run = statuses[pipeline] as
+      | (PipelineStatusResponse & { steps?: Record<string, string> })
+      | undefined;
     if (!run?.steps) continue;
     for (const k of step.pipelineKeys) {
-      const stepStatus = run.steps[k];
-      if (stepStatus) {
-        const s = stepStatus.toLowerCase();
-        if (s === "completed" || s === "success") return { status: "completed", info: run };
-        if (s === "running" || s === "pending") return { status: "running", info: run };
-        if (s === "failed" || s === "error") return { status: "failed", info: run };
-      }
+      const mapped = mapStatus(run.steps[k]);
+      if (mapped) return { status: mapped, info: run };
     }
   }
 
-  // Fallback: match the step against top-level pipeline statuses (for when no
-  // per-step data is available — e.g. idle pipelines or old API versions).
+  // Fallback: top-level pipeline status (idle pipelines or older API).
   for (const k of step.pipelineKeys) {
     const match = statuses[k];
-    if (match) {
-      const s = match.status?.toLowerCase();
-      if (s === "completed" || s === "success") return { status: "completed", info: match };
-      if (s === "running" || s === "pending") return { status: "running", info: match };
-      if (s === "failed" || s === "error") return { status: "failed", info: match };
-      return { status: "idle", info: match };
-    }
+    if (!match) continue;
+    return { status: mapStatus(match.status) ?? "idle", info: match };
   }
   return { status: "idle", info: null };
 }
@@ -124,7 +93,7 @@ function statusTone(s: StepStatus): Tone {
 }
 
 function statusLabel(s: StepStatus): string {
-  if (s === "completed") return "Completed";
+  if (s === "completed") return "Done";
   if (s === "running") return "Running";
   if (s === "failed") return "Failed";
   return "Idle";
@@ -133,8 +102,7 @@ function statusLabel(s: StepStatus): string {
 function fmtTimestamp(ts: string | null): string {
   if (!ts) return "";
   try {
-    const d = new Date(ts);
-    return d.toLocaleString(undefined, {
+    return new Date(ts).toLocaleString(undefined, {
       month: "short",
       day: "numeric",
       hour: "2-digit",
@@ -156,60 +124,172 @@ function daysSince(ts: string | null): number | null {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Step metric sub-component                                          */
+/*  Step-flow visualisation                                             */
 /* ------------------------------------------------------------------ */
 
-function StepMetric({ step, summaryData, classData, trainingData }: {
+interface ResolvedStep {
+  step: StepDef;
+  status: StepStatus;
+  info: PipelineStatusResponse | null;
+  /** Pre-computed React node so both desktop and mobile layouts render the
+   *  same memoised JSX -- avoids paying for the metric tree twice per render. */
+  metric: React.ReactNode;
+}
+
+/**
+ * The connector between step `i` and `i+1` lights up brand-coloured as soon
+ * as step `i+1` has started (running OR completed). This makes the flow
+ * "fill in" as the pipeline progresses, exactly like a wizard stepper.
+ */
+function connectorActive(next: StepStatus): boolean {
+  return next === "completed" || next === "running";
+}
+
+function StepCircle({
+  index,
+  status,
+}: {
+  index: number;
+  status: StepStatus;
+}) {
+  const isDone = status === "completed";
+  const isRunning = status === "running";
+  const isActive = isDone || isRunning; // both share the brand fill
+  const isFailed = status === "failed";
+  return (
+    <div
+      className={[
+        "relative shrink-0 w-10 h-10 rounded-full flex items-center justify-center text-body font-bold leading-none",
+        "transition-colors duration-base",
+        isActive
+          ? "bg-brand-600 text-white shadow-sm"
+          : isFailed
+          ? "bg-danger-600 text-white shadow-sm"
+          : "bg-surface-sunken text-text-tertiary border-2 border-neutral-200",
+      ].join(" ")}
+    >
+      {isRunning && (
+        <span className="absolute inset-0 rounded-full bg-brand-600 animate-ping opacity-50" />
+      )}
+      {isDone ? (
+        <svg className="relative w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+          <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+        </svg>
+      ) : (
+        <span className="relative">{index + 1}</span>
+      )}
+    </div>
+  );
+}
+
+function Connector({ active, vertical }: { active: boolean; vertical?: boolean }) {
+  if (vertical) {
+    return (
+      <div className="ml-5 my-1 w-0.5 h-6 self-stretch flex-shrink-0">
+        <div
+          className={[
+            "w-full h-full rounded-full transition-colors duration-base",
+            active ? "bg-brand-600" : "bg-neutral-200",
+          ].join(" ")}
+        />
+      </div>
+    );
+  }
+  return (
+    <div className="flex-1 h-0.5 self-start mt-5 mx-1">
+      <div
+        className={[
+          "w-full h-full rounded-full transition-colors duration-base",
+          active ? "bg-brand-600" : "bg-neutral-200",
+        ].join(" ")}
+      />
+    </div>
+  );
+}
+
+function StepLabel({ resolved }: { resolved: ResolvedStep }) {
+  const { step, status, info, metric } = resolved;
+  const ts = info?.finished_at ?? info?.started_at;
+  return (
+    <div className="space-y-1">
+      <h4 className="text-body font-semibold text-text-primary leading-snug">{step.name}</h4>
+      <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
+      {metric && <div className="text-caption text-text-secondary">{metric}</div>}
+      {ts && <div className="text-caption text-text-tertiary">{fmtTimestamp(ts)}</div>}
+    </div>
+  );
+}
+
+function PipelineFlow({ resolved }: { resolved: ResolvedStep[] }) {
+  return (
+    <>
+      {/* Desktop: horizontal stepper with right-pointing connectors */}
+      <div className="hidden lg:flex items-start">
+        {resolved.map((r, i) => {
+          const next = resolved[i + 1];
+          return (
+            <div key={r.step.key} className="flex items-start flex-1">
+              <div className="flex flex-col items-center text-center w-32 shrink-0">
+                <StepCircle index={i} status={r.status} />
+                <div className="mt-2">
+                  <StepLabel resolved={r} />
+                </div>
+              </div>
+              {next && <Connector active={connectorActive(next.status)} />}
+            </div>
+          );
+        })}
+      </div>
+
+      {/* Tablet/mobile: vertical stepper with downward connectors */}
+      <div className="lg:hidden flex flex-col">
+        {resolved.map((r, i) => {
+          const next = resolved[i + 1];
+          return (
+            <div key={r.step.key}>
+              <div className="flex items-start gap-3">
+                <StepCircle index={i} status={r.status} />
+                <div className="flex-1 min-w-0 pt-1">
+                  <StepLabel resolved={r} />
+                </div>
+              </div>
+              {next && <Connector active={connectorActive(next.status)} vertical />}
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+function StepMetric({
+  step,
+  summaryData,
+  classData,
+}: {
   step: StepDef;
   summaryData: ReturnType<typeof useForecastSummary>["data"];
   classData: ReturnType<typeof useClassSummary>["data"];
-  trainingData: ReturnType<typeof useTrainingSummary>["data"];
 }) {
   switch (step.key) {
     case "collection": {
       const rows = summaryData?.total_pairs;
-      return <span className="text-caption text-text-tertiary">{rows != null ? `${fmtNum(rows)} item-route pairs` : "\u2014"}</span>;
+      return rows != null ? <>{fmtNum(rows)} item-route pairs</> : null;
     }
     case "processing":
-      return <span className="text-caption text-text-tertiary">Outliers handled, gaps filled</span>;
+      return <>Outliers handled, gaps filled</>;
     case "features":
-      return (
-        <div className="flex flex-wrap gap-1.5 mt-1">
-          {FEATURE_PILLS.map((p) => (
-            <span
-              key={p}
-              className="inline-block text-caption px-2 py-0.5 rounded-full bg-brand-50 text-brand-700 border border-brand-100"
-            >
-              {p}
-            </span>
-          ))}
-        </div>
-      );
+      return <>47 contextual signals</>;
     case "classification": {
-      if (!classData?.classes) return <span className="text-caption text-text-tertiary">{"\u2014"}</span>;
-      const entries = Object.entries(classData.classes);
-      return (
-        <span className="text-caption text-text-tertiary">
-          {entries.map(([cls, n]) => `${cls}: ${fmtNum(n)}`).join(" · ")}
-        </span>
-      );
+      if (!classData?.classes) return null;
+      const total = Object.values(classData.classes).reduce((n, v) => n + v, 0);
+      return <>{fmtNum(total)} items grouped</>;
     }
-    case "training": {
-      const raw = trainingData?.data as Record<string, unknown> | undefined;
-      const trainedAt = raw?.trained_at ?? raw?.last_trained ?? raw?.timestamp;
-      return (
-        <span className="text-caption text-text-tertiary">
-          {trainedAt ? `Trained ${fmtTimestamp(String(trainedAt))}` : "\u2014"}
-        </span>
-      );
-    }
+    case "training":
+      return <>Best model wins per group</>;
     case "forecast": {
       const count = summaryData?.future_forecast_count;
-      return (
-        <span className="text-caption text-text-tertiary">
-          {count != null ? `${fmtNum(count)} predictions` : "\u2014"}
-        </span>
-      );
+      return count != null ? <>{fmtNum(count)} predictions</> : null;
     }
     default:
       return null;
@@ -217,154 +297,14 @@ function StepMetric({ step, summaryData, classData, trainingData }: {
 }
 
 /* ------------------------------------------------------------------ */
-/*  Section A: Pipeline Flow                                           */
-/* ------------------------------------------------------------------ */
-
-function PipelineFlow({
-  statuses,
-  summaryData,
-  classData,
-  trainingData,
-}: {
-  statuses: Record<string, PipelineStatusResponse> | undefined;
-  summaryData: ReturnType<typeof useForecastSummary>["data"];
-  classData: ReturnType<typeof useClassSummary>["data"];
-  trainingData: ReturnType<typeof useTrainingSummary>["data"];
-}) {
-  return (
-    <Card title="Pipeline Flow">
-      <div className="relative pl-10">
-        {STEPS.map((step, i) => {
-          const { status, info } = resolveStatus(step, statuses);
-          const isLast = i === STEPS.length - 1;
-          const ts = info?.finished_at ?? info?.started_at;
-
-          return (
-            <div key={step.key} className="relative pb-6 last:pb-0">
-              {/* Connecting line */}
-              {!isLast && (
-                <div className="absolute left-[-21px] top-7 bottom-0 w-px bg-neutral-200" />
-              )}
-
-              {/* Number dot */}
-              <div
-                className={[
-                  "absolute left-[-29px] top-0.5 flex items-center justify-center w-6 h-6 rounded-full text-caption font-bold leading-none",
-                  status === "completed"
-                    ? "bg-brand-600 text-white"
-                    : status === "running"
-                      ? "bg-brand-600 text-white animate-pulse"
-                      : status === "failed"
-                        ? "bg-danger-600 text-white"
-                        : "bg-neutral-200 text-neutral-600",
-                ].join(" ")}
-              >
-                {status === "completed" ? (
-                  <svg className="w-3.5 h-3.5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
-                  </svg>
-                ) : (
-                  i + 1
-                )}
-              </div>
-
-              {/* Content */}
-              <div className="flex items-start justify-between gap-4">
-                <div className="min-w-0">
-                  <h4 className="text-body font-semibold text-text-primary">{step.name}</h4>
-                  <p className="text-caption text-text-secondary mt-0.5">{step.description}</p>
-                  <div className="mt-1">
-                    <StepMetric
-                      step={step}
-                      summaryData={summaryData}
-                      classData={classData}
-                      trainingData={trainingData}
-                    />
-                  </div>
-                </div>
-                <div className="flex flex-col items-end gap-1 shrink-0">
-                  <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
-                  {ts && (
-                    <span className="text-caption text-text-tertiary">{fmtTimestamp(ts)}</span>
-                  )}
-                </div>
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Section B: Model Status (merged — non-redundant with Pipeline Flow)*/
-/* ------------------------------------------------------------------ */
-
-function ModelStatus({
-  summaryData,
-  loading,
-}: {
-  summaryData: ReturnType<typeof useForecastSummary>["data"];
-  loading: boolean;
-}) {
-  const accuracy = summaryData?.accuracy_pct;
-
-  const ov = (summaryData as Record<string, unknown> | undefined)?.training_overview as
-    | Record<string, unknown>
-    | undefined;
-  const trainedAt = ov?.trained_at ? String(ov.trained_at) : null;
-  const trainedDays = daysSince(trainedAt);
-  const testStart = ov?.test_date_start ? String(ov.test_date_start).slice(0, 10) : null;
-  const testEnd = ov?.test_date_end ? String(ov.test_date_end).slice(0, 10) : null;
-  const testRoutes = ov?.test_routes as number | undefined;
-  const testItems = ov?.test_items as number | undefined;
-
-  return (
-    <Card title="Model status">
-      <KpiRow columns={3}>
-        <MetricCard
-          label="Overall accuracy"
-          value={accuracy != null ? `${accuracy.toFixed(1)}%` : "\u2014"}
-          trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
-          subtitle={trainedDays != null ? `Trained ${trainedDays} day${trainedDays === 1 ? "" : "s"} ago` : "Not yet trained"}
-          loading={loading}
-        />
-        <MetricCard
-          label="Last trained"
-          value={trainedAt ? fmtTimestamp(trainedAt) : "\u2014"}
-          subtitle={
-            testStart && testEnd
-              ? `Tested on ${testStart} – ${testEnd}`
-              : undefined
-          }
-          loading={loading}
-        />
-        <MetricCard
-          label="Test coverage"
-          value={
-            testRoutes != null && testItems != null
-              ? `${testRoutes} routes · ${testItems} items`
-              : "\u2014"
-          }
-          subtitle={summaryData?.last_forecast_date ? `Forecasts through ${summaryData.last_forecast_date}` : undefined}
-          loading={loading}
-        />
-      </KpiRow>
-    </Card>
-  );
-}
-
-/* ------------------------------------------------------------------ */
-/*  Section C: Action Buttons                                          */
+/*  Header action buttons                                               */
 /* ------------------------------------------------------------------ */
 
 type ActionState = "idle" | "loading" | "done" | "error";
 
-function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
+function HeaderActions({ refetchStatus }: { refetchStatus: () => void }) {
   const { triggerTrain, triggerInference, loading: hookLoading, error } = useTriggerPipeline();
   const { toast } = useToast();
-
   const [trainState, setTrainState] = useState<ActionState>("idle");
   const [inferState, setInferState] = useState<ActionState>("idle");
 
@@ -401,73 +341,107 @@ function PipelineActions({ refetchStatus }: { refetchStatus: () => void }) {
   }, [triggerInference, refetchStatus, toast]);
 
   return (
-    <Card title="Pipeline Actions">
-      <div className="flex flex-wrap items-center gap-3">
-        <div className="flex items-center gap-2">
-          <Button
-            variant="primary"
-            loading={trainState === "loading"}
-            disabled={anyBusy && trainState !== "loading"}
-            onClick={handleTrain}
-          >
-            Retrain Models
-          </Button>
-          {trainState === "done" && (
-            <span className="text-body font-medium text-success-600">Done</span>
-          )}
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Button
-            variant="secondary"
-            loading={inferState === "loading"}
-            disabled={anyBusy && inferState !== "loading"}
-            onClick={handleInference}
-          >
-            Generate Forecasts
-          </Button>
-          {inferState === "done" && (
-            <span className="text-body font-medium text-success-600">Done</span>
-          )}
-        </div>
-      </div>
-
-      {error && <p className="text-body text-danger-600 mt-3">{error}</p>}
-    </Card>
+    <>
+      <Button
+        variant="secondary"
+        size="sm"
+        loading={inferState === "loading"}
+        disabled={anyBusy && inferState !== "loading"}
+        onClick={handleInference}
+      >
+        Generate forecasts
+      </Button>
+      <Button
+        variant="primary"
+        size="sm"
+        loading={trainState === "loading"}
+        disabled={anyBusy && trainState !== "loading"}
+        onClick={handleTrain}
+      >
+        Retrain models
+      </Button>
+      {error && <span className="text-caption text-danger-600 ml-2">{error}</span>}
+    </>
   );
 }
 
 /* ------------------------------------------------------------------ */
-/*  Page                                                               */
+/*  Page                                                                */
 /* ------------------------------------------------------------------ */
 
 export default function PipelinePage() {
   const { data: statuses, loading: statusLoading, refetch: refetchStatus } = usePipelineStatus();
   const { data: summaryData, loading: summaryLoading } = useForecastSummary();
   const { data: classData } = useClassSummary();
-  const { data: trainingData } = useTrainingSummary();
+
+  // Resolve once per render so both desktop and mobile flow layouts share the
+  // same memoised metric JSX -- fixes the "build the metric tree twice" hot path.
+  const resolvedSteps = useMemo<ResolvedStep[]>(
+    () =>
+      STEPS.map((step) => ({
+        step,
+        ...resolveStatus(step, statuses),
+        metric: <StepMetric step={step} summaryData={summaryData} classData={classData} />,
+      })),
+    [statuses, summaryData, classData]
+  );
 
   if (statusLoading && summaryLoading) {
     return <Loading message="Loading pipeline..." />;
   }
+
+  const accuracy = summaryData?.accuracy_pct;
+  const ov = (summaryData as Record<string, unknown> | undefined)?.training_overview as
+    | Record<string, unknown>
+    | undefined;
+  const trainedAt = ov?.trained_at ? String(ov.trained_at) : null;
+  const trainedDays = daysSince(trainedAt);
+  const testStart = ov?.test_date_start ? String(ov.test_date_start).slice(0, 10) : null;
+  const testEnd = ov?.test_date_end ? String(ov.test_date_end).slice(0, 10) : null;
+  const testRoutes = ov?.test_routes as number | undefined;
+  const testItems = ov?.test_items as number | undefined;
 
   return (
     <div className="space-y-6">
       <PageHeader
         title="Forecasting Pipeline"
         subtitle="Monitor, control, and understand the demand prediction process."
+        actions={<HeaderActions refetchStatus={refetchStatus} />}
       />
 
-      <PipelineFlow
-        statuses={statuses}
-        summaryData={summaryData}
-        classData={classData}
-        trainingData={trainingData}
-      />
+      {/* Top KPI strip — replaces the old stand-alone Model Status card. */}
+      <KpiRow columns={3}>
+        <MetricCard
+          label="Overall accuracy"
+          value={accuracy != null ? `${accuracy.toFixed(1)}%` : "\u2014"}
+          trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
+          subtitle={trainedDays != null ? `Trained ${trainedDays} day${trainedDays === 1 ? "" : "s"} ago` : "Not yet trained"}
+          loading={summaryLoading}
+        />
+        <MetricCard
+          label="Last trained"
+          value={trainedAt ? fmtTimestamp(trainedAt) : "\u2014"}
+          subtitle={testStart && testEnd ? `Tested on ${testStart} – ${testEnd}` : undefined}
+          loading={summaryLoading}
+        />
+        <MetricCard
+          label="Forecast coverage"
+          value={
+            testRoutes != null && testItems != null
+              ? `${testRoutes} routes · ${testItems} items`
+              : "\u2014"
+          }
+          subtitle={summaryData?.last_forecast_date ? `Forecasts through ${summaryData.last_forecast_date}` : undefined}
+          loading={summaryLoading}
+        />
+      </KpiRow>
 
-      <ModelStatus summaryData={summaryData} loading={summaryLoading} />
-
-      <PipelineActions refetchStatus={refetchStatus} />
+      {/* Pipeline flow -- proper stepper visualisation with connectors that
+          fill in as the run advances. Horizontal on desktop, vertical on
+          tablet/mobile. Active step pulses; failed steps go red. */}
+      <Card title="Pipeline flow">
+        <PipelineFlow resolved={resolvedSteps} />
+      </Card>
 
       <AutoRetrainSection />
     </div>

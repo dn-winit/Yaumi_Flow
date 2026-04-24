@@ -2,10 +2,10 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dataImportApi } from "@/api/data-import";
 import { tier } from "./refresh";
 
-export function useSalesOverview() {
+export function useSalesOverview(days?: number) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-sales"],
-    queryFn: () => dataImportApi.getSalesOverview(),
+    queryKey: ["eda-sales", days ?? "default"],
+    queryFn: () => dataImportApi.getSalesOverview(days),
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };

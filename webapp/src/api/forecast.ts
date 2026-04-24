@@ -2,7 +2,6 @@ import { getClient } from "./client";
 import type {
   PredictionResponse,
   MetricsResponse,
-  TrainingSummaryResponse,
   ModelFilesResponse,
   ClassSummaryResponse,
   ExplainabilityResponse,
@@ -60,9 +59,6 @@ export const forecastApi = {
     c().get<MetricsResponse>("/metrics/models", { params: { demand_class } }).then((r) => r.data),
 
   // Models
-  getTrainingSummary: () =>
-    c().get<TrainingSummaryResponse>("/models/summary").then((r) => r.data),
-
   getModelFiles: () =>
     c().get<ModelFilesResponse>("/models/files").then((r) => r.data),
 

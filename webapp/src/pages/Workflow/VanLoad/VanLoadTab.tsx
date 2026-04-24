@@ -4,6 +4,7 @@ import Button from "@/components/ui/Button";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
 import BarChart from "@/components/charts/BarChart";
+import ContextStrip from "@/components/ui/ContextStrip";
 import RouteGrid, { type RouteStat } from "@/components/ui/RouteGrid";
 import { useFutureForecast, useForecastRouteSummary } from "@/hooks/useForecast";
 import { useItemCatalog } from "@/hooks/useDataImport";
@@ -138,23 +139,36 @@ export default function VanLoadTab() {
 
   return (
     <div className="space-y-6">
+      <ContextStrip
+        items={[
+          { label: "Route", value: routeCode },
+          { label: "Date", value: date },
+          { label: "Items", value: filteredRows.length },
+          ...(selectedItems.length > 0
+            ? [{ label: "SKU filter", value: `${selectedItems.length} of ${availableItems.length}` }]
+            : []),
+        ]}
+        actions={
+          <>
+            <Button variant="secondary" size="sm" onClick={() => setAccuracyOpen(true)}>
+              Last 30 days
+            </Button>
+            <Button variant="secondary" size="sm" onClick={() => setForecastOpen(true)}>
+              Future forecast
+            </Button>
+            <InfoPanel {...VAN_LOAD_INFO} />
+            <Button variant="ghost" size="sm" onClick={() => setRouteCode("")}>
+              ← Back to routes
+            </Button>
+          </>
+        }
+      />
+
       <VanLoadFilters
         availableItems={availableItems}
         routeCode={routeCode}
         setRouteCode={setRouteCode}
       />
-
-      <div className="flex flex-wrap items-center gap-3">
-        <Button variant="secondary" onClick={() => setAccuracyOpen(true)}>
-          Last 30 Days Performance
-        </Button>
-        <Button variant="secondary" onClick={() => setForecastOpen(true)}>
-          Future Forecast
-        </Button>
-        <div className="ml-auto">
-          <InfoPanel {...VAN_LOAD_INFO} />
-        </div>
-      </div>
 
       {forecast.loading ? (
         <Loading message="Loading van load..." />

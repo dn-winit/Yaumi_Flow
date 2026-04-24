@@ -26,6 +26,8 @@ from recommended_order.services.adoption_service import AdoptionService
 from recommended_order.services.planning_service import PlanningService
 from recommended_order.services.db_pusher import DbPusher
 from recommended_order.api.schemas import (
+    EmptyRouteCustomer,
+    EmptyRouteDiagnosis,
     ExistsRequest,
     ExistsResponse,
     FilterOptionsResponse,
@@ -141,15 +143,32 @@ def metrics_last_generation():
 def filter_options(
     date: Optional[str] = Query(None, description="Date to check journey counts for"),
     dm: DataManager = Depends(get_fresh_data_manager),
+    store: RecommendationStore = Depends(get_store),
 ):
     routes = dm.get_route_codes()
     journey_counts: Dict[str, int] = {}
+    route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
+
     if date:
         for rc in routes:
             custs = dm.get_journey_customers(rc, date)
             if custs:
                 journey_counts[rc] = len(custs)
-    return FilterOptionsResponse(routes=routes, journey_counts=journey_counts)
+
+        # For routes that ARE planned but have no stored recommendations,
+        # surface the diagnosis on the picker grid so the supervisor sees
+        # the gap up-front instead of a vague "Click to generate".
+        if journey_counts:
+            existing = store.exists_batch(date, list(journey_counts.keys()))
+            for rc in journey_counts:
+                if not existing.get(rc, False):
+                    route_diagnoses[rc] = _diagnose_empty_route(rc, date, dm)
+
+    return FilterOptionsResponse(
+        routes=routes,
+        journey_counts=journey_counts,
+        route_diagnoses=route_diagnoses,
+    )
 
 
 # ------------------------------------------------------------------
@@ -236,6 +255,130 @@ def _load_feedback_adjustments(
         sessions_dir=sessions_dir,
         shared_data_dir=ro_settings.shared_data_dir,
         clamps=clamps,
+    )
+
+
+# Number of typical items to surface per customer in the empty-state diagnosis.
+# Kept small so the UI stays scannable; salespeople just need the top SKUs to
+# verify the van load, not the whole basket.
+_DIAGNOSIS_TOP_ITEMS = 3
+
+
+def _diagnose_empty_route(
+    rc: str, target_date: str, dm: DataManager
+) -> EmptyRouteDiagnosis:
+    """Explain why a route returned 0 recommendations -- positively framed.
+
+    The engine ran honestly; this function tells the supervisor what the
+    engine SAW so they can act (reload van, reassign route, or accept that
+    today's plan is genuinely empty). Every branch is data-driven; no string
+    is hardcoded against a specific route or customer.
+    """
+    journey_custs = dm.get_journey_customers(rc, target_date) or []
+    van_items = dm.get_van_items(rc, target_date) or {}
+
+    if not journey_custs and not van_items:
+        return EmptyRouteDiagnosis(
+            reason="no_plan",
+            headline="No activity planned today",
+            detail="Neither customers nor van items are scheduled for this route on this date.",
+        )
+    if not journey_custs:
+        return EmptyRouteDiagnosis(
+            reason="no_journey",
+            headline="Van loaded, no customers planned",
+            detail=f"{len(van_items)} items are loaded for this route but no customers are on today's journey.",
+        )
+    if not van_items:
+        return EmptyRouteDiagnosis(
+            reason="no_van",
+            headline="Customers planned, van not loaded",
+            detail=f"{len(journey_custs)} customer(s) are planned but no van load is recorded yet for this route.",
+        )
+
+    cust_df = dm.get_customer_data(rc)
+    if cust_df.empty:
+        return EmptyRouteDiagnosis(
+            reason="all_new_customers",
+            headline="First-visit customers detected",
+            detail=f"{len(journey_custs)} planned customer(s) with no buying history yet -- the salesperson should ask what they want.",
+        )
+
+    cust_names = dm.get_customer_names(rc)
+    item_names = dm.get_item_names(rc)
+    van_set = {str(c) for c in van_items.keys()}
+    journey_set = {str(c) for c in journey_custs}
+
+    # Normalise the join keys exactly once. The cached customer frame may use
+    # stringified ints with trailing whitespace upstream, so we coerce here
+    # rather than inside the per-customer loop (which would be O(rows × custs)).
+    norm_cust = cust_df["CustomerCode"].astype(str).str.strip()
+    norm_item = cust_df["ItemCode"].astype(str).str.strip()
+    hist_custs = set(norm_cust.unique())
+    known = sorted(journey_set & hist_custs)
+    unknown = sorted(journey_set - hist_custs)
+
+    if not known and unknown:
+        return EmptyRouteDiagnosis(
+            reason="all_new_customers",
+            headline="First-visit customers detected",
+            detail=f"{len(unknown)} planned customer(s) with no buying history yet -- the salesperson should ask what they want.",
+        )
+
+    # Known customers exist -- check which have van overlap and which don't.
+    mismatch: List[EmptyRouteCustomer] = []
+    for cust in known:
+        cust_mask = norm_cust == cust
+        if not cust_mask.any():
+            continue
+        cust_items_freq = norm_item[cust_mask].value_counts()
+        if cust_items_freq.empty:
+            continue
+        cust_codes = list(cust_items_freq.index)
+        if any(code in van_set for code in cust_codes):
+            continue  # this customer has at least one matching item -- not a mismatch
+        mismatch.append(
+            EmptyRouteCustomer(
+                customer_code=cust,
+                customer_name=cust_names.get(cust, ""),
+                typical_items=[
+                    {"code": code, "name": item_names.get(code, "")}
+                    for code in cust_codes[:_DIAGNOSIS_TOP_ITEMS]
+                ],
+            )
+        )
+
+    if mismatch and unknown:
+        return EmptyRouteDiagnosis(
+            reason="mixed",
+            headline="Van load gap caught",
+            detail=(
+                f"{len(mismatch)} customer(s) typically buy items that aren't loaded today, "
+                f"plus {len(unknown)} first-visit customer(s). Reload the van or reassign the route."
+            ),
+            customers=mismatch,
+        )
+    if mismatch:
+        n = len(mismatch)
+        return EmptyRouteDiagnosis(
+            reason="van_mismatch",
+            headline="Van load gap caught",
+            detail=(
+                f"{n} planned customer(s) usually buy items not loaded today. "
+                "Add those items to the van or reassign the customer to a route that carries them."
+            ),
+            customers=mismatch,
+        )
+
+    # Every known customer DID have van overlap, yet the engine still produced
+    # no candidates. Falls through to a generic but honest message.
+    return EmptyRouteDiagnosis(
+        reason="engine_no_match",
+        headline="No items cleared the recommendation threshold",
+        detail=(
+            "Customers and van items overlap, but no items met the calibrated "
+            "frequency / recency / quantity thresholds for this route today."
+        ),
     )
 
 
@@ -430,8 +573,18 @@ def get_recommendations(
         df = store.get(req.date, None)
 
     if df.empty:
+        # Diagnose the empty result so the UI can give the supervisor an
+        # actionable, positively-framed explanation. Only meaningful when a
+        # single route is requested -- the grid view doesn't need per-route
+        # diagnosis since the picker shows route status separately.
+        diagnosis = (
+            _diagnose_empty_route(req.route_code, req.date, dm)
+            if req.route_code
+            else None
+        )
         return RetrieveResponse(
-            success=True, date=req.date, total=0, data=[], source=source, generated_routes=generated_routes
+            success=True, date=req.date, total=0, data=[], source=source,
+            generated_routes=generated_routes, diagnosis=diagnosis,
         )
 
     if req.customer_code:

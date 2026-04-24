@@ -85,8 +85,8 @@ class EdaService:
     # Sales overview (from local sales_recent.csv)
     # ------------------------------------------------------------------
 
-    def get_sales_overview(self) -> Dict[str, Any]:
-        return self._cached("sales_overview", self._compute_sales_overview)
+    def get_sales_overview(self, days: int = 90) -> Dict[str, Any]:
+        return self._cached(f"sales_overview::{days}", lambda: self._compute_sales_overview(days))
 
     def _load_sales_df(self) -> pd.DataFrame:
         path = self._s.data_path(self._s.sales_recent_file)
@@ -100,26 +100,39 @@ class EdaService:
         df["revenue"] = df["TotalQuantity"] * df["AvgUnitPrice"]
         return df.dropna(subset=["TrxDate"])
 
-    def _compute_sales_overview(self) -> Dict[str, Any]:
+    def _compute_sales_overview(self, days: int = 90) -> Dict[str, Any]:
+        """Sales aggregates for the trailing `days` window.
+
+        All four breakdowns (daily trend, top items, top routes, categories)
+        share the same window so the dashboard tab selector drives every
+        chart and table consistently. ``totals`` describes the windowed
+        slice -- date range, unique counts, totals -- so the page subtitle
+        can show "last X days · Y → Z" without extra computation.
+        """
         df = self._load_sales_df()
         if df.empty:
             return {"available": False, "message": "sales_recent.csv not found or empty"}
 
+        # Window slice (silently clamps when CSV doesn't have `days` worth of
+        # history -- dashboard still shows whatever's available).
+        anchor = df["TrxDate"].max()
+        cutoff = anchor - pd.Timedelta(days=days - 1)
+        df = df[df["TrxDate"] >= cutoff]
+        if df.empty:
+            return {"available": True, "window_days": days, "totals": {}, "daily_trend": [],
+                    "top_items": [], "top_routes": [], "categories": []}
+
         total_qty = float(df["TotalQuantity"].sum())
         total_rev = float(df["revenue"].sum())
 
-        # Daily trend (last 90 days)
-        cutoff = df["TrxDate"].max() - pd.Timedelta(days=90)
-        recent = df[df["TrxDate"] >= cutoff]
         daily = (
-            recent.groupby(recent["TrxDate"].dt.date)
+            df.groupby(df["TrxDate"].dt.date)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
             .reset_index()
             .rename(columns={"TrxDate": "date"})
         )
         daily["date"] = daily["date"].astype(str)
 
-        # Top items
         top_items = (
             df.groupby(["ItemCode", "ItemName"], as_index=False)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
@@ -127,7 +140,6 @@ class EdaService:
             .head(10)
         )
 
-        # Top routes
         top_routes = (
             df.groupby("RouteCode", as_index=False)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"), items=("ItemCode", "nunique"))
@@ -136,7 +148,6 @@ class EdaService:
         )
         top_routes["RouteCode"] = top_routes["RouteCode"].astype(str)
 
-        # Categories
         categories = (
             df.groupby("CategoryName", as_index=False)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
@@ -147,6 +158,7 @@ class EdaService:
 
         return {
             "available": True,
+            "window_days": days,
             "totals": {
                 "transactions": int(len(df)),
                 "total_quantity": round(total_qty, 1),

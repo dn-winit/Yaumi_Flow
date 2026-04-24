@@ -47,6 +47,26 @@ export interface RetrieveRequest {
   offset?: number;
 }
 
+export interface EmptyRouteCustomer {
+  customer_code: string;
+  customer_name: string;
+  typical_items: { code: string; name: string }[];
+}
+
+export interface EmptyRouteDiagnosis {
+  reason:
+    | "no_plan"
+    | "no_journey"
+    | "no_van"
+    | "all_new_customers"
+    | "van_mismatch"
+    | "mixed"
+    | "engine_no_match";
+  headline: string;
+  detail: string;
+  customers: EmptyRouteCustomer[];
+}
+
 export interface RetrieveResponse {
   success: boolean;
   date: string;
@@ -54,6 +74,7 @@ export interface RetrieveResponse {
   data: RecommendationItem[];
   source: "store" | "generated";
   generated_routes: number;
+  diagnosis?: EmptyRouteDiagnosis | null;
 }
 
 export interface ExistsResponse {
@@ -74,6 +95,9 @@ export interface GenerationInfoResponse {
 export interface FilterOptionsResponse {
   routes: string[];
   journey_counts: Record<string, number>;
+  // Per-route diagnosis for routes that have planned customers but no stored
+  // recommendations -- powers the route picker grid's empty-state message.
+  route_diagnoses?: Record<string, EmptyRouteDiagnosis>;
 }
 
 export interface OrderHealthResponse {

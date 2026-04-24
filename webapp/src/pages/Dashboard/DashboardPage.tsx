@@ -1,22 +1,31 @@
+import { useMemo, useState } from "react";
 import Button from "@/components/ui/Button";
 import Card from "@/components/ui/Card";
 import KpiRow from "@/components/ui/KpiRow";
 import { Skeleton } from "@/components/ui/Skeleton";
-import Table from "@/components/ui/Table";
 import EmptyState from "@/components/ui/EmptyState";
 import PageHeader from "@/components/layout/PageHeader";
 import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
 import BarChart from "@/components/charts/BarChart";
 import PieChart from "@/components/charts/PieChart";
+import HorizontalBarChart, { type HBarDatum } from "@/components/charts/HorizontalBarChart";
+import { CHART_COLOR } from "@/components/charts/theme";
 import { useSalesOverview, useCustomerOverview, useBusinessKpis } from "@/hooks/useDataImport";
 import { useToast } from "@/hooks/useToast";
 import { useRetrainConfig } from "@/hooks/useForecast";
-import { fmtNum, fmtCurrency, fmtDelta, GOOD_SCORE_THRESHOLD } from "@/lib/format";
+import {
+  fmtNum,
+  fmtCurrency,
+  fmtDelta,
+  GOOD_SCORE_THRESHOLD,
+  DASHBOARD_WINDOWS,
+  DEFAULT_DASHBOARD_WINDOW,
+  DASHBOARD_TOP_N,
+  type DashboardWindow,
+} from "@/lib/format";
 import type { BusinessKpis } from "@/types/data-import";
 import type { DriftStatus } from "@/types/forecast";
-
-const CUSTOMER_LOOKBACK_DAYS = 90;
 
 function toneToTrend(tone: "up" | "down" | "flat"): "up" | "down" | undefined {
   if (tone === "up") return "up";
@@ -66,15 +75,20 @@ function DashboardKpis({ k, drift }: { k: BusinessKpis | null; drift?: DriftStat
       <MetricCard
         label="Operations (7d)"
         value={`${ops?.routes ?? 0} routes`}
-        subtitle={`${fmtNum(ops?.customers)} customers · ${ops?.days_active ?? 0} active days`}
+        subtitle={`${fmtNum(ops?.customers)} customers planned · ${ops?.days_active ?? 0} active days`}
       />
     </KpiRow>
   );
 }
 
 export default function DashboardPage() {
-  const sales = useSalesOverview();
-  const customers = useCustomerOverview(CUSTOMER_LOOKBACK_DAYS);
+  // Single window state drives every chart + table below the KPI row.
+  // KPI tiles keep their own fixed windows because those are part of the
+  // metric definition (e.g. "yesterday revenue" can't have a longer window).
+  const [windowDays, setWindowDays] = useState<DashboardWindow>(DEFAULT_DASHBOARD_WINDOW);
+
+  const sales = useSalesOverview(windowDays);
+  const customers = useCustomerOverview(windowDays);
   const kpis = useBusinessKpis();
   const { data: retrainConfig } = useRetrainConfig();
   const { toast } = useToast();
@@ -89,6 +103,61 @@ export default function DashboardPage() {
     kpis.refetch();
     toast("Data refreshed", "success");
   };
+
+  // Shape backend rows into the horizontal-bar datum the chart wants. Each
+  // chart sorts descending and caps at DASHBOARD_TOP_N so the leader board
+  // stays scannable; backend payload still has the full top-10 should the
+  // cap ever change.
+  const topRouteRevenueBars = useMemo<HBarDatum[]>(
+    () =>
+      (salesData?.top_routes ?? [])
+        .slice()
+        .sort((a, b) => Number(b.revenue) - Number(a.revenue))
+        .slice(0, DASHBOARD_TOP_N)
+        .map((r) => ({
+          label: `Route ${r.RouteCode}`,
+          value: Number(r.revenue ?? 0),
+          display: fmtCurrency(r.revenue),
+        })),
+    [salesData?.top_routes]
+  );
+
+  const topRouteCustomerBars = useMemo<HBarDatum[]>(
+    () =>
+      (customerData?.by_route ?? [])
+        .slice()
+        .sort((a, b) => Number(b.customers) - Number(a.customers))
+        .slice(0, DASHBOARD_TOP_N)
+        .map((r) => ({
+          label: `Route ${r.route_code}`,
+          value: Number(r.customers ?? 0),
+          display: `${fmtNum(r.customers)} cust`,
+        })),
+    [customerData?.by_route]
+  );
+
+  const topCustomerBars = useMemo<HBarDatum[]>(
+    () =>
+      (customerData?.top_customers ?? [])
+        .slice()
+        .sort((a, b) => Number(b.total_quantity) - Number(a.total_quantity))
+        .slice(0, DASHBOARD_TOP_N)
+        .map((c) => {
+          const name = c.customer_name?.trim() || c.customer_code;
+          // Trim long names so y-axis labels stay readable in the fixed width.
+          const label = name.length > 22 ? `${name.slice(0, 21)}…` : name;
+          return {
+            label,
+            value: Number(c.total_quantity ?? 0),
+            display: `${fmtNum(c.total_quantity)} units`,
+          };
+        }),
+    [customerData?.top_customers]
+  );
+
+  // Section 3 view toggle -- "by revenue" vs "by customers". Single piece of
+  // state, declarative -- no tab framework needed for two buttons.
+  const [routeView, setRouteView] = useState<"revenue" | "customers">("revenue");
 
   return (
     <div className="space-y-6">
@@ -120,7 +189,23 @@ export default function DashboardPage() {
         <DashboardKpis k={k} drift={retrainConfig?.drift} />
       )}
 
-      <Card title="Daily Sales Trend (last 90 days)">
+      {/* Window selector — drives every chart + table below. */}
+      <div className="flex items-end justify-between gap-4 flex-wrap pt-2 border-t border-subtle">
+        <div className="pt-4">
+          <h2 className="text-h3 font-semibold text-text-primary">
+            Trends &amp; breakdowns
+          </h2>
+          <p className="text-caption text-text-tertiary mt-0.5">
+            {salesData?.totals
+              ? `${fmtNum(salesData.totals.transactions)} transactions · ${fmtCurrency(salesData.totals.total_revenue)} · ${salesData.totals.first_date} → ${salesData.totals.last_date}`
+              : `Last ${windowDays} days`}
+          </p>
+        </div>
+        <WindowPills active={windowDays} onChange={setWindowDays} />
+      </div>
+
+      {/* Section 1 — the pulse: full-width sales trend */}
+      <Card title="Daily Sales Trend">
         {sales.loading ? (
           <div className="animate-pulse bg-surface-sunken rounded-lg h-[300px]" />
         ) : !salesData?.daily_trend || salesData.daily_trend.length === 0 ? (
@@ -138,25 +223,44 @@ export default function DashboardPage() {
         )}
       </Card>
 
+      {/* Section 2 — what's selling: top items + category split, side-by-side */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card title="Top 10 Items by Quantity">
+        <Card
+          title={`Top ${DASHBOARD_TOP_N} Items by Quantity`}
+          actions={
+            salesData?.top_items?.length ? (
+              <span className="text-caption text-text-tertiary">
+                {fmtNum(salesData.totals?.unique_items)} SKUs in window
+              </span>
+            ) : undefined
+          }
+        >
           {sales.loading ? (
-            <div className="animate-pulse bg-surface-sunken rounded-lg h-[280px]" />
+            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
           ) : !salesData?.top_items || salesData.top_items.length === 0 ? (
             <EmptyState title="No data" />
           ) : (
             <BarChart
-              data={salesData.top_items as unknown as Record<string, unknown>[]}
+              data={salesData.top_items.slice(0, DASHBOARD_TOP_N) as unknown as Record<string, unknown>[]}
               xKey="ItemCode"
               yKey="quantity"
-              height={280}
+              height={240}
             />
           )}
         </Card>
 
-        <Card title="Sales by Category">
+        <Card
+          title="Sales by Category"
+          actions={
+            salesData?.categories?.length ? (
+              <span className="text-caption text-text-tertiary">
+                {salesData.categories.length} categories
+              </span>
+            ) : undefined
+          }
+        >
           {sales.loading ? (
-            <div className="animate-pulse bg-surface-sunken rounded-lg h-[280px]" />
+            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
           ) : !salesData?.categories || salesData.categories.length === 0 ? (
             <EmptyState title="No data" />
           ) : (
@@ -167,77 +271,130 @@ export default function DashboardPage() {
               }))}
               dataKey="value"
               nameKey="name"
-              height={280}
+              height={240}
             />
           )}
         </Card>
       </div>
 
+      {/* Section 3 — leaderboards: routes (tabbed) + customers, side-by-side.
+          Tabs collapse the two route perspectives into a single card so the
+          page stays scannable; the customer leaderboard sits right alongside. */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card title="Top Routes by Quantity">
-          {sales.loading ? (
-            <div className="space-y-2">
-              {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-10 w-full rounded" />)}
-            </div>
-          ) : !salesData?.top_routes || salesData.top_routes.length === 0 ? (
-            <EmptyState title="No data" />
+        <Card
+          title="Route Insights"
+          actions={
+            <RouteViewToggle active={routeView} onChange={setRouteView} />
+          }
+        >
+          {(routeView === "revenue" ? sales.loading : customers.loading) ? (
+            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
+          ) : routeView === "revenue" ? (
+            <HorizontalBarChart
+              data={topRouteRevenueBars}
+              color={CHART_COLOR.brandPrimary}
+              emptyMessage="No route data"
+            />
           ) : (
-            <Table
-              data={salesData.top_routes as unknown as Record<string, unknown>[]}
-              columns={[
-                { key: "RouteCode", label: "Route" },
-                { key: "quantity", label: "Quantity", sortable: true, align: "right", render: (r) => fmtNum(Number(r.quantity)) },
-                { key: "revenue", label: "Revenue", sortable: true, align: "right", render: (r) => fmtCurrency(Number(r.revenue)) },
-                { key: "items", label: "Items" },
-              ]}
+            <HorizontalBarChart
+              data={topRouteCustomerBars}
+              color={CHART_COLOR.info}
+              emptyMessage="No route data"
             />
           )}
         </Card>
 
-        <Card title={`Top Customers (last ${CUSTOMER_LOOKBACK_DAYS} days)`}>
+        <Card
+          title={`Top ${DASHBOARD_TOP_N} Customers`}
+          actions={
+            customerData?.totals ? (
+              <span className="text-caption text-text-tertiary">
+                of {fmtNum(customerData.totals.active_customers)} who bought
+              </span>
+            ) : undefined
+          }
+        >
           {customers.loading ? (
-            <div className="space-y-2">
-              {[1, 2, 3, 4, 5].map((i) => <Skeleton key={i} className="h-10 w-full rounded" />)}
-            </div>
-          ) : !customerData?.top_customers || customerData.top_customers.length === 0 ? (
-            <EmptyState title="No customer data available" />
+            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
           ) : (
-            <Table
-              data={customerData.top_customers as unknown as Record<string, unknown>[]}
-              columns={[
-                { key: "customer_code", label: "Code" },
-                {
-                  key: "customer_name",
-                  label: "Name",
-                  render: (r) => (
-                    <span className="truncate">{String(r.customer_name ?? "").slice(0, 30)}</span>
-                  ),
-                },
-                { key: "visits", label: "Visits", sortable: true, align: "right" },
-                {
-                  key: "total_quantity",
-                  label: "Qty",
-                  sortable: true,
-                  align: "right",
-                  render: (r) => fmtNum(Number(r.total_quantity)),
-                },
-                { key: "last_purchase", label: "Last" },
-              ]}
+            <HorizontalBarChart
+              data={topCustomerBars}
+              color={CHART_COLOR.success}
+              labelWidth={150}
+              emptyMessage="No customer data available"
             />
           )}
         </Card>
       </div>
+    </div>
+  );
+}
 
-      {customerData?.by_route && customerData.by_route.length > 0 && (
-        <Card title={`Customers per Route (last ${CUSTOMER_LOOKBACK_DAYS} days)`}>
-          <BarChart
-            data={customerData.by_route as unknown as Record<string, unknown>[]}
-            xKey="route_code"
-            yKey="customers"
-            height={240}
-          />
-        </Card>
-      )}
+function WindowPills({
+  active,
+  onChange,
+}: {
+  active: DashboardWindow;
+  onChange: (w: DashboardWindow) => void;
+}) {
+  return (
+    <div className="inline-flex items-center rounded-lg border border-default bg-surface-base p-1 gap-0.5">
+      {DASHBOARD_WINDOWS.map((d) => {
+        const isActive = d === active;
+        return (
+          <button
+            key={d}
+            type="button"
+            onClick={() => onChange(d)}
+            aria-pressed={isActive}
+            className={[
+              "px-3 py-1.5 text-caption font-semibold rounded-md transition-all duration-base whitespace-nowrap",
+              isActive
+                ? "bg-brand-600 text-white shadow-sm"
+                : "text-text-secondary hover:text-text-primary hover:bg-surface-sunken",
+            ].join(" ")}
+          >
+            {d === 7 ? "7 days" : `${d} days`}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+const ROUTE_VIEW_OPTIONS = [
+  { key: "revenue" as const, label: "By revenue" },
+  { key: "customers" as const, label: "By customers" },
+];
+
+function RouteViewToggle({
+  active,
+  onChange,
+}: {
+  active: "revenue" | "customers";
+  onChange: (v: "revenue" | "customers") => void;
+}) {
+  return (
+    <div className="inline-flex items-center rounded-md border border-default bg-surface-base p-0.5 gap-0.5">
+      {ROUTE_VIEW_OPTIONS.map((opt) => {
+        const isActive = opt.key === active;
+        return (
+          <button
+            key={opt.key}
+            type="button"
+            onClick={() => onChange(opt.key)}
+            aria-pressed={isActive}
+            className={[
+              "px-2.5 py-1 text-caption font-semibold rounded transition-all duration-base whitespace-nowrap",
+              isActive
+                ? "bg-brand-600 text-white"
+                : "text-text-secondary hover:text-text-primary hover:bg-surface-sunken",
+            ].join(" ")}
+          >
+            {opt.label}
+          </button>
+        );
+      })}
     </div>
   );
 }

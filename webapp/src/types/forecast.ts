@@ -11,11 +11,6 @@ export interface MetricsResponse {
   data: Record<string, unknown>[];
 }
 
-export interface TrainingSummaryResponse {
-  success: boolean;
-  data: Record<string, unknown>;
-}
-
 export interface ModelFile {
   filename: string;
   size_bytes: number;

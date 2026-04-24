@@ -59,15 +59,6 @@ export function useModelMetrics(demandClass?: string) {
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useTrainingSummary() {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["training-summary"],
-    queryFn: () => forecastApi.getTrainingSummary(),
-    ...tier("static"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
-
 export function useClassSummary() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["class-summary"],

@@ -84,6 +84,22 @@ export const ON_TARGET_POOR_RATIO = 0.4;
  */
 export const LAST_30_DAYS = 30;
 
+/**
+ * Time-window options for the Dashboard page tab selector. Drives sales +
+ * customer overview hooks together so every chart and table rolls on the
+ * same window. DEFAULT is the option highlighted on first load.
+ */
+export const DASHBOARD_WINDOWS = [7, 30, 90, 180] as const;
+export type DashboardWindow = (typeof DASHBOARD_WINDOWS)[number];
+export const DEFAULT_DASHBOARD_WINDOW: DashboardWindow = 90;
+
+/**
+ * Top-N rows shown in dashboard ranking charts. Five is enough to convey the
+ * leader board without making the page scroll-heavy; the underlying endpoint
+ * still returns top 10 so this is a presentation cap, not a data limit.
+ */
+export const DASHBOARD_TOP_N = 5;
+
 /** Pull the date out of any row that uses TrxDate / trx_date / ds / date. */
 export function pickDate(row: Record<string, unknown>): string {
   const raw = row.TrxDate ?? row.trx_date ?? row.ds ?? row.date ?? "";

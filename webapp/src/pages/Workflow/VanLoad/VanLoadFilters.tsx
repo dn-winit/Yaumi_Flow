@@ -1,4 +1,5 @@
 import { useMemo, useState } from "react";
+import Card from "@/components/ui/Card";
 import Select from "@/components/ui/Select";
 import DatePicker from "@/components/ui/DatePicker";
 import Button from "@/components/ui/Button";
@@ -53,45 +54,42 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
   }
 
   return (
-    <div className="flex flex-wrap items-end gap-4 bg-surface-raised rounded-xl shadow-1 border border-default p-4">
-      <Select
-        label="Route"
-        value={routeCode}
-        onChange={setRouteCode}
-        options={routeOptions}
-        className="min-w-[200px]"
-      />
+    <Card>
+      <div className="flex flex-wrap items-end gap-4">
+        <Select
+          label="Route"
+          value={routeCode}
+          onChange={setRouteCode}
+          options={routeOptions}
+          className="min-w-[200px]"
+        />
 
-      <DatePicker label="Date" value={date} onChange={setDate} className="min-w-[180px]" />
+        <DatePicker label="Date" value={date} onChange={setDate} className="min-w-[180px]" />
 
-      <div className="flex flex-col gap-1">
-        <label className="text-caption font-medium text-text-tertiary uppercase tracking-wider">
-          SKUs
-        </label>
-        <Button
-          variant="secondary"
-          size="md"
-          onClick={openSkuModal}
-          disabled={disabled}
-        >
-          {disabled ? "Select a route first" : skuLabel}
-        </Button>
-      </div>
-
-      <div className="ml-auto flex items-center gap-2">
-        {routeCode && (
-          <Button variant="ghost" size="sm" onClick={() => setRouteCode("")}>
-            &larr; Back to routes
+        <div className="flex flex-col gap-1">
+          <label className="text-caption font-medium text-text-tertiary uppercase tracking-wider">
+            SKUs
+          </label>
+          <Button
+            variant="secondary"
+            size="md"
+            onClick={openSkuModal}
+            disabled={disabled}
+          >
+            {disabled ? "Select a route first" : skuLabel}
           </Button>
-        )}
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => setSelectedItems([])}
-          disabled={selectedItems.length === 0}
-        >
-          Reset SKUs
-        </Button>
+        </div>
+
+        <div className="ml-auto flex items-center gap-2">
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => setSelectedItems([])}
+            disabled={selectedItems.length === 0}
+          >
+            Reset SKUs
+          </Button>
+        </div>
       </div>
 
       <Modal
@@ -152,6 +150,6 @@ export default function VanLoadFilters({ availableItems, routeCode, setRouteCode
           </div>
         </div>
       </Modal>
-    </div>
+    </Card>
   );
 }

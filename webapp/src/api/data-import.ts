@@ -19,7 +19,8 @@ export const dataImportApi = {
 
   getSummary: () => c().get<DataSummary>("/summary").then((r) => r.data),
 
-  getSalesOverview: () => c().get<SalesOverviewResponse>("/eda/sales").then((r) => r.data),
+  getSalesOverview: (days?: number) =>
+    c().get<SalesOverviewResponse>("/eda/sales", { params: days ? { days } : undefined }).then((r) => r.data),
 
   getItemCatalog: () => c().get<ItemCatalogResponse>("/eda/items").then((r) => r.data),
 

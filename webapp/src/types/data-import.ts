@@ -156,6 +156,7 @@ export interface CategoryBreakdown {
 export interface SalesOverviewResponse {
   available: boolean;
   message?: string;
+  window_days?: number;
   totals?: SalesTotals;
   daily_trend?: DailyTrendPoint[];
   top_items?: TopItem[];

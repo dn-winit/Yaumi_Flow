@@ -82,6 +82,25 @@ class GenerateResponse(BaseModel):
     details: List[Dict[str, Any]] = []
 
 
+class EmptyRouteCustomer(BaseModel):
+    customer_code: str
+    customer_name: str = ""
+    typical_items: List[Dict[str, str]] = []  # [{code, name}]
+
+
+class EmptyRouteDiagnosis(BaseModel):
+    """Why a route returned 0 recommendations -- structured for the UI."""
+    reason: str = Field(
+        description=(
+            "no_plan | no_journey | no_van | all_new_customers | "
+            "van_mismatch | mixed | engine_no_match"
+        )
+    )
+    headline: str = Field(description="Short, positive title for the empty state")
+    detail: str = Field(description="One-sentence explanation of what to check")
+    customers: List[EmptyRouteCustomer] = []
+
+
 class RetrieveResponse(BaseModel):
     success: bool
     date: str
@@ -89,6 +108,7 @@ class RetrieveResponse(BaseModel):
     data: List[RecommendationItem]
     source: str = Field(default="store", description="store | generated")
     generated_routes: int = 0
+    diagnosis: Optional[EmptyRouteDiagnosis] = None
 
 
 class ExistsResponse(BaseModel):
@@ -127,6 +147,10 @@ class FilterOptionsResponse(BaseModel):
     routes: List[str]
     dates: List[str] = []
     journey_counts: Dict[str, int] = {}  # {route: customer_count} for the requested date
+    # {route: diagnosis} populated only for routes that have planned customers
+    # but no stored recommendations -- lets the route grid show a meaningful
+    # one-liner ("Van load gap caught", etc.) instead of "Click to generate".
+    route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
 
 
 class RecommendationSummaryResponse(BaseModel):

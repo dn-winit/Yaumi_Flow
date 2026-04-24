@@ -99,6 +99,7 @@ export default function OrdersTab() {
           routes={routes}
           routeStats={routeStats}
           journeyCounts={filterOptions?.journey_counts}
+          routeDiagnoses={filterOptions?.route_diagnoses}
           onRouteSelect={setRouteCode}
           onGenerated={refetchRecs}
         />
@@ -106,16 +107,49 @@ export default function OrdersTab() {
     }
 
     if (!hasData) {
+      const diag = recsData?.diagnosis;
+      // The diagnosis is computed by the backend after a generation pass; if
+      // it's present we know exactly WHY the route is empty and can show a
+      // positively-framed, actionable message. Falling back to the generic
+      // "trigger generation" CTA only when no diagnosis is available (cold
+      // start / before first generation attempt).
+      const fallbackTitle = "No recommendations yet";
+      const fallbackDetail = `No recommendations for route ${routeCode} on ${date}. Auto-generation runs nightly -- or trigger it manually now.`;
       return (
         <Card>
           <EmptyState
-            icon="📦"
-            title="No recommendations yet"
-            message={`No recommendations for route ${routeCode} on ${date}. Auto-generation runs nightly -- or trigger it manually now.`}
+            icon={diag ? "🔔" : "📦"}
+            title={diag?.headline ?? fallbackTitle}
+            message={diag?.detail ?? fallbackDetail}
             action={
-              <div className="flex flex-col items-center gap-2">
-                <Button variant="primary" loading={generating} onClick={handleGenerateRoute}>
-                  Generate for route {routeCode}
+              <div className="flex flex-col items-stretch gap-3">
+                {diag && diag.customers.length > 0 && (
+                  <div className="bg-surface-sunken border border-subtle rounded-lg px-4 py-3 space-y-2 text-left">
+                    {diag.customers.map((c) => (
+                      <div key={c.customer_code} className="text-body text-text-secondary">
+                        <span className="font-semibold text-text-primary">
+                          {c.customer_name?.trim() || c.customer_code}
+                        </span>
+                        {c.typical_items.length > 0 && (
+                          <span className="text-text-tertiary">
+                            {" "}
+                            usually buys{" "}
+                            {c.typical_items
+                              .map((it) => it.name?.trim() || it.code)
+                              .join(", ")}
+                          </span>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+                <Button
+                  variant={diag ? "ghost" : "primary"}
+                  size="sm"
+                  loading={generating}
+                  onClick={handleGenerateRoute}
+                >
+                  {diag ? "Re-run generation" : `Generate for route ${routeCode}`}
                 </Button>
                 {generateError && <p className="text-body text-danger-600">{generateError}</p>}
               </div>
@@ -132,26 +166,37 @@ export default function OrdersTab() {
 
   return (
     <div className="space-y-6">
-      {/* Status banner */}
-      {routeCode && recsData?.data?.length ? (
+      {/* Single header strip: context + analytics + info + back. Renders as
+          soon as a route is picked, regardless of whether recs exist yet. */}
+      {routeCode ? (
         <ContextStrip
           items={[
             { label: "Route", value: routeCode },
-            { label: "Recommendations", value: recsData.total },
             { label: "Date", value: date },
+            ...(recsData?.data?.length
+              ? [{ label: "Recommendations", value: recsData.total }]
+              : []),
             ...(justGenerated
               ? [{ label: "Status", value: "just generated" }]
               : []),
           ]}
           actions={
-            <Button variant="ghost" size="sm" onClick={() => setRouteCode("")}>
-              &larr; Back to routes
-            </Button>
+            <>
+              <Button variant="secondary" size="sm" onClick={() => setAdoptionOpen(true)}>
+                Last 30 days
+              </Button>
+              <Button variant="secondary" size="sm" onClick={() => setUpcomingOpen(true)}>
+                Upcoming week
+              </Button>
+              <InfoPanel {...RECOMMENDED_ORDERS_INFO} />
+              <Button variant="ghost" size="sm" onClick={() => setRouteCode("")}>
+                ← Back to routes
+              </Button>
+            </>
           }
         />
       ) : null}
 
-      {/* Filters */}
       <Card>
         <div className="flex items-end gap-4 flex-wrap">
           <DatePicker value={date} onChange={setDate} label="Date" />
@@ -164,6 +209,11 @@ export default function OrdersTab() {
             ]}
             label="Route"
           />
+          {!routeCode && (
+            <div className="ml-auto">
+              <InfoPanel {...RECOMMENDED_ORDERS_INFO} />
+            </div>
+          )}
         </div>
       </Card>
 
@@ -172,18 +222,6 @@ export default function OrdersTab() {
           {recsError}
         </div>
       )}
-
-      <div className="flex flex-wrap items-center gap-3">
-        <Button variant="secondary" onClick={() => setAdoptionOpen(true)}>
-          Last 30 Days Adoption
-        </Button>
-        <Button variant="secondary" onClick={() => setUpcomingOpen(true)}>
-          Upcoming Week Plan
-        </Button>
-        <div className="ml-auto">
-          <InfoPanel {...RECOMMENDED_ORDERS_INFO} />
-        </div>
-      </div>
 
       {renderBody()}
 

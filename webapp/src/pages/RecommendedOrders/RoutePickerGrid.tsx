@@ -2,12 +2,14 @@ import { useMemo } from "react";
 import Button from "@/components/ui/Button";
 import RouteGrid, { type RouteStat } from "@/components/ui/RouteGrid";
 import { useGenerate } from "@/hooks/useRecommendedOrder";
+import type { EmptyRouteDiagnosis } from "@/types/recommended-order";
 
 interface Props {
   date: string;
   routes: string[];
   routeStats?: Record<string, { customers: number; skus: number; totalQty: number }>;
   journeyCounts?: Record<string, number>;
+  routeDiagnoses?: Record<string, EmptyRouteDiagnosis>;
   onRouteSelect: (routeCode: string) => void;
   onGenerated?: () => void;
 }
@@ -17,6 +19,7 @@ export default function RoutePickerGrid({
   routes,
   routeStats,
   journeyCounts,
+  routeDiagnoses,
   onRouteSelect,
   onGenerated,
 }: Props) {
@@ -31,14 +34,18 @@ export default function RoutePickerGrid({
     }
   };
 
-  // Shape order-specific stats into the generic RouteStat contract.
-  // Routes with recs show stats; routes with journey but no recs show
-  // "Click to generate"; routes with no journey show "No visits planned".
+  // Shape order-specific stats into the generic RouteStat contract:
+  //   * Has recs                  → customer/SKU/qty stats
+  //   * Has journey but no recs   → diagnosis headline + first customer hint
+  //                                 (falls back to "Click to generate" if the
+  //                                  diagnosis hasn't been computed yet)
+  //   * No journey                → "No customers planned today"
   const stats = useMemo<Record<string, RouteStat>>(() => {
     const out: Record<string, RouteStat> = {};
     for (const code of routes) {
       const s = routeStats?.[code];
       const jc = journeyCounts?.[code] ?? 0;
+      const diag = routeDiagnoses?.[code];
 
       if (s) {
         out[code] = {
@@ -49,9 +56,18 @@ export default function RoutePickerGrid({
           ],
         };
       } else if (jc > 0) {
+        const firstCustomer = diag?.customers?.[0];
+        const customerHint = firstCustomer
+          ? firstCustomer.customer_name?.trim() || firstCustomer.customer_code
+          : null;
         out[code] = {
           badge: { label: `${jc} planned`, variant: "warning" },
-          lines: [{ label: "", value: "Click to generate" }],
+          lines: diag
+            ? [
+                { label: "", value: diag.headline },
+                ...(customerHint ? [{ label: "", value: customerHint }] : []),
+              ]
+            : [{ label: "", value: "Click to generate" }],
         };
       } else {
         out[code] = {
@@ -61,7 +77,7 @@ export default function RoutePickerGrid({
       }
     }
     return out;
-  }, [routes, routeStats, journeyCounts]);
+  }, [routes, routeStats, journeyCounts, routeDiagnoses]);
 
   const totals = useMemo(() => {
     const vals = Object.values(routeStats ?? {});

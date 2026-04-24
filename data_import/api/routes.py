@@ -92,9 +92,16 @@ def health(importer: DataImporter = Depends(get_importer)):
 
 
 @router.get("/eda/sales")
-def eda_sales(svc: EdaService = Depends(get_eda_service)):
-    """Aggregated EDA over sales_recent.csv: totals, daily trend, top items, top routes, categories."""
-    return svc.get_sales_overview()
+def eda_sales(
+    days: int = Query(default=90, ge=1, le=365, description="Trailing window length in days"),
+    svc: EdaService = Depends(get_eda_service),
+):
+    """Aggregated EDA over sales_recent.csv: totals, daily trend, top items, top routes, categories.
+
+    Window is parameterised so the dashboard's time-window selector can drive
+    every chart and table consistently from a single fetch.
+    """
+    return svc.get_sales_overview(days)
 
 
 @router.get("/eda/items")
