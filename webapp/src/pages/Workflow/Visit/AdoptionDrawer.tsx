@@ -1,57 +1,93 @@
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Drawer from "@/components/ui/Drawer";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
-import DrawerContextBar from "@/components/ui/DrawerContextBar";
 import KpiRow from "@/components/ui/KpiRow";
 import HighlightsStrip, { type Highlight } from "@/components/ui/HighlightsStrip";
 import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
 import BarChart from "@/components/charts/BarChart";
 import { CHART_COLOR } from "@/components/charts/theme";
+import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
 import { useAdoption } from "@/hooks/useRecommendedOrder";
-import { addDays, todayIso } from "@/lib/date";
-import { fmtNum, fmtCurrency, DELIVERY_GOOD, LAST_30_DAYS } from "@/lib/format";
+import { fmtDate, fmtDateRange, trailingWindow } from "@/lib/date";
+import {
+  fmtNum,
+  fmtCurrency,
+  DELIVERY_GOOD,
+  DEFAULT_LOOKBACK,
+  lookbackDays,
+  type Lookback,
+} from "@/lib/format";
+import type { DashboardFilters } from "@/types/data-import";
+import { EMPTY_FILTERS } from "@/types/data-import";
 
 interface Props {
   open: boolean;
   onClose: () => void;
+  // The drawer is opened from a route's live session, so the route is
+  // fixed in the filter scope. Warehouse + route are hidden in the
+  // filter bar (redundant); the user can further narrow by category or
+  // item via the same multi-select cascade the dashboard uses.
   routeCode?: string;
 }
 
+/**
+ * Past-analysis drawer for recommendation adoption. Mirrors the Plan
+ * step's Past-analysis drawer: same filter bar (Reporting period +
+ * Category + Item, with Warehouse / Route hidden as redundant), same
+ * lookback enum, same shared FilterDimensions hook.
+ *
+ * Backend `/analytics/adoption` honours category_codes + item_codes
+ * directly so the metrics + charts here are real scoped views, not a
+ * cosmetic filter bar over unfiltered data.
+ */
 export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
+  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
+
+  // Seed filter scope with the active route on every open. The user can
+  // still widen via the bar; the route field is hidden in UI but pinned
+  // in state so backend calls stay scoped.
+  useEffect(() => {
+    if (!open) return;
+    setFilters({
+      ...EMPTY_FILTERS,
+      route_codes: routeCode ? [routeCode] : [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, routeCode]);
+
+  // Translate the lookback enum into (start_date, end_date) for the
+  // adoption endpoint. Day count is sourced from the shared
+  // LOOKBACK_OPTIONS (lib/format.ts) so this drawer never re-encodes
+  // numbers that already live there.
   const { params, windowLabel } = useMemo(() => {
-    const endDate = todayIso();
-    const startDate = addDays(endDate, -(LAST_30_DAYS - 1));
+    const { start_date, end_date } = trailingWindow(lookbackDays(lookback));
     return {
       params: {
-        start_date: startDate,
-        end_date: endDate,
-        ...(routeCode ? { route_code: routeCode } : {}),
+        start_date,
+        end_date,
+        ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
+        ...(filters.category_codes.length > 0 ? { category_codes: filters.category_codes } : {}),
+        ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
       },
-      windowLabel: `${startDate} to ${endDate}`,
+      windowLabel: fmtDateRange(start_date, end_date),
     };
-  }, [routeCode]);
+  }, [lookback, filters]);
+
   const { data, loading } = useAdoption(params, open);
   const s = data?.summary ?? null;
 
   // All four tiles derive from the same backend summary snapshot.
-  // Arrows are computed once so the JSX stays declarative.
   const derived = useMemo(() => {
     if (!s) return null;
-
-    // Tile 2: pick accuracy (unique-SKU hit rate)
     const pickAccuracyPct =
       s.skus_recommended > 0 ? (s.skus_adopted / s.skus_recommended) * 100 : null;
-
-    // Tile 3: share of adopted SKUs whose quantity landed inside the backend
-    // tolerance band. Denominator = adopted SKUs (Tile 2 numerator).
     const perfectPickPct =
       s.skus_adopted > 0 ? (s.skus_perfect / s.skus_adopted) * 100 : null;
 
-    // Best day highlight reads from the daily breakdown (row-grain) -- still
-    // meaningful for trend spotting even though the tiles are SKU-grain.
     let bestDayDate = "";
     let bestDayPct = -1;
     (data?.daily ?? []).forEach((d) => {
@@ -75,7 +111,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       items.push({
         label: "Best day",
         value: `${derived.bestDay.pct.toFixed(1)}% hit rate`,
-        detail: derived.bestDay.date,
+        detail: fmtDate(derived.bestDay.date),
       });
     }
     if (s.skus_adopted > 0) {
@@ -88,8 +124,6 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
     return items;
   }, [derived, s]);
 
-  // Arrows only on tiles where "up = unambiguously good." Lost sales
-  // carries no arrow -- it's a loss magnitude, not a direction.
   const revenueArrow: "up" | "down" | undefined =
     s?.driven_revenue != null && s.driven_revenue > 0 ? "up" : undefined;
   const accuracyArrow: "up" | "down" | undefined =
@@ -106,18 +140,15 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       : "down";
 
   return (
-    <Drawer open={open} onClose={onClose} title="Last 30 days - recommendation follow-through" width="xl">
+    <Drawer open={open} onClose={onClose} title="Past analysis — recommendation follow-through" width="xl">
       <div className="space-y-6">
-        <DrawerContextBar
-          routeCode={routeCode}
-          dateRange={windowLabel}
-          extra={
-            s ? (
-              <span className="text-caption text-text-tertiary">
-                {fmtNum(s.skus_recommended)} unique items recommended
-              </span>
-            ) : null
-          }
+        <DashboardFilterBar
+          value={filters}
+          onChange={setFilters}
+          lookback={lookback}
+          onLookbackChange={setLookback}
+          hideWarehouse
+          hideRoute
         />
 
         {loading ? (
@@ -126,7 +157,10 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           <EmptyState
             icon="📭"
             title="Not enough history"
-            message={data?.message ?? "No recommendations were stored for this window."}
+            message={
+              data?.message ??
+              `No recommendations were stored for ${windowLabel} matching the current filters.`
+            }
           />
         ) : (
           <>
@@ -194,46 +228,38 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
 
             <HighlightsStrip items={highlights} />
 
-            <div>
-              <p className="mb-2 text-caption uppercase tracking-wide text-text-tertiary">
-                Performance over time
-              </p>
-              <div className="space-y-6">
-                {data.daily.length > 0 && (
-                  <LineChart
-                    title="Daily hit rate"
-                    data={data.daily as unknown as Record<string, unknown>[]}
-                    xKey="date"
-                    series={[{ key: "adoption_pct", label: "Hit rate %", color: CHART_COLOR.success }]}
-                    height={260}
+            <div className="space-y-6">
+              {data.daily.length > 0 && (
+                <LineChart
+                  title="Daily hit rate"
+                  data={data.daily as unknown as Record<string, unknown>[]}
+                  xKey="date"
+                  series={[{ key: "adoption_pct", label: "Hit rate %", color: CHART_COLOR.success }]}
+                  height={260}
+                />
+              )}
+
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                {data.top_over_recommended.length > 0 && (
+                  <BarChart
+                    title="Items to right-size (van space we can reallocate)"
+                    data={data.top_over_recommended as unknown as Record<string, unknown>[]}
+                    xKey="item_code"
+                    yKey="rows"
+                    color={CHART_COLOR.warning}
+                    height={240}
                   />
                 )}
-
-                <p className="text-caption uppercase tracking-wide text-text-tertiary">
-                  Next-cycle tuning
-                </p>
-                <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                  {data.top_over_recommended.length > 0 && (
-                    <BarChart
-                      title="Items to right-size (van space we can reallocate)"
-                      data={data.top_over_recommended as unknown as Record<string, unknown>[]}
-                      xKey="item_code"
-                      yKey="rows"
-                      color={CHART_COLOR.warning}
-                      height={240}
-                    />
-                  )}
-                  {data.top_missed.length > 0 && (
-                    <BarChart
-                      title="New demand spotted (items customers are buying)"
-                      data={data.top_missed as unknown as Record<string, unknown>[]}
-                      xKey="item_code"
-                      yKey="rows"
-                      color={CHART_COLOR.success}
-                      height={240}
-                    />
-                  )}
-                </div>
+                {data.top_missed.length > 0 && (
+                  <BarChart
+                    title="New demand spotted (items customers are buying)"
+                    data={data.top_missed as unknown as Record<string, unknown>[]}
+                    xKey="item_code"
+                    yKey="rows"
+                    color={CHART_COLOR.success}
+                    height={240}
+                  />
+                )}
               </div>
             </div>
           </>

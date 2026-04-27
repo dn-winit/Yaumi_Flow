@@ -83,7 +83,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         ("sales_overview", svc.get_sales_overview),
                         ("item_catalog", svc.get_item_catalog),
                         ("business_kpis", svc.get_business_kpis),
-                        ("customer_overview_90", lambda: svc.get_customer_overview(90)),
                     ):
                         try:
                             fn()

@@ -5,6 +5,10 @@ import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
 import Loading from "@/components/ui/Loading";
 import Modal from "@/components/ui/Modal";
+import RecommendedValue from "@/components/ui/RecommendedValue";
+import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
+import { fmtDate } from "@/lib/date";
+import type { Row } from "@/types/common";
 import AnalysisList from "./AnalysisList";
 
 interface CustomerItem {
@@ -19,6 +23,11 @@ interface CustomerItem {
   daysSinceLastPurchase?: number;
   frequencyPercent?: number;
   trendFactor?: number;
+  // Raw PascalCase rec row (Signals / WhyItem / WhyQuantity / Confidence
+  // / Source / VanLoad / etc.) -- fed straight to RecommendationModal so
+  // the click-to-explain popup uses the same explainability surface as
+  // the rest of the workflow.
+  raw?: Record<string, unknown>;
 }
 
 interface VisitScore {
@@ -64,7 +73,6 @@ export default function CustomerVisit({
   onVisitComplete,
   onRequestAnalysis,
 }: Props) {
-  const [expanded, setExpanded] = useState(false);
   const [loading, setLoading] = useState(false);
   const [visitResult, setVisitResult] = useState<Record<string, unknown> | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -99,7 +107,6 @@ export default function CustomerVisit({
         return;
       }
       setVisitResult(v);
-      setExpanded(true); // auto-reveal the filled-in actuals
       onVisitComplete(v);
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to process visit");
@@ -139,8 +146,7 @@ export default function CustomerVisit({
     }
   };
 
-  const handleAiClick = (e: React.MouseEvent) => {
-    e.stopPropagation();
+  const handleAiClick = () => {
     onRequestAnalysis({
       customerCode,
       customerName,
@@ -156,15 +162,16 @@ export default function CustomerVisit({
 
   return (
     <div className="border border-default rounded-xl bg-surface-raised overflow-hidden">
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full flex items-center justify-between gap-3 px-4 py-3 hover:bg-surface-sunken transition-colors text-left"
-      >
+      <div className="flex items-center justify-between gap-3 px-4 py-3">
         <div className="flex-1 min-w-0 flex items-center gap-2">
           {(visited || liveVisited) && (
             <span
               className="w-2 h-2 rounded-full bg-success-500 shrink-0"
-              title={visited ? "Visit processed in this session" : "Customer invoiced today (live from YaumiLive)"}
+              title={
+                visited
+                  ? "Visit recorded in this session"
+                  : "Customer invoiced today (live from YaumiLive)"
+              }
               aria-label="visited"
             />
           )}
@@ -176,37 +183,19 @@ export default function CustomerVisit({
         <div className="flex items-center gap-2 shrink-0">
           <Badge variant="neutral">{items.length} items</Badge>
           {visited ? (
-            <Badge variant={scoreBadgeVariant(score!.score)}>Visited - {score!.score.toFixed(0)}%</Badge>
+            <Badge variant={scoreBadgeVariant(score!.score)}>Visited · {score!.score.toFixed(0)}%</Badge>
           ) : liveVisited ? (
             <Badge variant="success">Visited live</Badge>
           ) : (
             <Badge variant="info">Pending</Badge>
           )}
-          {visited && (
-            <button
-              onClick={handleAiClick}
-              title="AI review"
-              className="p-1.5 rounded-lg hover:bg-brand-50 text-brand-600 transition-colors"
-              aria-label="AI review"
-            >
-              <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                <path strokeLinecap="round" strokeLinejoin="round" d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
-              </svg>
-            </button>
-          )}
-          <svg
-            className={`w-4 h-4 text-text-tertiary transition-transform ${expanded ? "rotate-180" : ""}`}
-            fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}
-          >
-            <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
-          </svg>
         </div>
-      </button>
+      </div>
 
-      {expanded && (
-        <div className="border-t border-default bg-surface-sunken/40 px-4 py-3 space-y-3">
+      <div className="border-t border-default bg-surface-sunken/40 px-4 py-4 space-y-4">
+          <div className={TABLE_SCROLL_CLASS}>
           <table className="w-full text-body">
-            <thead>
+            <thead className="sticky top-0 z-10 bg-surface-sunken border-b border-default">
               <tr className="text-left text-caption font-medium text-text-tertiary uppercase tracking-wide">
                 <th className="px-2 py-2 w-32">Item code</th>
                 <th className="px-2 py-2">Name</th>
@@ -219,11 +208,25 @@ export default function CustomerVisit({
               {items.map((it) => {
                 const actual = visited ? (actuals[it.itemCode] ?? 0) : null;
                 const delta = actual != null ? actual - it.recommendedQty : null;
+                // Build the row the explainability modal expects. Start
+                // from the raw PascalCase rec record (carries Signals,
+                // WhyItem, WhyQuantity, Confidence, etc.) and overlay the
+                // session-level customer/route/date so the modal header
+                // is fully populated even if the upstream rec was sparse.
+                const explainRow: Row = {
+                  ...(it.raw ?? {}),
+                  CustomerCode: customerCode,
+                  CustomerName: customerName,
+                  RouteCode: routeCode,
+                  TrxDate: date,
+                };
                 return (
                   <tr key={it.itemCode}>
                     <td className="px-2 py-2 font-medium text-text-primary">{it.itemCode}</td>
                     <td className="px-2 py-2 text-text-secondary">{it.itemName ?? "-"}</td>
-                    <td className="px-2 py-2 text-right text-text-secondary">{it.recommendedQty}</td>
+                    <td className="px-2 py-2 text-right">
+                      <RecommendedValue row={explainRow} value={it.recommendedQty} />
+                    </td>
                     <td className="px-2 py-2 text-right">
                       {actual == null ? (
                         <span className="text-text-tertiary">--</span>
@@ -247,40 +250,57 @@ export default function CustomerVisit({
               })}
             </tbody>
           </table>
+          </div>
 
           {!visited && (
-            <div className="flex items-center gap-3">
-              <Button variant="secondary" size="sm" loading={briefingLoading} onClick={handleBriefing}>
-                Briefing
-              </Button>
-              <Button
-                variant="primary"
-                size="sm"
-                loading={loading}
-                disabled={!briefing}
-                className={briefing ? "" : "opacity-40"}
-                onClick={handleVisit}
-              >
-                Mark visited
-              </Button>
-              {error && <span className="text-caption text-danger-600">{error}</span>}
+            <div className="space-y-2">
+              <div className="flex items-center flex-wrap gap-3">
+                <Button
+                  variant={briefing ? "secondary" : "primary"}
+                  size="sm"
+                  loading={briefingLoading}
+                  onClick={handleBriefing}
+                >
+                  {briefing ? "Briefing read ✓" : "Read briefing"}
+                </Button>
+                <Button
+                  variant="primary"
+                  size="sm"
+                  loading={loading}
+                  disabled={!briefing}
+                  onClick={handleVisit}
+                >
+                  Mark visited
+                </Button>
+              </div>
+              {!briefing && !briefingLoading && (
+                <p className="text-caption text-text-tertiary">
+                  Read the briefing first — it unlocks visit recording.
+                </p>
+              )}
+              {error && <p className="text-caption text-danger-600">{error}</p>}
             </div>
           )}
 
           {visited && score && (
-            <div className="flex items-center gap-5 text-body bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
-              <span title="Weighted visit score combining coverage and quantity accuracy">
-                <span className="text-brand-700 font-semibold">{score.score.toFixed(1)}%</span>
-                <span className="text-brand-600 ml-1 text-caption">overall</span>
-              </span>
-              <span title="Share of recommended items the customer actually bought">
-                <span className="text-brand-700 font-semibold">{score.coverage.toFixed(1)}%</span>
-                <span className="text-brand-600 ml-1 text-caption">items matched</span>
-              </span>
-              <span title="How close the actual quantities were to what we recommended">
-                <span className="text-brand-700 font-semibold">{score.accuracy.toFixed(1)}%</span>
-                <span className="text-brand-600 ml-1 text-caption">qty accuracy</span>
-              </span>
+            <div className="flex items-center justify-between gap-3 flex-wrap bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
+              <div className="flex items-center gap-5 text-body">
+                <span title="Weighted visit score combining coverage and quantity accuracy">
+                  <span className="text-brand-700 font-semibold">{score.score.toFixed(1)}%</span>
+                  <span className="text-brand-600 ml-1 text-caption">overall</span>
+                </span>
+                <span title="Share of recommended items the customer actually bought">
+                  <span className="text-brand-700 font-semibold">{score.coverage.toFixed(1)}%</span>
+                  <span className="text-brand-600 ml-1 text-caption">items matched</span>
+                </span>
+                <span title="How close the actual quantities were to what we recommended">
+                  <span className="text-brand-700 font-semibold">{score.accuracy.toFixed(1)}%</span>
+                  <span className="text-brand-600 ml-1 text-caption">qty accuracy</span>
+                </span>
+              </div>
+              <Button variant="secondary" size="sm" onClick={handleAiClick}>
+                Get AI review
+              </Button>
             </div>
           )}
 
@@ -320,7 +340,6 @@ export default function CustomerVisit({
             </div>
           )}
         </div>
-      )}
 
       <Modal
         open={briefingOpen}
@@ -336,7 +355,7 @@ export default function CustomerVisit({
               <span className="text-body text-text-tertiary">Route</span>
               <Badge variant="info">{routeCode}</Badge>
               <span className="text-body text-text-tertiary">Date</span>
-              <Badge variant="neutral">{date}</Badge>
+              <Badge variant="neutral">{fmtDate(date)}</Badge>
               <span className="ml-auto text-body text-text-tertiary">
                 {items.length} items · {items.reduce((n, i) => n + i.recommendedQty, 0)} units
               </span>

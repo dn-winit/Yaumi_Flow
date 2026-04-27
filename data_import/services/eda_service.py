@@ -20,6 +20,26 @@ from data_import.config.settings import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
+# Reporting-period enum exposed to the dashboard. A "working day" is any
+# date that has actual sales activity in sales_recent.csv -- this naturally
+# excludes weekends, public holidays, and any other closure without us
+# having to hard-code a calendar. The numeric value is the count of such
+# active dates to include in the trailing window.
+LOOKBACK_OPTIONS: Dict[str, int] = {
+    "last_working_day": 1,
+    "last_7_working_days": 7,
+}
+DEFAULT_LOOKBACK = "last_7_working_days"
+
+
+def _resolve_lookback(lookback: Optional[str]) -> tuple[str, int]:
+    """Return (canonical key, working-day count). Unknown values fall back
+    to the default so a stale frontend can never crash a backend call.
+    """
+    key = lookback if lookback in LOOKBACK_OPTIONS else DEFAULT_LOOKBACK
+    return key, LOOKBACK_OPTIONS[key]
+
+
 class EdaService:
     """Aggregated EDA over sales_recent.csv + live customer overview from YaumiLive."""
 
@@ -57,6 +77,146 @@ class EdaService:
             self._cache.clear()
 
     # ------------------------------------------------------------------
+    # Shared dashboard-filter layer
+    # ------------------------------------------------------------------
+    #
+    # Every dashboard endpoint that reads sales_recent.csv goes through this
+    # same helper so the filter semantics are identical across tiles, charts,
+    # and the cascading dimensions endpoint. Filters are passed as lists of
+    # codes (warehouse, route, item) or names (category -- sales_recent only
+    # carries CategoryName). An empty list means "no filter at this level."
+
+    @staticmethod
+    def _apply_sales_filters(
+        df: pd.DataFrame,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+        item_codes: List[str],
+    ) -> pd.DataFrame:
+        if df.empty:
+            return df
+        if warehouse_codes:
+            df = df[df["WarehouseCode"].astype(str).isin(set(map(str, warehouse_codes)))]
+        if route_codes:
+            df = df[df["RouteCode"].astype(str).isin(set(map(str, route_codes)))]
+        if category_codes:
+            df = df[df["CategoryName"].astype(str).isin(set(map(str, category_codes)))]
+        if item_codes:
+            df = df[df["ItemCode"].astype(str).isin(set(map(str, item_codes)))]
+        return df
+
+    @staticmethod
+    def _filter_key(
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+        item_codes: List[str],
+    ) -> str:
+        """Deterministic cache-key fragment for a filter combination.
+        Sorted so different orderings of the same selection share a cache slot.
+        """
+        def part(name: str, vals: List[str]) -> str:
+            return f"{name}={'|'.join(sorted(set(map(str, vals))))}" if vals else f"{name}="
+        return ";".join([
+            part("w", warehouse_codes),
+            part("r", route_codes),
+            part("c", category_codes),
+            part("i", item_codes),
+        ])
+
+    def get_filter_dimensions(
+        self,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+    ) -> Dict[str, Any]:
+        """Return the cascading filter options for the dashboard FilterBar.
+
+        Each downstream dimension is the set of unique values present in the
+        sales slice that already matches every upstream selection. Items are
+        filtered by all three upstream levels so the deepest dropdown stays
+        scoped tightly even when the user makes multiple picks above it.
+        """
+        key = "filter_dims::" + self._filter_key(warehouse_codes, route_codes, category_codes, [])
+        return self._cached(key, lambda: self._compute_filter_dimensions(
+            warehouse_codes, route_codes, category_codes,
+        ))
+
+    def _compute_filter_dimensions(
+        self,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+    ) -> Dict[str, Any]:
+        df = self._load_sales_df()
+        if df.empty:
+            return {"warehouses": [], "routes": [], "categories": [], "items": []}
+
+        # Warehouses: every distinct warehouse in the full slice (the master
+        # set -- selecting one warehouse doesn't shrink its own dropdown).
+        warehouses = (
+            df[["WarehouseCode", "WarehouseName"]]
+            .dropna()
+            .drop_duplicates("WarehouseCode")
+            .sort_values("WarehouseCode")
+            .to_dict("records")
+        )
+
+        # Routes: filtered by warehouse selection. RouteCode is the only
+        # identifier in sales_recent; we surface it as both code and name so
+        # the UI can render "9105" without a fallback path. Each route also
+        # carries its parent warehouse so the VanLoad route grid can group
+        # cards by warehouse without a second API call.
+        scoped = self._apply_sales_filters(df, warehouse_codes, [], [], [])
+        route_warehouse = (
+            scoped[["RouteCode", "WarehouseCode", "WarehouseName"]]
+            .dropna(subset=["RouteCode"])
+            .drop_duplicates("RouteCode")
+            .sort_values("RouteCode")
+        )
+        routes = [
+            {
+                "code": str(row.RouteCode).strip(),
+                "name": str(row.RouteCode).strip(),
+                "warehouse_code": str(row.WarehouseCode).strip(),
+                "warehouse_name": str(row.WarehouseName).strip(),
+            }
+            for row in route_warehouse.itertuples(index=False)
+        ]
+
+        # Categories: filtered by warehouse + route. sales_recent only carries
+        # CategoryName so name doubles as the identifier.
+        scoped = self._apply_sales_filters(df, warehouse_codes, route_codes, [], [])
+        cat_vals = sorted(
+            scoped["CategoryName"].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique()
+        )
+        categories = [{"code": c, "name": c} for c in cat_vals]
+
+        # Items: filtered by all three upstream levels.
+        scoped = self._apply_sales_filters(df, warehouse_codes, route_codes, category_codes, [])
+        item_pairs = (
+            scoped[["ItemCode", "ItemName"]]
+            .dropna(subset=["ItemCode"])
+            .drop_duplicates("ItemCode")
+            .sort_values("ItemCode")
+        )
+        items = [
+            {"code": str(r.ItemCode).strip(), "name": str(r.ItemName).strip() or str(r.ItemCode).strip()}
+            for r in item_pairs.itertuples(index=False)
+        ]
+
+        return {
+            "warehouses": [
+                {"code": str(r["WarehouseCode"]).strip(), "name": str(r["WarehouseName"]).strip()}
+                for r in warehouses
+            ],
+            "routes": routes,
+            "categories": categories,
+            "items": items,
+        }
+
+    # ------------------------------------------------------------------
     # Shared reference data
     # ------------------------------------------------------------------
 
@@ -85,8 +245,18 @@ class EdaService:
     # Sales overview (from local sales_recent.csv)
     # ------------------------------------------------------------------
 
-    def get_sales_overview(self, days: int = 90) -> Dict[str, Any]:
-        return self._cached(f"sales_overview::{days}", lambda: self._compute_sales_overview(days))
+    def get_sales_overview(
+        self,
+        lookback: Optional[str] = None,
+        warehouse_codes: Optional[List[str]] = None,
+        route_codes: Optional[List[str]] = None,
+        category_codes: Optional[List[str]] = None,
+        item_codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        canonical, _ = _resolve_lookback(lookback)
+        w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
+        key = f"sales_overview::{canonical}::" + self._filter_key(w, r, c, i)
+        return self._cached(key, lambda: self._compute_sales_overview(canonical, w, r, c, i))
 
     def _load_sales_df(self) -> pd.DataFrame:
         path = self._s.data_path(self._s.sales_recent_file)
@@ -100,26 +270,41 @@ class EdaService:
         df["revenue"] = df["TotalQuantity"] * df["AvgUnitPrice"]
         return df.dropna(subset=["TrxDate"])
 
-    def _compute_sales_overview(self, days: int = 90) -> Dict[str, Any]:
-        """Sales aggregates for the trailing `days` window.
+    def _compute_sales_overview(
+        self,
+        lookback: str = DEFAULT_LOOKBACK,
+        warehouse_codes: Optional[List[str]] = None,
+        route_codes: Optional[List[str]] = None,
+        category_codes: Optional[List[str]] = None,
+        item_codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Sales aggregates for the trailing N working-day window, optionally
+        scoped to the dashboard FilterBar selection.
 
-        All four breakdowns (daily trend, top items, top routes, categories)
-        share the same window so the dashboard tab selector drives every
-        chart and table consistently. ``totals`` describes the windowed
-        slice -- date range, unique counts, totals -- so the page subtitle
-        can show "last X days · Y → Z" without extra computation.
+        A "working day" is any date that has actual sales activity in
+        sales_recent.csv -- naturally excludes weekends, holidays, and any
+        other closure without a hard-coded calendar. All four breakdowns
+        (daily trend, top items, top routes, categories) share the window
+        so the dashboard period selector drives every chart consistently.
         """
         df = self._load_sales_df()
         if df.empty:
             return {"available": False, "message": "sales_recent.csv not found or empty"}
 
-        # Window slice (silently clamps when CSV doesn't have `days` worth of
-        # history -- dashboard still shows whatever's available).
-        anchor = df["TrxDate"].max()
-        cutoff = anchor - pd.Timedelta(days=days - 1)
-        df = df[df["TrxDate"] >= cutoff]
+        canonical, n_working = _resolve_lookback(lookback)
+        # Working-day slice: pick the last N distinct dates with sales,
+        # then keep only rows whose TrxDate falls in that set. Silently
+        # clamps when CSV has fewer than N active dates.
+        active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
+        if not active_dates:
+            return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
+                    "top_items": [], "top_routes": [], "categories": []}
+        df = df[df["TrxDate"].dt.normalize().isin(active_dates)]
+        df = self._apply_sales_filters(
+            df, warehouse_codes or [], route_codes or [], category_codes or [], item_codes or [],
+        )
         if df.empty:
-            return {"available": True, "window_days": days, "totals": {}, "daily_trend": [],
+            return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
                     "top_items": [], "top_routes": [], "categories": []}
 
         total_qty = float(df["TotalQuantity"].sum())
@@ -158,7 +343,7 @@ class EdaService:
 
         return {
             "available": True,
-            "window_days": days,
+            "lookback": canonical,
             "totals": {
                 "transactions": int(len(df)),
                 "total_quantity": round(total_qty, 1),
@@ -169,7 +354,7 @@ class EdaService:
                 "unique_categories": int(df["CategoryName"].nunique()),
                 "first_date": df["TrxDate"].min().strftime("%Y-%m-%d"),
                 "last_date": df["TrxDate"].max().strftime("%Y-%m-%d"),
-                "days_covered": int((df["TrxDate"].max() - df["TrxDate"].min()).days),
+                "working_days": int(df["TrxDate"].dt.normalize().nunique()),
             },
             "daily_trend": daily.to_dict("records"),
             "top_items": top_items.to_dict("records"),
@@ -221,130 +406,358 @@ class EdaService:
     # Business KPIs -- actionable daily-ops view (uses cached CSVs only)
     # ------------------------------------------------------------------
 
-    def get_business_kpis(self) -> Dict[str, Any]:
-        return self._cached("business_kpis", self._compute_business_kpis)
+    def get_business_kpis(
+        self,
+        lookback: Optional[str] = None,
+        warehouse_codes: Optional[List[str]] = None,
+        route_codes: Optional[List[str]] = None,
+        category_codes: Optional[List[str]] = None,
+        item_codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        canonical, _ = _resolve_lookback(lookback)
+        w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
+        key = f"business_kpis::{canonical}::" + self._filter_key(w, r, c, i)
+        return self._cached(key, lambda: self._compute_business_kpis(canonical, w, r, c, i))
 
-    def _compute_business_kpis(self) -> Dict[str, Any]:
-        """Compute a small, opinionated set of metrics a supervisor can act on:
-            * yesterday's revenue + WoW delta
-            * 7-day revenue + WoW delta
-            * forecast accuracy over the last 7 days
-            * today's planned operations (routes + customers from journey plan)
-        All from local CSVs -- no DB round-trips.
-        """
-        sales = self._load_sales_df()
-        if sales.empty:
-            return {"available": False, "message": "sales_recent.csv not found or empty"}
+    # ------------------------------------------------------------------
+    # Demand-forecast loader -- the van-load source. Predicted = what we
+    # told the van to load; ActualQty is included for some rows but we
+    # join against customer_data for fresher actuals + per-period prices.
+    # ------------------------------------------------------------------
 
-        anchor = pd.Timestamp(sales["TrxDate"].max().date())
-        yesterday = anchor
-        week_ago = anchor - pd.Timedelta(days=6)
-        prior_week_end = week_ago - pd.Timedelta(days=1)
-        prior_week_start = prior_week_end - pd.Timedelta(days=6)
-        same_day_last_week = anchor - pd.Timedelta(days=7)
+    _FORECAST_COLUMNS = ["TrxDate", "RouteCode", "ItemCode", "DataSplit", "Predicted"]
 
-        def _revenue_in(start: pd.Timestamp, end: pd.Timestamp) -> float:
-            mask = (sales["TrxDate"] >= start) & (sales["TrxDate"] <= end)
-            return float(sales.loc[mask, "revenue"].sum())
-
-        yesterday_rev = _revenue_in(yesterday, yesterday)
-        last_week_same_day_rev = _revenue_in(same_day_last_week, same_day_last_week)
-        last_7d_rev = _revenue_in(week_ago, anchor)
-        prior_7d_rev = _revenue_in(prior_week_start, prior_week_end)
-
-        def _delta_pct(now: float, prev: float) -> Optional[float]:
-            if prev <= 0:
-                return None
-            return round((now - prev) / prev * 100, 1)
-
-        # Forecast accuracy (7d)
-        forecast_accuracy = self._forecast_accuracy_recent(days=7, anchor=anchor)
-
-        # Operations summary — 7-day rolling window matching the other KPIs.
-        # Uses actual current date so it stays fresh regardless of sales lag.
-        today_ops = self._operations_summary(days=7)
-
-        return {
-            "available": True,
-            "anchor_date": anchor.strftime("%Y-%m-%d"),
-            "yesterday": {
-                "revenue": round(yesterday_rev, 2),
-                "delta_pct_vs_last_week": _delta_pct(yesterday_rev, last_week_same_day_rev),
-                "comparison_label": "vs same day last week",
-            },
-            "last_7_days": {
-                "revenue": round(last_7d_rev, 2),
-                "delta_pct_vs_prior_7d": _delta_pct(last_7d_rev, prior_7d_rev),
-                "prior_revenue": round(prior_7d_rev, 2),
-            },
-            "forecast_accuracy_7d": forecast_accuracy,
-            "today_operations": today_ops,
-        }
-
-    def _forecast_accuracy_recent(self, *, days: int, anchor: pd.Timestamp) -> Dict[str, Any]:
-        """Mean accuracy for forecast rows in the trailing `days` window.
-
-        Uses ``demand_forecast.csv`` which carries ``Predicted`` + ``ActualQty``.
-        Scores rows where actual > 0 AND predicted > 0 -- identical filter to
-        the DFP service's ``wape_summary`` helper, so this card, the drawer,
-        and the drift endpoint all report the same number.
-        """
+    def _load_forecast_df(self) -> pd.DataFrame:
         path = self._s.data_path(self._s.demand_forecast_file)
         if not path.exists():
-            return {"available": False, "message": "demand_forecast.csv not found"}
-        df = pd.read_csv(path, low_memory=False)
-        if df.empty or "Predicted" not in df.columns or "ActualQty" not in df.columns:
-            return {"available": False}
-
+            logger.warning("Demand-forecast file not found: %s", path)
+            return pd.DataFrame()
+        df = pd.read_csv(path, low_memory=False, usecols=self._FORECAST_COLUMNS)
         df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce")
-        cutoff = anchor - pd.Timedelta(days=days - 1)
-        window = df[(df["TrxDate"] >= cutoff) & (df["TrxDate"] <= anchor)]
-        actual = pd.to_numeric(window["ActualQty"], errors="coerce").fillna(0)
-        predicted = pd.to_numeric(window["Predicted"], errors="coerce").fillna(0)
-        mask = (actual > 0) & (predicted > 0)
-        if not mask.any():
-            return {"available": True, "rows_compared": 0, "accuracy_pct": None}
-        scored_actual = actual[mask]
-        scored_pred = predicted[mask]
-        total = float(scored_actual.sum())
-        if total <= 0:
-            return {"available": True, "rows_compared": int(mask.sum()), "accuracy_pct": None}
-        wape = float((scored_actual - scored_pred).abs().sum() / total * 100)
+        df["RouteCode"] = df["RouteCode"].astype(str).str.strip()
+        df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
+        df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
+        return df.dropna(subset=["TrxDate"])
+
+    # ------------------------------------------------------------------
+    # Shared (sales ⋈ forecast) merge -- consumed by both /eda/business-kpis
+    # and /eda/forecast-rows. Single compute path so the two endpoints can
+    # never disagree on what "this scope, this period" means.
+    # ------------------------------------------------------------------
+
+    def _actual_vs_forecast_merge(
+        self,
+        lookback: str,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+        item_codes: List[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Build the per-(date, route, item) merge of past forecasts vs
+        actual sales over the lookback window. Returns None when there is
+        nothing in scope; otherwise a dict with:
+
+            sales         -- filtered + date-restricted sales rows
+            merged        -- forecast OUTER-JOIN sold, with price fallback
+            anchor        -- max active date
+            working_days  -- count of active dates
+            covered_routes / covered_days -- forecast scope counters
+        """
+        _, n_working = _resolve_lookback(lookback)
+
+        sales = self._apply_sales_filters(
+            self._load_sales_df(),
+            warehouse_codes, route_codes, category_codes, item_codes,
+        )
+        if sales.empty:
+            return None
+
+        active_dates = sorted(sales["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
+        if not active_dates:
+            return None
+        active_set = set(active_dates)
+        sales = sales[sales["TrxDate"].dt.normalize().isin(active_set)].copy()
+        sales["TrxDate"] = sales["TrxDate"].dt.normalize()
+        sales["RouteCode"] = sales["RouteCode"].astype(str).str.strip()
+        sales["ItemCode"] = sales["ItemCode"].astype(str).str.strip()
+        anchor = sales["TrxDate"].max()
+
+        # Aggregate sales to (date, route, item); pull ItemName along so
+        # downstream consumers (drawer rows) don't need a second lookup.
+        sold = (
+            sales.groupby(["TrxDate", "RouteCode", "ItemCode"], as_index=False)
+            .agg(
+                actual_qty=("TotalQuantity", "sum"),
+                revenue=("revenue", "sum"),
+                ItemName=("ItemName", "first"),
+            )
+        )
+        sold["price"] = (sold["revenue"] / sold["actual_qty"].replace(0, pd.NA)).fillna(0.0)
+
+        # Forecast scope mirrors the sales scope (route + item set).
+        scope_routes = set(sales["RouteCode"].unique())
+        scope_items = set(sales["ItemCode"].unique())
+        forecast = self._load_forecast_df()
+        if not forecast.empty:
+            # "Forecast" split = the predictions that actually drove van
+            # loads in production (future_forecast.csv). "Test" is the
+            # held-out evaluation slice and is irrelevant for impact.
+            forecast = forecast[forecast["DataSplit"] == "Forecast"]
+            # Predicted == 0 means "skip this item" -- not coverage.
+            forecast = forecast[forecast["Predicted"] > 0]
+            forecast = forecast[forecast["TrxDate"].dt.normalize().isin(active_set)]
+            forecast = forecast[forecast["RouteCode"].isin(scope_routes)]
+            forecast = forecast[forecast["ItemCode"].isin(scope_items)]
+
+        if not forecast.empty:
+            forecast["TrxDate"] = forecast["TrxDate"].dt.normalize()
+            forecast = (
+                forecast.groupby(["TrxDate", "RouteCode", "ItemCode"], as_index=False)
+                .agg(predicted=("Predicted", "sum"))
+            )
+            covered_cells = forecast[["RouteCode", "TrxDate"]].drop_duplicates()
+            covered_routes = int(covered_cells["RouteCode"].nunique())
+            covered_days = int(covered_cells["TrxDate"].nunique())
+        else:
+            forecast = pd.DataFrame(columns=["TrxDate", "RouteCode", "ItemCode", "predicted"])
+            covered_routes = 0
+            covered_days = 0
+
+        # Outer-join so a forecast with no sale (lost) AND a sale without
+        # forecast (uncovered demand) both surface in `merged`.
+        merged = forecast.merge(
+            sold[["TrxDate", "RouteCode", "ItemCode", "actual_qty", "price", "ItemName"]],
+            on=["TrxDate", "RouteCode", "ItemCode"], how="outer",
+        )
+        for col in ("predicted", "actual_qty", "price"):
+            merged[col] = merged[col].fillna(0.0)
+
+        # Price fallback for forecast-only rows that had no matching sale.
+        zero_price = merged["price"] <= 0
+        if zero_price.any():
+            price_lookup = self.get_item_prices()
+            merged.loc[zero_price, "price"] = (
+                merged.loc[zero_price, "ItemCode"].map(price_lookup).fillna(0.0)
+            )
+
         return {
-            "available": True,
-            "window_days": days,
-            "rows_compared": int(mask.sum()),
-            "accuracy_pct": round(max(0.0, 100.0 - wape), 2),
+            "sales": sales,
+            "merged": merged,
+            "forecast": forecast,
+            "anchor": anchor,
+            "working_days": len(active_dates),
+            "covered_routes": covered_routes,
+            "covered_days": covered_days,
         }
 
-    def _operations_summary(self, days: int = 7) -> Dict[str, Any]:
-        """Routes & customers from the journey plan over a rolling window.
+    def _compute_business_kpis(
+        self,
+        lookback: str,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+        item_codes: List[str],
+    ) -> Dict[str, Any]:
+        """Four headline metrics for the executive dashboard:
 
-        Uses the actual current date (not the sales anchor) so it stays fresh
-        even when sales data lags. Consistent with the 7-day window used by
-        the other dashboard KPIs.
+            1. total_revenue   -- AED sold in the period (sales_recent)
+            2. total_volume    -- total units sold + transaction count
+            3. unique_items    -- count of distinct SKUs that sold
+            4. lost_opportunity -- AED of forecast that didn't sell
+                                  (Σ max(0, predicted - actual) × price)
+
+        All four are derived from the shared (sales ⋈ forecast) merge --
+        the same helper that powers the Past-analysis drawer, so the
+        numbers can never drift between the two surfaces.
         """
-        path = self._s.data_path(self._s.journey_plan_file)
-        if not path.exists():
-            return {"available": False, "message": "journey_plan.csv not found"}
-        df = pd.read_csv(path, low_memory=False)
-        if df.empty:
-            return {"available": True, "routes": 0, "customers": 0, "days_active": 0}
-        date_col = "JourneyDate" if "JourneyDate" in df.columns else "TrxDate"
-        if date_col not in df.columns:
-            return {"available": False, "message": f"{date_col} missing"}
-        df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-        now = pd.Timestamp.now().normalize()
-        start = now - pd.Timedelta(days=days - 1)
-        window = df[(df[date_col].dt.normalize() >= start) & (df[date_col].dt.normalize() <= now)]
+        ctx = self._actual_vs_forecast_merge(
+            lookback, warehouse_codes, route_codes, category_codes, item_codes,
+        )
+        if ctx is None:
+            return {"available": False, "message": "sales_recent.csv not found or no rows in scope"}
+
+        sales = ctx["sales"]
+        merged = ctx["merged"]
+        forecast = ctx["forecast"]
+        anchor = ctx["anchor"]
+        working_days = ctx["working_days"]
+        covered_routes = ctx["covered_routes"]
+        covered_days = ctx["covered_days"]
+
+        # ---- Tiles 1 / 2 / 3: business pulse (sales-only) --------------
+        total_revenue = float(sales["revenue"].sum())
+        total_qty = float(sales["TotalQuantity"].sum())
+        transactions = int(len(sales))
+        items_sold = int(sales["ItemCode"].nunique())
+        avg_unique_per_day = (
+            float(sales.groupby("TrxDate")["ItemCode"].nunique().mean())
+            if working_days else 0.0
+        )
+        # Averages from sums collapse to total / day count -- no extra groupby.
+        daily_avg_revenue = total_revenue / working_days if working_days else None
+        daily_avg_units = total_qty / working_days if working_days else None
+        daily_avg_txns = transactions / working_days if working_days else None
+
+        # ---- Tile 4 + coverage (from the merged forecast frame) --------
+        if forecast.empty:
+            lost_amount = 0.0
+            lost_units = 0.0
+            items_lost = 0
+            avg_daily_coverage_pct: Optional[float] = None
+            daily_avg_lost: Optional[float] = None
+        else:
+            lost_qty_series = (merged["predicted"] - merged["actual_qty"]).clip(lower=0)
+            lost_amount = float((lost_qty_series * merged["price"]).sum())
+            lost_units = float(lost_qty_series.sum())
+            # Distinct SKUs that contributed any lost units -- not row count.
+            items_lost = int(merged.loc[lost_qty_series > 0, "ItemCode"].nunique())
+
+            # Per-(day, route) coverage: of items each route actually sold
+            # on each scored day, what fraction were on that day's
+            # forecast for that route. Average across (day, route) cells.
+            sold_items_by_day_route = (
+                sales.groupby(["TrxDate", "RouteCode"])["ItemCode"]
+                .apply(lambda s: set(s.unique()))
+            )
+            forecast_by_day_route = (
+                forecast.groupby(["TrxDate", "RouteCode"])["ItemCode"]
+                .apply(lambda s: set(s.unique()))
+            )
+            cell_ratios: List[float] = []
+            for key, sold_items_cell in sold_items_by_day_route.items():
+                if not sold_items_cell:
+                    continue
+                predicted_cell = forecast_by_day_route.get(key)
+                if not predicted_cell:
+                    continue
+                cell_ratios.append(
+                    len(sold_items_cell & predicted_cell) / len(sold_items_cell)
+                )
+            avg_daily_coverage_pct = (
+                round(sum(cell_ratios) / len(cell_ratios) * 100, 1)
+                if cell_ratios else None
+            )
+            daily_avg_lost = (
+                lost_amount / covered_days if covered_days > 0 else None
+            )
+
         return {
             "available": True,
-            "window_days": days,
-            "start_date": start.strftime("%Y-%m-%d"),
-            "end_date": now.strftime("%Y-%m-%d"),
-            "routes": int(window["RouteCode"].nunique()) if "RouteCode" in window.columns else 0,
-            "customers": int(window["CustomerCode"].nunique()) if "CustomerCode" in window.columns else 0,
-            "days_active": int(window[date_col].dt.normalize().nunique()),
+            "lookback": lookback,
+            "anchor_date": anchor.strftime("%Y-%m-%d"),
+            # Denominator for tiles 1/2/3 averages (active sales dates).
+            "working_days": working_days,
+            # Denominator for tile 4's average (forecast-scored dates).
+            "covered_routes": covered_routes,
+            "covered_days": covered_days,
+            "total_revenue": {
+                "available": True,
+                "amount": round(total_revenue, 2),
+                "daily_avg": (
+                    round(daily_avg_revenue, 2) if daily_avg_revenue is not None else None
+                ),
+            },
+            "total_volume": {
+                "available": True,
+                "units": round(total_qty, 1),
+                "transactions": transactions,
+                "daily_avg_units": (
+                    round(daily_avg_units, 1) if daily_avg_units is not None else None
+                ),
+                "daily_avg_transactions": (
+                    round(daily_avg_txns, 1) if daily_avg_txns is not None else None
+                ),
+            },
+            "unique_items": {
+                "available": True,
+                "count": items_sold,
+                "daily_avg": round(avg_unique_per_day, 1),
+                "avg_daily_coverage_pct": avg_daily_coverage_pct,
+            },
+            "lost_opportunity": {
+                "available": True,
+                "amount": round(lost_amount, 2),
+                "units": round(lost_units, 1),
+                "items_affected": items_lost,
+                "daily_avg": (
+                    round(daily_avg_lost, 2) if daily_avg_lost is not None else None
+                ),
+            },
+        }
+
+    # ------------------------------------------------------------------
+    # Forecast rows -- per-(date, route, item) predicted vs actual rows
+    # for the VanLoad "Past analysis" drawer. Same merge as business KPIs,
+    # different projection (rows in, not aggregates), so the two surfaces
+    # always agree on what falls inside a given filter scope.
+    # ------------------------------------------------------------------
+
+    def get_forecast_rows(
+        self,
+        lookback: Optional[str] = None,
+        warehouse_codes: Optional[List[str]] = None,
+        route_codes: Optional[List[str]] = None,
+        category_codes: Optional[List[str]] = None,
+        item_codes: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        canonical, _ = _resolve_lookback(lookback)
+        w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
+        key = f"forecast_rows::{canonical}::" + self._filter_key(w, r, c, i)
+        return self._cached(key, lambda: self._compute_forecast_rows(canonical, w, r, c, i))
+
+    def _compute_forecast_rows(
+        self,
+        lookback: str,
+        warehouse_codes: List[str],
+        route_codes: List[str],
+        category_codes: List[str],
+        item_codes: List[str],
+    ) -> Dict[str, Any]:
+        ctx = self._actual_vs_forecast_merge(
+            lookback, warehouse_codes, route_codes, category_codes, item_codes,
+        )
+        if ctx is None:
+            return {
+                "available": False,
+                "lookback": lookback,
+                "message": "no rows in scope for this period",
+            }
+
+        merged = ctx["merged"]
+        # Item names: merge already carries ItemName for rows where a sale
+        # exists; fill gaps from the global catalog so forecast-only rows
+        # also show a friendly label.
+        if "ItemName" not in merged.columns:
+            merged["ItemName"] = ""
+        missing_name = merged["ItemName"].isna() | (merged["ItemName"] == "")
+        if missing_name.any():
+            catalog = self.get_item_catalog()
+            name_map = {it["ItemCode"]: it.get("ItemName", "") for it in catalog.get("items", [])}
+            merged.loc[missing_name, "ItemName"] = (
+                merged.loc[missing_name, "ItemCode"].map(name_map).fillna("")
+            )
+
+        rows = [
+            {
+                "trx_date": r.TrxDate.strftime("%Y-%m-%d"),
+                "route_code": str(r.RouteCode),
+                "item_code": str(r.ItemCode),
+                "item_name": str(r.ItemName) if isinstance(r.ItemName, str) else "",
+                "predicted": round(float(r.predicted), 2),
+                "actual_qty": round(float(r.actual_qty), 2),
+                "price": round(float(r.price), 4),
+            }
+            for r in merged.itertuples(index=False)
+        ]
+
+        return {
+            "available": True,
+            "lookback": lookback,
+            "anchor_date": ctx["anchor"].strftime("%Y-%m-%d"),
+            "working_days": ctx["working_days"],
+            "covered_routes": ctx["covered_routes"],
+            "covered_days": ctx["covered_days"],
+            "rows": rows,
         }
 
     # ------------------------------------------------------------------
@@ -548,85 +961,3 @@ class EdaService:
                 self._cache.popitem(last=False)
         return value
 
-    # ------------------------------------------------------------------
-    # Customer overview (live from YaumiLive)
-    # ------------------------------------------------------------------
-
-    def get_customer_overview(self, lookback_days: int = 90) -> Dict[str, Any]:
-        return self._cached(f"customer_overview_{lookback_days}", lambda: self._compute_customer_overview(lookback_days))
-
-    def _compute_customer_overview(self, lookback_days: int) -> Dict[str, Any]:
-        if not (self._s.db.host and self._s.db.username):
-            return {"available": False, "message": "DB not configured"}
-
-        routes = self._s.route_codes
-        if not routes:
-            return {"available": False, "message": "No route codes configured"}
-
-        ph = ",".join("?" for _ in routes)
-        sql = f"""
-            SELECT
-                CustomerCode AS customer_code,
-                MAX(CustomerName) AS customer_name,
-                MAX(RouteCode) AS route_code,
-                COUNT(DISTINCT TrxDate) AS visits,
-                COUNT(DISTINCT ItemCode) AS unique_items,
-                SUM(CASE WHEN QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS total_quantity,
-                MAX(TrxDate) AS last_purchase
-            FROM {self._s.sales_view} WITH (NOLOCK)
-            WHERE ItemType = 'OrderItem'
-              AND TrxType  = 'SalesInvoice'
-              AND RouteCode IN ({ph})
-              AND TrxDate >= DATEADD(day, -?, GETDATE())
-            GROUP BY CustomerCode
-        """
-        params = list(routes) + [lookback_days]
-
-        try:
-            conn = pyodbc.connect(self._s.db.connection_string(), autocommit=False)
-            cursor = conn.cursor()
-            cursor.execute(sql, params)
-            cols = [d[0] for d in cursor.description]
-            df = pd.DataFrame.from_records(cursor.fetchall(), columns=cols)
-            conn.close()
-        except Exception as exc:
-            logger.error("Customer overview query failed: %s", exc)
-            return {"available": False, "message": f"DB query failed: {exc}"}
-
-        if df.empty:
-            return {"available": True, "totals": self._empty_customer_totals(lookback_days), "top_customers": [], "by_route": []}
-
-        df["last_purchase"] = pd.to_datetime(df["last_purchase"]).dt.strftime("%Y-%m-%d")
-        df["total_quantity"] = df["total_quantity"].astype(float)
-
-        top_customers = df.sort_values("total_quantity", ascending=False).head(10).to_dict("records")
-
-        by_route = (
-            df.groupby("route_code", as_index=False)
-            .agg(customers=("customer_code", "nunique"), total_quantity=("total_quantity", "sum"))
-            .sort_values("customers", ascending=False)
-            .to_dict("records")
-        )
-
-        return {
-            "available": True,
-            "totals": {
-                "lookback_days": lookback_days,
-                "active_customers": int(df["customer_code"].nunique()),
-                "total_visits": int(df["visits"].sum()),
-                "total_quantity": round(float(df["total_quantity"].sum()), 1),
-                "avg_visits_per_customer": round(float(df["visits"].mean()), 1),
-            },
-            "top_customers": top_customers,
-            "by_route": by_route,
-        }
-
-    @staticmethod
-    def _empty_customer_totals(lookback_days: int) -> Dict[str, Any]:
-        return {
-            "lookback_days": lookback_days,
-            "active_customers": 0,
-            "total_visits": 0,
-            "total_quantity": 0,
-            "avg_visits_per_customer": 0,
-        }

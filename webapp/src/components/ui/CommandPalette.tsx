@@ -7,12 +7,13 @@ interface Command {
   keywords: string;
 }
 
+// Visit is intentionally absent: it is a sub-step of Plan (reachable
+// only after the supervisor picks a route in Van Load), so a top-level
+// shortcut would land users on a guard that bounces them back to Plan.
 const COMMANDS: Command[] = [
   { label: "Dashboard", path: "/", keywords: "home overview kpi" },
   { label: "Forecasting Pipeline", path: "/pipeline", keywords: "train retrain model" },
-  { label: "Van Load", path: "/workflow/van-load", keywords: "forecast demand predict" },
-  { label: "Recommended Orders", path: "/workflow/orders", keywords: "recommend customer" },
-  { label: "Supervision", path: "/workflow/supervision", keywords: "live session visit" },
+  { label: "Plan — Van load & visit", path: "/workflow/plan", keywords: "van load forecast plan visit recommend customer supervision live session" },
   { label: "Data Admin", path: "/admin/data", keywords: "import refresh" },
   { label: "Cache Admin", path: "/admin/cache", keywords: "clear cache" },
 ];

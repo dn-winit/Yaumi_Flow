@@ -12,11 +12,6 @@ export interface DataStatusResponse {
   datasets: Record<string, DatasetInfo>;
 }
 
-export interface ImportRequest {
-  dataset: string;
-  mode: "incremental" | "full";
-}
-
 export interface ImportResponse {
   success: boolean;
   dataset: string;
@@ -34,13 +29,6 @@ export interface ImportAllResponse {
   results: Record<string, ImportResponse>;
 }
 
-export interface DataHealthResponse {
-  status: string;
-  db_connected: boolean;
-  data_dir: string;
-  datasets_available: number;
-}
-
 // EDA -- sales overview
 export interface SalesTotals {
   transactions: number;
@@ -52,7 +40,9 @@ export interface SalesTotals {
   unique_categories: number;
   first_date: string;
   last_date: string;
-  days_covered: number;
+  // Distinct active dates inside the lookback slice (so the page can
+  // render "N working days" alongside the date range).
+  working_days: number;
 }
 
 export interface CatalogItem {
@@ -79,36 +69,52 @@ export interface ItemStatsWindow {
   days: number;
 }
 
+// Four headline metrics for the executive dashboard. All sourced from
+// sales_recent.csv; lost_opportunity additionally joins demand_forecast.csv
+// to value the forecast gap. Each metric ships both the aggregate over the
+// period AND the per-day average, with the denominator visible (working_days
+// for tiles 1-3, covered_days for tile 4) so the math is verifiable.
 export interface BusinessKpis {
   available: boolean;
   message?: string;
+  lookback?: string;
   anchor_date?: string;
-  yesterday?: {
-    revenue: number;
-    delta_pct_vs_last_week: number | null;
-    comparison_label: string;
-  };
-  last_7_days?: {
-    revenue: number;
-    delta_pct_vs_prior_7d: number | null;
-    prior_revenue: number;
-  };
-  forecast_accuracy_7d?: {
+  // Distinct active sales dates inside the lookback slice -- denominator
+  // for tiles 1/2/3 daily averages.
+  working_days?: number;
+  // (route, day) cells with a past forecast row -- denominator for tile 4.
+  covered_routes?: number;
+  covered_days?: number;
+
+  total_revenue?: {
     available: boolean;
-    message?: string;
-    window_days?: number;
-    rows_compared?: number;
-    accuracy_pct?: number | null;
+    amount?: number;
+    daily_avg?: number | null;
   };
-  today_operations?: {
+
+  total_volume?: {
     available: boolean;
-    message?: string;
-    window_days?: number;
-    start_date?: string;
-    end_date?: string;
-    routes?: number;
-    customers?: number;
-    days_active?: number;
+    units?: number;
+    transactions?: number;
+    daily_avg_units?: number | null;
+    daily_avg_transactions?: number | null;
+  };
+
+  unique_items?: {
+    available: boolean;
+    count?: number;
+    // Mean of per-day nunique(items sold).
+    daily_avg?: number | null;
+    // Mean of per-day coverage ratios over the lookback window.
+    avg_daily_coverage_pct?: number | null;
+  };
+
+  lost_opportunity?: {
+    available: boolean;
+    amount?: number;
+    units?: number;
+    items_affected?: number;
+    daily_avg?: number | null;
   };
 }
 
@@ -156,7 +162,7 @@ export interface CategoryBreakdown {
 export interface SalesOverviewResponse {
   available: boolean;
   message?: string;
-  window_days?: number;
+  lookback?: string;
   totals?: SalesTotals;
   daily_trend?: DailyTrendPoint[];
   top_items?: TopItem[];
@@ -164,35 +170,58 @@ export interface SalesOverviewResponse {
   categories?: CategoryBreakdown[];
 }
 
-// EDA -- customer overview
-export interface CustomerTotals {
-  lookback_days: number;
-  active_customers: number;
-  total_visits: number;
-  total_quantity: number;
-  avg_visits_per_customer: number;
-}
-
-export interface TopCustomer {
-  customer_code: string;
-  customer_name: string;
+// EDA -- per-(date, route, item) forecast vs actual rows for the
+// VanLoad Past-analysis drawer. Sourced from the same merge that powers
+// the dashboard's business KPIs.
+export interface ForecastRow {
+  trx_date: string;
   route_code: string;
-  visits: number;
-  unique_items: number;
-  total_quantity: number;
-  last_purchase: string;
+  item_code: string;
+  item_name: string;
+  predicted: number;
+  actual_qty: number;
+  price: number;
 }
 
-export interface CustomersByRoute {
-  route_code: string;
-  customers: number;
-  total_quantity: number;
-}
-
-export interface CustomerOverviewResponse {
+export interface ForecastRowsResponse {
   available: boolean;
   message?: string;
-  totals?: CustomerTotals;
-  top_customers?: TopCustomer[];
-  by_route?: CustomersByRoute[];
+  lookback?: string;
+  anchor_date?: string;
+  working_days?: number;
+  covered_routes?: number;
+  covered_days?: number;
+  rows?: ForecastRow[];
 }
+
+// EDA -- cascading filter dimensions (warehouse → route → category → item)
+export interface FilterDimensionOption {
+  code: string;
+  name: string;
+  // Routes only: which warehouse the route belongs to. Lets the VanLoad
+  // route grid group cards by warehouse without a second lookup.
+  warehouse_code?: string;
+  warehouse_name?: string;
+}
+
+export interface FilterDimensions {
+  warehouses: FilterDimensionOption[];
+  routes: FilterDimensionOption[];
+  categories: FilterDimensionOption[];
+  items: FilterDimensionOption[];
+}
+
+// Empty arrays mean "no filter applied" -- backend treats them as "all".
+export interface DashboardFilters {
+  warehouse_codes: string[];
+  route_codes: string[];
+  category_codes: string[];
+  item_codes: string[];
+}
+
+export const EMPTY_FILTERS: DashboardFilters = {
+  warehouse_codes: [],
+  route_codes: [],
+  category_codes: [],
+  item_codes: [],
+};

@@ -14,21 +14,6 @@ export interface VisitResponse {
   };
 }
 
-export interface ScoreResponse {
-  success: boolean;
-  score: number;
-  coverage: number;
-  accuracy: number;
-}
-
-export interface RouteScoreResponse {
-  success: boolean;
-  routeScore: number;
-  customerCoverage: number;
-  qtyFulfillment: number;
-  customerScores: Record<string, number>;
-}
-
 export interface UnplannedVisitor {
   customer_code: string;
   customer_name?: string;
@@ -46,30 +31,4 @@ export interface UnplannedVisitsResponse {
   unplanned_count: number;
   planned_visited_codes: string[];
   customers: UnplannedVisitor[];
-}
-
-export interface ReviewResponse {
-  success: boolean;
-  exists: boolean;
-  session: Record<string, unknown> | null;
-}
-
-export interface SessionListItem {
-  routeCode: string;
-  date: string;
-  filename: string;
-  sizeBytes: number;
-  modified: number;
-}
-
-export interface MethodologyResponse {
-  item_accuracy: Record<string, unknown>;
-  customer_score: Record<string, unknown>;
-  route_score: Record<string, unknown>;
-}
-
-export interface SupervisionHealthResponse {
-  status: string;
-  storage_dir: string;
-  saved_sessions: number;
 }

@@ -1,22 +1,16 @@
 """
-Scoring engine -- item accuracy, customer score, route score.
+Scoring engine -- item accuracy, customer score.
 
 Item Accuracy: perfect zone 75-120%, linear decay outside.
 Customer Score: (coverage x 0.4) + (accuracy x 0.6)
-Route Score: average of visited customer scores.
 """
 
 from __future__ import annotations
 
-from typing import List, Optional
+from typing import Optional
 
 from sales_supervision.config.constants import SupervisionConstants
-from sales_supervision.models.schemas import (
-    RouteScoreResult,
-    ScoreResult,
-    SessionCustomer,
-    SessionItem,
-)
+from sales_supervision.models.schemas import ScoreResult, SessionCustomer
 
 
 class ScoringEngine:
@@ -79,29 +73,3 @@ class ScoringEngine:
         )
 
         return ScoreResult(score=score, coverage=coverage, accuracy=avg_accuracy)
-
-    # ------------------------------------------------------------------
-    # Route-level score
-    # ------------------------------------------------------------------
-
-    def route_score(self, customers: List[SessionCustomer]) -> RouteScoreResult:
-        visited = [c for c in customers if c.visited]
-        if not visited:
-            return RouteScoreResult()
-
-        customer_scores = {c.customer_code: c.score.score for c in visited}
-        avg_score = round(sum(customer_scores.values()) / len(customer_scores), 1)
-
-        total_planned = len(customers)
-        cust_coverage = round(len(visited) / max(total_planned, 1) * 100, 1)
-
-        total_rec = sum(c.total_recommended for c in visited)
-        total_act = sum(c.total_actual for c in visited)
-        qty_fulfillment = round(total_act / max(total_rec, 1) * 100, 1)
-
-        return RouteScoreResult(
-            route_score=avg_score,
-            customer_coverage=cust_coverage,
-            qty_fulfillment=qty_fulfillment,
-            customer_scores=customer_scores,
-        )

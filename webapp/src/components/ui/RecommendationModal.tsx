@@ -10,6 +10,7 @@ import {
   str,
 } from "./explain/atoms";
 import { pickDate } from "@/lib/format";
+import { fmtDate } from "@/lib/date";
 import type { Row } from "@/types/common";
 
 interface Props {
@@ -92,7 +93,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           right={{
             label: "Customer / Date",
             primary: customerCode + (customerName ? ` — ${customerName}` : ""),
-            secondary: date,
+            secondary: fmtDate(date),
           }}
         />
 

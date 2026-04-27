@@ -1,6 +1,7 @@
 import React from "react";
 import Table from "@/components/ui/Table";
 import Badge from "@/components/ui/Badge";
+import { fmtDate } from "@/lib/date";
 import type { DatasetInfo } from "@/types/data-import";
 
 interface DatasetStatusTableProps {
@@ -35,12 +36,12 @@ export default function DatasetStatusTable({
     {
       key: "first_date",
       label: "First Date",
-      render: (row: (typeof rows)[number]) => row.first_date ?? "-",
+      render: (row: (typeof rows)[number]) => fmtDate(row.first_date),
     },
     {
       key: "last_date",
       label: "Last Date",
-      render: (row: (typeof rows)[number]) => row.last_date ?? "-",
+      render: (row: (typeof rows)[number]) => fmtDate(row.last_date),
     },
     {
       key: "size_mb",

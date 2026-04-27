@@ -9,6 +9,7 @@ import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
 import { useUpcomingPlan } from "@/hooks/useRecommendedOrder";
 import { fmtNum, fmtCurrency } from "@/lib/format";
+import { fmtDate, fmtDateRange } from "@/lib/date";
 
 interface Props {
   open: boolean;
@@ -24,11 +25,11 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
   const { data, loading } = useUpcomingPlan(params, open);
 
   const windowLabel = data
-    ? `${data.today} to ${data.daily[data.daily.length - 1]?.date ?? data.today}`
+    ? fmtDateRange(data.today, data.daily[data.daily.length - 1]?.date ?? data.today)
     : "next days";
 
   const columns = [
-    { key: "date", label: "Date", render: (r: Record<string, unknown>) => String(r.date) },
+    { key: "date", label: "Date", render: (r: Record<string, unknown>) => fmtDate(r.date) },
     {
       key: "customers",
       label: "Customers",
@@ -99,7 +100,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
                     ? fmtNum(data.summary.peak_day.predicted_qty, 1)
                     : "--"
                 }
-                subtitle={data.summary.peak_day?.date ?? ""}
+                subtitle={data.summary.peak_day ? fmtDate(data.summary.peak_day.date) : ""}
               />
             </KpiRow>
 

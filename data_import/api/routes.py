@@ -4,7 +4,7 @@ API routes for data import.
 
 from __future__ import annotations
 
-from typing import Optional
+from typing import List, Optional
 
 from fastapi import APIRouter, Depends, Query
 
@@ -93,15 +93,26 @@ def health(importer: DataImporter = Depends(get_importer)):
 
 @router.get("/eda/sales")
 def eda_sales(
-    days: int = Query(default=90, ge=1, le=365, description="Trailing window length in days"),
+    lookback: str = Query(
+        default="last_7_working_days",
+        description="Reporting period: last_working_day | last_7_working_days",
+    ),
+    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: List[str] = Query(default=[], alias="route_codes"),
+    category_codes: List[str] = Query(default=[], alias="category_codes"),
+    item_codes: List[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Aggregated EDA over sales_recent.csv: totals, daily trend, top items, top routes, categories.
 
-    Window is parameterised so the dashboard's time-window selector can drive
-    every chart and table consistently from a single fetch.
+    The `lookback` enum slices the data to the trailing N **working days**
+    (active dates with sales), so weekends / holidays / closures are
+    excluded automatically. FilterBar selections are honoured together
+    against the same windowed slice.
     """
-    return svc.get_sales_overview(days)
+    return svc.get_sales_overview(
+        lookback, warehouse_codes, route_codes, category_codes, item_codes,
+    )
 
 
 @router.get("/eda/items")
@@ -111,9 +122,55 @@ def eda_items(svc: EdaService = Depends(get_eda_service)):
 
 
 @router.get("/eda/business-kpis")
-def eda_business_kpis(svc: EdaService = Depends(get_eda_service)):
-    """Actionable daily-ops KPIs: yesterday revenue, 7d trend, accuracy, today ops."""
-    return svc.get_business_kpis()
+def eda_business_kpis(
+    lookback: str = Query(
+        default="last_7_working_days",
+        description="Reporting period: last_working_day | last_7_working_days",
+    ),
+    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: List[str] = Query(default=[], alias="route_codes"),
+    category_codes: List[str] = Query(default=[], alias="category_codes"),
+    item_codes: List[str] = Query(default=[], alias="item_codes"),
+    svc: EdaService = Depends(get_eda_service),
+):
+    """Four executive-impact KPIs computed from a single (recs ⋈ sales) join:
+
+        1. SKU coverage  -- items predicted ∩ items sold
+        2. Field adoption -- recommended lines that hit invoices
+        3. Revenue running on recommendations
+        4. Peer uplift potential -- AED if every route adopted at the
+           rate of the top quartile
+
+    All four respect the FilterBar + the active reporting period, and are
+    evaluated only over (route, date) cells that actually have rec coverage.
+    """
+    return svc.get_business_kpis(
+        lookback, warehouse_codes, route_codes, category_codes, item_codes,
+    )
+
+
+@router.get("/eda/filter-dimensions")
+def eda_filter_dimensions(
+    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: List[str] = Query(default=[], alias="route_codes"),
+    category_codes: List[str] = Query(default=[], alias="category_codes"),
+    svc: EdaService = Depends(get_eda_service),
+):
+    """Cascading filter options for the dashboard FilterBar.
+
+    Each downstream dimension is the set of unique values present in the
+    sales slice that already matches every upstream selection. Items are
+    filtered by all three upstream levels.
+    """
+    return svc.get_filter_dimensions(warehouse_codes, route_codes, category_codes)
+
+
+# ------------------------------------------------------------------
+# Live YaumiLive cut-throughs. Consumed cross-service by the supervision
+# microservice (LiveActualsClient) so the supervisor's "Mark visited"
+# flow can pull real actuals without a direct DB grant. 60-second cache
+# absorbs rapid-fire visit clicks on the same (route, date) cell.
+# ------------------------------------------------------------------
 
 
 @router.get("/eda/live-route-sales")
@@ -122,7 +179,6 @@ def eda_live_route_sales(
     date: str = Query(..., description="YYYY-MM-DD"),
     svc: EdaService = Depends(get_eda_service),
 ):
-    """All customers who invoiced on a route/date from YaumiLive. 60-s cache."""
     return svc.get_live_route_sales(route_code, date)
 
 
@@ -133,8 +189,6 @@ def eda_live_customer_sales(
     customer_code: str = Query(..., description="Customer code"),
     svc: EdaService = Depends(get_eda_service),
 ):
-    """Live per-item sales for a single (route, date, customer), pulled from
-    YaumiLive on demand. 60-second TTL cache."""
     return svc.get_live_customer_sales(route_code, date, customer_code)
 
 
@@ -148,23 +202,24 @@ def eda_item_stats(
     return svc.get_item_stats(item_code, route_code)
 
 
-@router.get("/eda/customers")
-def eda_customers(
-    lookback_days: int = Query(default=90, ge=7, le=730),
+@router.get("/eda/forecast-rows")
+def eda_forecast_rows(
+    lookback: str = Query(
+        default="last_7_working_days",
+        description="Reporting period: last_working_day | last_7_working_days",
+    ),
+    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: List[str] = Query(default=[], alias="route_codes"),
+    category_codes: List[str] = Query(default=[], alias="category_codes"),
+    item_codes: List[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
-    """Live customer overview from YaumiLive: active customers, top customers, by-route breakdown."""
-    return svc.get_customer_overview(lookback_days)
+    """Per-(date, route, item) forecast vs actual rows for the VanLoad
+    Past-analysis drawer. Same merge as /eda/business-kpis -- one shared
+    compute path so the drawer numbers always reconcile with the dashboard.
+    """
+    return svc.get_forecast_rows(
+        lookback, warehouse_codes, route_codes, category_codes, item_codes,
+    )
 
 
-@router.post("/eda/refresh")
-def eda_refresh(svc: EdaService = Depends(get_eda_service)):
-    """Force-refresh cached EDA aggregates."""
-    svc.invalidate()
-    return {"success": True, "message": "EDA cache cleared"}
-
-
-@router.get("/item-prices")
-def item_prices(svc: EdaService = Depends(get_eda_service)):
-    """Shared price lookup -- {ItemCode: avg unit price} across the app."""
-    return svc.get_item_prices()

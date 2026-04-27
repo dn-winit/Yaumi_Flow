@@ -8,6 +8,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import EmptyState from "@/components/ui/EmptyState";
+import { fmtAxisDate } from "./formatters";
 import {
   AXIS_PROPS,
   CHART_PALETTE,
@@ -65,9 +66,9 @@ export default function BarChart({
             margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
           >
             <CartesianGrid {...GRID_PROPS} />
-            <XAxis dataKey={xKey} {...AXIS_PROPS} />
+            <XAxis dataKey={xKey} tickFormatter={fmtAxisDate} {...AXIS_PROPS} />
             <YAxis {...AXIS_PROPS} />
-            <Tooltip {...TOOLTIP_PROPS} />
+            <Tooltip {...TOOLTIP_PROPS} labelFormatter={fmtAxisDate} />
             <Bar
               dataKey={yKey}
               fill={color}

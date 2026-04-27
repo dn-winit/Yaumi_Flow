@@ -10,24 +10,24 @@ Built for **Yaumi** (Rashed Al Rashed & Sons Group) to optimise route-to-market 
 
 ```
 ┌─────────────┐    ┌──────────────────┐    ┌─────────────────────┐
-│  YaumiLive  │───▶│   Data Import     │───▶│  Demand Forecasting │
-│  (Source DB) │    │   :8005           │    │  :8002              │
+│  YaumiLive  │───▶│   Data Import    │───▶│  Demand Forecasting │
+│  (SQL Server)│    │   :8005          │    │  :8002              │
 └─────────────┘    └────────┬─────────┘    └──────────┬──────────┘
                             │                          │
                             ▼                          ▼
                    ┌──────────────────┐    ┌─────────────────────┐
-                   │ Sales Supervision │    │ Recommended Orders   │
-                   │ :8004             │    │ :8001                │
+                   │ Sales Supervision│    │ Recommended Orders  │
+                   │ :8004            │    │ :8001               │
                    └────────┬─────────┘    └──────────┬──────────┘
                             │                          │
                             ▼                          ▼
                    ┌──────────────────┐    ┌─────────────────────┐
-                   │  LLM Analytics   │    │   React Webapp       │
-                   │  :8003           │    │   :3000               │
+                   │  LLM Analytics   │    │   React Webapp      │
+                   │  :8003           │    │   :3000             │
                    └──────────────────┘    └─────────────────────┘
 ```
 
-**5 FastAPI microservices** + **React / TypeScript / Vite** webapp, connected via REST APIs with a single-DB-reader architecture (only `data_import` touches YaumiLive directly).
+**5 FastAPI microservices** + **React / TypeScript / Vite** webapp, connected via REST APIs with a single-DB-reader architecture (only `data_import` touches YaumiLive directly; `sales_supervision` calls `data_import` over HTTP for live actuals).
 
 ---
 
@@ -35,35 +35,36 @@ Built for **Yaumi** (Rashed Al Rashed & Sons Group) to optimise route-to-market 
 
 ### Data Import `:8005`
 - ETL pipeline from YaumiLive (SQL Server) into shared CSVs
-- EDA aggregation layer (sales overview, customer overview, business KPIs)
-- Live customer/route sales queries with 60-second server cache
+- EDA aggregation layer (sales overview, business KPIs, forecast-vs-actual rows)
+- Live customer/route sales queries with 60-second server cache (consumed cross-service by `sales_supervision`)
 - Scheduled incremental import at 03:00 UAE time
 
 ### Demand Forecasting `:8002`
 - ML ensemble model trained on historical sales patterns
 - Per-item demand prediction with confidence intervals (q10–q90)
 - Demand classification (smooth / erratic / intermittent / lumpy)
-- 30K+ predictions per generation run
+- Auto-retrain config + drift status (predicted vs YaumiLive actuals)
 
 ### Recommended Orders `:8001`
 - 3-generator recommendation engine:
   - **History** — cycle-based analysis of each customer's buying pattern
   - **Peer matching** — lookalike-customer cross-sell via cosine similarity
   - **Basket co-occurrence** — items frequently bought together
-- Per-route calibration (all thresholds derived from data, not hardcoded)
+- Per-route data-driven calibration (no hardcoded business numbers)
 - Adaptive feedback loop learning from supervision outcomes
-- Per-row explainability (Signals, WhyItem, WhyQuantity)
+- Per-row explainability (Signals, WhyItem, WhyQuantity, Confidence)
 
 ### Sales Supervision `:8004`
 - Live session management for route supervisors
-- Real-time visit scoring against YaumiLive actuals
+- Real-time visit scoring against YaumiLive actuals (fetched via `data_import`)
 - Unsold-item redistribution to remaining planned customers
 - Unplanned-visit detection with live polling
 - Session save with file + database persistence
 
-### Analytics `:8003`
-- Customer analysis, route review, and planning insights
-- Structured prompt templates with configurable provider
+### LLM Analytics `:8003`
+- Customer analysis, route review, and pre-visit briefings
+- Provider-agnostic (Groq / OpenAI / Anthropic) via configurable prompts
+- TTL-bounded JSON cache + token-bucket rate limiting
 - On-demand analysis triggered from the supervision UI
 
 ---
@@ -73,20 +74,20 @@ Built for **Yaumi** (Rashed Al Rashed & Sons Group) to optimise route-to-market 
 React 18 + TypeScript + Vite + Tailwind CSS v4
 
 ### Pages
-- **Dashboard** — business KPIs, sales trends, customer overview, service health
-- **Pipeline** — train/inference status, accuracy comparison, model management
-- **Workflow** — three tabs:
-  - **Van Load** — demand forecast with accuracy drawer (WAPE-based, spike-resistant)
-  - **Recommended Orders** — per-customer recommendations with adoption drawer
-  - **Supervision** — live session with planned/unplanned visit tabs
-- **Admin** — data import, cache control
+- **Dashboard** — business KPIs, sales trends, forecast accuracy, lost-opportunity tile
+- **Forecasting** — pipeline status (train / inference / forecast / push), model metrics, auto-retrain config + drift
+- **Workflow** — two-step supervisor flow:
+  - **Plan** — warehouse-grouped route grid → click a route → Van Load detail (top-10 chart, items table, past-analysis + future-forecast drawers)
+  - **Visit** — reachable only from Plan's "Continue to Visit →"; auto-initialises a live supervision session with planned + unplanned customer tiles, per-customer recording, AI route review and pre-visit briefings
+- **Admin** — data import status, LLM cache control
 
 ### Design system
 - Centralised design tokens (`src/theme/tokens.ts`) — Yaumi brand crimson + gold
 - Semantic Tailwind classes generated from tokens via `tailwind.config.ts`
-- Reusable primitives: Card, Badge, Button, Modal, Drawer, Tabs, Table, MetricCard, KpiRow, ContextStrip, HighlightsStrip, Skeleton
-- Unified chart theming across LineChart, BarChart, PieChart
-- Auto-refreshing metrics via tiered React Query polling (live / dashboard / windowed / static)
+- Reusable primitives: Card, Badge, Button, Modal, Drawer, Tabs, Table, MetricCard, KpiRow, ContextStrip, HighlightsStrip, Skeleton, DatePicker, CommandPalette
+- Unified chart theming across LineChart, BarChart, HorizontalBarChart, PieChart with auto dd-mm-yyyy date-axis formatting
+- All dates rendered as `dd-mm-yyyy` via `lib/date.ts#fmtDate`; backend transport stays canonical `yyyy-mm-dd`
+- Tiered React Query polling (`hooks/refresh.ts`): live 45s · pipeline 10s · dashboard 5m · windowed 10m · static 1h
 
 ---
 
@@ -104,9 +105,9 @@ React 18 + TypeScript + Vite + Tailwind CSS v4
 # Clone and enter
 cd forecast_new
 
-# Python environment
+# Python environment (the root requirements.txt aggregates every service)
 python -m venv .venv
-source .venv/bin/activate  # or .venv\Scripts\activate on Windows
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
 pip install -r requirements.txt
 
 # Webapp dependencies
@@ -114,30 +115,43 @@ cd webapp && npm install && cd ..
 
 # Environment
 cp .env.example .env
-# Edit .env with your database credentials
+# Edit .env with your database + LLM credentials
 ```
 
 ### Run all services
 
 ```bash
-bash scripts/start-all.sh
+bash scripts/start-all.sh        # Linux / macOS / Git Bash
+scripts\start-all.bat            # Windows cmd
 ```
 
 Or individually:
 
 ```bash
-python -m data_import              # :8005
+python -m data_import                  # :8005
 python -m demand_forecasting_pipeline  # :8002
-python -m recommended_order        # :8001
-python -m sales_supervision        # :8004
-python -m llm_analytics            # :8003
-cd webapp && npm run dev           # :3000
+python -m recommended_order            # :8001
+python -m sales_supervision            # :8004
+python -m llm_analytics                # :8003
+cd webapp && npm run dev               # :3000
+```
+
+Stop everything:
+
+```bash
+bash scripts/stop-all.sh
 ```
 
 ### Production build
 
 ```bash
-cd webapp && npm run build   # outputs to webapp/dist/
+cd webapp && npm run build       # outputs to webapp/dist/
+```
+
+### Docker
+
+```bash
+docker compose up --build        # all 5 services + nginx-proxied webapp
 ```
 
 ---
@@ -154,74 +168,74 @@ forecast_new/
 │   └── scheduler.py             # Cron jobs
 │
 ├── demand_forecasting_pipeline/ # ML forecasting service
-│   ├── api/                     # FastAPI routes
+│   ├── api/                     # FastAPI routes (pipeline / retrain / metrics)
 │   ├── artifacts/               # Trained models + predictions
 │   ├── config/                  # Pipeline config (YAML)
+│   ├── services/                # Pipeline + accuracy + artifact + retrain
 │   └── src/                     # Training + inference
 │
 ├── recommended_order/           # Recommendation engine
 │   ├── api/                     # FastAPI routes + schemas
 │   ├── config/                  # Safety clamps + settings
-│   ├── core/                    # Engine + generators + calibration
-│   │   ├── engine.py            # Orchestrator
-│   │   ├── generators.py        # History / peer / basket / seed
-│   │   ├── calibration.py       # Per-route data-driven thresholds
-│   │   ├── explain.py           # Signal + Explanation builder
-│   │   ├── feedback.py          # Adaptive feedback loop
-│   │   ├── priority.py          # Adaptive priority scoring
-│   │   ├── quantity.py          # Recency-weighted qty sizing
-│   │   ├── cycle.py             # Purchase cycle detection
-│   │   └── trend.py             # Trend analysis
+│   ├── core/                    # Engine + generators + calibration + explain
 │   ├── data/                    # Data manager
 │   ├── models/                  # Domain models
-│   ├── services/                # Storage + DB push
+│   ├── services/                # Storage + DB push + adoption + planning
 │   └── scheduler/               # Cron jobs + calibration
 │
 ├── sales_supervision/           # Live supervision service
-│   ├── api/                     # FastAPI routes
+│   ├── api/                     # FastAPI routes (health + session lifecycle)
 │   ├── config/                  # Scoring constants
 │   ├── core/                    # Session + scoring + redistribution
 │   ├── models/                  # Session schemas
-│   └── services/                # Storage + live actuals client
+│   └── services/                # Storage + DB save + live actuals client
 │
 ├── llm_analytics/               # AI analytics service
 │   ├── api/                     # FastAPI routes
-│   ├── cache/                   # Response caching
-│   ├── config/                  # Settings + provider config
-│   ├── core/                    # Analysis client + prompt loader
-│   ├── models/                  # Schemas
-│   └── services/                # Analysis orchestration
+│   ├── cache/                   # Response caching (gitignored)
+│   ├── config/                  # Settings + prompt YAMLs
+│   ├── core/                    # Analyzer + client + formatter + prompt loader
+│   ├── models/                  # Pydantic schemas
+│   └── services/                # Cache + rate limiter
 │
 ├── webapp/                      # React frontend
 │   ├── public/                  # Static assets (Yaumi logo)
 │   ├── src/
-│   │   ├── api/                 # API client modules
-│   │   ├── components/          # UI primitives + charts
+│   │   ├── api/                 # Axios clients per service + shared TIMEOUTS
+│   │   ├── components/          # UI primitives + charts + layout
+│   │   ├── config/              # Routes, API endpoints, query client, module info
 │   │   ├── hooks/               # React Query hooks + refresh tiers
-│   │   ├── lib/                 # Format + colorize + date helpers
-│   │   ├── pages/               # Dashboard / Workflow / Admin
+│   │   ├── lib/                 # date / format / colorize helpers
+│   │   ├── pages/               # Dashboard / Workflow / Pipeline / Admin / Supervision
 │   │   ├── theme/               # Design tokens
 │   │   └── types/               # TypeScript interfaces
 │   ├── tailwind.config.ts
 │   └── vite.config.ts
 │
-├── scripts/                     # Start/stop helpers
-├── data/                        # Shared CSV directory
+├── scripts/                     # start-all / stop-all + create_tables.sql
+├── data/                        # Shared CSV directory (gitignored content)
 ├── docker-compose.yml           # Container orchestration
-├── Dockerfile.backend
-├── Dockerfile.frontend
-└── requirements.txt
+├── Dockerfile.backend           # Shared Python image (5 services)
+├── Dockerfile.frontend          # nginx-served webapp build
+├── nginx.conf                   # Reverse proxy for the docker-compose web service
+├── render.yaml                  # Render Blueprint (one-click multi-service deploy)
+├── railway.json                 # Railway deployment hint
+├── Procfile                     # Single-process Heroku-style fallback
+└── requirements.txt             # Aggregator of per-service requirements
 ```
 
 ---
 
 ## Key design decisions
 
-- **Single DB reader**: only `data_import` queries YaumiLive; other services consume shared CSVs or call `data_import` via HTTP. Eliminates connection pool contention.
-- **File-based recommendation store**: one CSV per route-date. `DbPusher` replicates to YaumiAIML as a one-way sync. No dual-write race conditions.
-- **Data-driven calibration**: all recommendation thresholds (frequency floor, dormancy window, tier cuts, priority weights) are computed per-route from observed data. Zero hardcoded business numbers in the engine.
-- **WAPE over MAPE**: forecast accuracy uses weighted absolute percentage error, which is robust to demand spikes and low-volume days.
-- **Tiered polling**: React Query hooks use a shared refresh module (`hooks/refresh.ts`) with 5 cadence tiers (live 45s, dashboard 5m, windowed 10m, static 1h, pipeline 10s) so every metric across every tab stays current.
+- **Single DB reader** — only `data_import` queries YaumiLive; other services consume shared CSVs or call `data_import` via HTTP. Eliminates connection pool contention.
+- **File-based recommendation store** — one CSV per route-date. `DbPusher` replicates to YaumiAIML as a one-way sync. No dual-write race conditions.
+- **Data-driven calibration** — all recommendation thresholds (frequency floor, dormancy window, tier cuts, priority weights) are computed per-route from observed data. Zero hardcoded business numbers in the engine.
+- **WAPE over MAPE** — forecast accuracy uses weighted absolute percentage error, robust to demand spikes and low-volume days.
+- **Linear Plan → Visit flow** — Visit is reachable only after a route is picked in Plan (URL guard + disabled stepper step + gated keyboard shortcut). No accidental jumps into a stale-context session.
+- **One canonical date format** — every backend payload speaks `yyyy-mm-dd`; the UI funnels every rendered date through `lib/date.ts#fmtDate` so the user always sees `dd-mm-yyyy`. Charts auto-detect ISO ticks via `components/charts/formatters.ts`.
+- **Centralised request budgets** — `webapp/src/api/client.ts#TIMEOUTS` exposes `default` (30 s) and `heavy` (3 min) so every long-running mutation reads from the same constant.
+- **Tiered polling** — React Query hooks share a refresh module with 5 cadence tiers so every metric across every tab stays current without re-fetch storms.
 
 ---
 

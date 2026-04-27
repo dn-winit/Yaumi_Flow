@@ -1,9 +1,9 @@
 from .schemas import (
     SessionItem, SessionCustomer, Session,
-    VisitResult, ScoreResult, RouteScoreResult, RedistributionEntry,
+    VisitResult, ScoreResult, RedistributionEntry,
 )
 
 __all__ = [
     "SessionItem", "SessionCustomer", "Session",
-    "VisitResult", "ScoreResult", "RouteScoreResult", "RedistributionEntry",
+    "VisitResult", "ScoreResult", "RedistributionEntry",
 ]

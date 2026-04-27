@@ -16,8 +16,7 @@ Sprint-3 robustness:
       are expensive; repeated generations for the same route reuse them.
       Previously unbounded.
     * **Per-generator metrics** emitted per-route: single-line key=value log
-      + CSV sink + in-memory snapshot for the ``/metrics/last-generation``
-      endpoint.
+      + CSV sink + in-memory snapshot read by ``/health``.
     * **Thread-safe cache mutations** via a dedicated lock.
     * **Peer degeneracy guard** -- micro-routes (< ``peer_min_active_customers``
       customers) skip peer generator with a route-level log line.

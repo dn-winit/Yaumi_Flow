@@ -1,16 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { forecastApi, type AccuracyParams } from "@/api/forecast";
+import { forecastApi } from "@/api/forecast";
 import { tier } from "./refresh";
-
-export function useAccuracyComparison(params: AccuracyParams, enabled = true) {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["accuracy-comparison", params],
-    queryFn: () => forecastApi.getAccuracyComparison(params),
-    enabled,
-    ...tier("windowed"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
 
 export function useForecastSummary() {
   const { data, isLoading, error, refetch } = useQuery({

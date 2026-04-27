@@ -64,33 +64,53 @@ class AdoptionService:
         start_date: str,
         end_date: str,
         route_code: Optional[str] = None,
+        category_codes: Optional[List[str]] = None,
+        item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        key = (start_date, end_date, route_code or "")
+        # Sorted-tuple cache key so different orderings of the same filter
+        # selection share a slot.
+        cats = tuple(sorted(set(map(str, category_codes or []))))
+        items = tuple(sorted(set(map(str, item_codes or []))))
+        key = (start_date, end_date, route_code or "", cats, items)
         now = time.time()
         with self._lock:
             cached = self._cache.get(key)
             if cached and (now - cached[0]) < self._ttl:
                 return cached[1]
 
-        result = self._compute(start_date, end_date, route_code)
+        result = self._compute(start_date, end_date, route_code, cats, items)
         with self._lock:
             self._cache[key] = (now, result)
         return result
-
-    def invalidate(self) -> None:
-        with self._lock:
-            self._cache.clear()
 
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
-    def _compute(self, start_date: str, end_date: str, route_code: Optional[str]) -> Dict[str, Any]:
-        recs = self._load_recs(start_date, end_date, route_code)
+    def _compute(
+        self,
+        start_date: str,
+        end_date: str,
+        route_code: Optional[str],
+        category_codes: tuple = (),
+        item_codes: tuple = (),
+    ) -> Dict[str, Any]:
+        # Translate (category_codes ∪ item_codes) into a flat set of items
+        # that recs and sales should be filtered to. Both empty -> None
+        # (no filter). Done once per request -- the result is reused by
+        # both loaders so they always see the same scope.
+        item_filter = self._resolve_item_set(category_codes, item_codes)
+        if item_filter is not None and not item_filter:
+            return self._empty_response(
+                start_date, end_date,
+                reason="No items match the current category / item filter",
+            )
+
+        recs = self._load_recs(start_date, end_date, route_code, item_filter)
         if recs.empty:
             return self._empty_response(start_date, end_date, reason="No recommendations stored for this window")
 
-        sales = self._load_sales(start_date, end_date, route_code, recs)
+        sales = self._load_sales(start_date, end_date, route_code, recs, item_filter)
         merged = self._merge(recs, sales)
 
         # Attach avg unit price per SKU so revenue metrics can be computed
@@ -115,7 +135,47 @@ class AdoptionService:
             "by_tier": self._by_tier(merged),
         }
 
-    def _load_recs(self, start_date: str, end_date: str, route_code: Optional[str]) -> pd.DataFrame:
+    def _resolve_item_set(
+        self,
+        category_codes: tuple,
+        item_codes: tuple,
+    ) -> Optional[set]:
+        """Translate (categories, items) filter into a flat ItemCode set.
+
+        Returns None when there is no filter (caller should not narrow the
+        recs / sales frames). Returns an empty set when the filter is
+        non-empty but resolves to zero items (caller should short-circuit
+        and return an empty response). Otherwise returns the explicit set.
+        """
+        if not category_codes and not item_codes:
+            return None
+
+        explicit_items: Optional[set] = set(map(str, item_codes)) if item_codes else None
+
+        if category_codes:
+            cats = set(map(str, category_codes))
+            sales_all = self._dm.get_customer_data(None)
+            if sales_all.empty or "CategoryName" not in sales_all.columns:
+                # No way to expand category -> item; if explicit items also
+                # absent, treat as "no match" rather than "no filter".
+                return explicit_items if explicit_items is not None else set()
+            cat_items = set(
+                sales_all.loc[
+                    sales_all["CategoryName"].astype(str).isin(cats),
+                    "ItemCode",
+                ].astype(str).str.strip().unique()
+            )
+            return cat_items if explicit_items is None else (cat_items & explicit_items)
+
+        return explicit_items
+
+    def _load_recs(
+        self,
+        start_date: str,
+        end_date: str,
+        route_code: Optional[str],
+        item_filter: Optional[set] = None,
+    ) -> pd.DataFrame:
         """Read per-day recommendations from the store and concat."""
         days = _daterange(start_date, end_date)
         frames: List[pd.DataFrame] = []
@@ -148,6 +208,8 @@ class AdoptionService:
         }, inplace=True)
         for col in ("route_code", "customer_code", "item_code"):
             out[col] = out[col].astype(str).str.strip()
+        if item_filter is not None:
+            out = out[out["item_code"].isin(item_filter)]
         return out
 
     def _load_sales(
@@ -156,6 +218,7 @@ class AdoptionService:
         end_date: str,
         route_code: Optional[str],
         recs: pd.DataFrame,
+        item_filter: Optional[set] = None,
     ) -> pd.DataFrame:
         """Customer-level sales from ``data/customer_data.csv`` via DataManager."""
         df = self._dm.get_customer_data(route_code)
@@ -176,6 +239,8 @@ class AdoptionService:
         }, inplace=True)
         for col in ("route_code", "customer_code", "item_code"):
             sub[col] = sub[col].astype(str).str.strip()
+        if item_filter is not None:
+            sub = sub[sub["item_code"].isin(item_filter)]
         # Scope sales further to the (customer, date) pairs that were actually visited
         # -- keeps "missed SKUs" focused on the same trip rather than the whole route-day.
         visit_keys = recs[["trx_date", "route_code", "customer_code"]].drop_duplicates()

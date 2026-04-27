@@ -1,17 +1,9 @@
-"""
-API request/response schemas.
-"""
-
 from __future__ import annotations
 
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
-
-# ------------------------------------------------------------------
-# Requests
-# ------------------------------------------------------------------
 
 class CustomerAnalysisRequest(BaseModel):
     customer_code: str
@@ -43,21 +35,6 @@ class PreVisitRequest(BaseModel):
     items: List[Dict[str, Any]] = Field(description="Recommendation items with qty, tier, source, whyItem")
 
 
-class PlanningAnalysisRequest(BaseModel):
-    route_code: str
-    date: str
-    van_load_items: List[Dict[str, Any]] = Field(description="Van items with vanQty/recQty")
-    customer_recommendations: List[Dict[str, Any]] = Field(description="Per-customer item recommendations")
-    van_load_skus: int = 0
-    van_load_qty: int = 0
-    total_customers: int = 0
-    total_rec_qty: int = 0
-
-
-# ------------------------------------------------------------------
-# Responses
-# ------------------------------------------------------------------
-
 class AnalysisResponse(BaseModel):
     success: bool
     analysis_type: str
@@ -78,13 +55,3 @@ class CacheStatsResponse(BaseModel):
     misses: int
     hit_rate: float
     cached_entries: int
-
-
-class LlmSummaryResponse(BaseModel):
-    provider: str
-    model: str
-    available: bool
-    cache_hits: int
-    cache_misses: int
-    cache_hit_rate: float
-    prompts_loaded: List[str]

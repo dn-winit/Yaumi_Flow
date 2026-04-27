@@ -11,11 +11,3 @@ export interface CacheStatsResponse {
   hit_rate: number;
   cached_entries: number;
 }
-
-export interface AnalyticsHealthResponse {
-  available: boolean;
-  provider: string;
-  model: string;
-  cache: CacheStatsResponse;
-  prompts: string[];
-}

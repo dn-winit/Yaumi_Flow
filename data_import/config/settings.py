@@ -58,7 +58,6 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8005, ge=1024, le=65535)
     workers: int = Field(default=1, ge=1)
-    debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
     api_prefix: str = Field(default="/api/v1")
 

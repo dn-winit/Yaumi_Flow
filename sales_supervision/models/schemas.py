@@ -180,11 +180,3 @@ class VisitResult:
             ],
             "adjustments": self.adjustments,
         }
-
-
-@dataclass
-class RouteScoreResult:
-    route_score: float = 0.0
-    customer_coverage: float = 0.0
-    qty_fulfillment: float = 0.0
-    customer_scores: Dict[str, float] = field(default_factory=dict)

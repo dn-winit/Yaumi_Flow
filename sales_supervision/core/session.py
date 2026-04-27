@@ -10,10 +10,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 
 from sales_supervision.config.constants import SupervisionConstants
-from sales_supervision.core.scoring import ScoringEngine
 from sales_supervision.core.visit_processor import VisitProcessor
 from sales_supervision.models.schemas import (
-    RouteScoreResult,
     ScoreResult,
     Session,
     SessionCustomer,
@@ -30,7 +28,6 @@ class SessionManager:
     def __init__(self, constants: Optional[SupervisionConstants] = None) -> None:
         self._c = constants or SupervisionConstants()
         self._processor = VisitProcessor(self._c)
-        self._scorer = ScoringEngine(self._c)
 
     # ------------------------------------------------------------------
     # Create session from recommendations
@@ -103,38 +100,6 @@ class SessionManager:
         actual_sales: Dict[str, int],
     ) -> VisitResult:
         return self._processor.process(session, customer_code, actual_sales)
-
-    # ------------------------------------------------------------------
-    # Update actual quantities (manual edit)
-    # ------------------------------------------------------------------
-
-    def update_actuals(
-        self,
-        session: Session,
-        customer_code: str,
-        actuals: Dict[str, int],
-    ) -> ScoreResult:
-        """Update actual quantities for a visited customer and re-score."""
-        customer = session.customers.get(customer_code)
-        if customer is None:
-            raise ValueError(f"Customer {customer_code} not in session")
-
-        for item in customer.items:
-            if item.item_code in actuals:
-                item.actual_qty = actuals[item.item_code]
-                item.was_sold = actuals[item.item_code] > 0
-                item.was_edited = True
-
-        score = self._scorer.customer_score(customer)
-        customer.score = score
-        return score
-
-    # ------------------------------------------------------------------
-    # Route score
-    # ------------------------------------------------------------------
-
-    def route_score(self, session: Session) -> RouteScoreResult:
-        return self._scorer.route_score(list(session.customers.values()))
 
     # ------------------------------------------------------------------
     # Close session

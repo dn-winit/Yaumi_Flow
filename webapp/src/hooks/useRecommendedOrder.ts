@@ -32,7 +32,13 @@ export function useRecommendations(params: RetrieveRequest) {
 }
 
 export function useAdoption(
-  params: { start_date: string; end_date: string; route_code?: string },
+  params: {
+    start_date: string;
+    end_date: string;
+    route_code?: string;
+    category_codes?: string[];
+    item_codes?: string[];
+  },
   enabled = true,
 ) {
   const { data, isLoading, error } = useQuery({

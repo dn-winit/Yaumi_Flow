@@ -1,42 +1,27 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useMemo, useState } from "react";
 import { todayIso } from "@/lib/date";
 
 /**
- * Cross-tab workflow state. ``routeCode`` is deliberately NOT here -- each tab
- * (Van Load, Orders) owns its own route selection so switching tabs doesn't
- * carry a route over and skip the route-picker grid.
+ * Cross-step workflow scope. The supervisor picks a (route, date) once
+ * and that scope follows them through every step (Plan → Visit). When
+ * either is empty, each step falls back to its picker.
  */
 interface WorkflowState {
   date: string;
-  selectedItems: string[];
+  routeCode: string;
 }
 
 interface WorkflowContextValue extends WorkflowState {
   setDate: (v: string) => void;
-  setSelectedItems: (v: string[]) => void;
-  reset: () => void;
+  setRouteCode: (v: string) => void;
+  resetRoute: () => void;
 }
 
-const STORAGE_KEY = "yaumi.workflow.state";
-
 function loadInitial(): WorkflowState {
-  // Date always resets to "today" on page load so a fresh visit never shows
-  // yesterday's stale date from a previous session. Only non-date state is
-  // restored from localStorage.
-  const today = todayIso();
-  try {
-    const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) {
-      const parsed = JSON.parse(raw);
-      return {
-        date: today,
-        selectedItems: Array.isArray(parsed.selectedItems) ? parsed.selectedItems : [],
-      };
-    }
-  } catch {
-    // ignore
-  }
-  return { date: today, selectedItems: [] };
+  // Date resets to today on every page load -- a fresh visit should never
+  // inherit yesterday's stale date. Route resets too: each session starts
+  // at the picker, no surprise pre-fills from a previous browser tab.
+  return { date: todayIso(), routeCode: "" };
 }
 
 const WorkflowContext = createContext<WorkflowContextValue | null>(null);
@@ -44,27 +29,16 @@ const WorkflowContext = createContext<WorkflowContextValue | null>(null);
 export function WorkflowProvider({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<WorkflowState>(loadInitial);
 
-  useEffect(() => {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(state));
-    } catch {
-      // ignore quota
-    }
-  }, [state]);
-
   const setDate = useCallback((date: string) => setState((s) => ({ ...s, date })), []);
-  const setSelectedItems = useCallback(
-    (selectedItems: string[]) => setState((s) => ({ ...s, selectedItems })),
+  const setRouteCode = useCallback(
+    (routeCode: string) => setState((s) => ({ ...s, routeCode })),
     []
   );
-  const reset = useCallback(
-    () => setState({ date: todayIso(), selectedItems: [] }),
-    []
-  );
+  const resetRoute = useCallback(() => setState((s) => ({ ...s, routeCode: "" })), []);
 
   const value = useMemo(
-    () => ({ ...state, setDate, setSelectedItems, reset }),
-    [state, setDate, setSelectedItems, reset]
+    () => ({ ...state, setDate, setRouteCode, resetRoute }),
+    [state, setDate, setRouteCode, resetRoute]
   );
 
   return <WorkflowContext.Provider value={value}>{children}</WorkflowContext.Provider>;

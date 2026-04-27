@@ -1,11 +1,12 @@
 """
-Per-generator observability (Sprint-3, Theme D).
+Per-generator observability.
 
 Two sinks:
 
 * ``LastGenerationTracker`` -- in-memory store of the most recent generation
   run's per-route, per-generator counts + source mix + calibration snapshot.
-  Exposed via the ``/metrics/last-generation`` API.
+  Read by the service ``/health`` endpoint (per-route last-generation
+  timestamps + rolling average duration).
 * ``MetricsCsvSink`` -- append-only single-line summary CSV under
   ``data/generation_metrics.csv`` for trend analysis. Rotates at
   ``SafetyClamps.generation_metrics_max_bytes`` by renaming the current file
@@ -92,7 +93,7 @@ class MetricsCsvSink:
 
 
 # ---------------------------------------------------------------------------
-# Last-generation tracker (for /metrics/last-generation endpoint)
+# Last-generation tracker (read by /health for per-route freshness signals)
 # ---------------------------------------------------------------------------
 
 @dataclass

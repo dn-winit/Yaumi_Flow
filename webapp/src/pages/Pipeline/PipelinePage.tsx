@@ -15,6 +15,7 @@ import {
 import { useToast } from "@/hooks/useToast";
 import AutoRetrainSection from "./AutoRetrainSection";
 import { fmtNum, GOOD_SCORE_THRESHOLD } from "@/lib/format";
+import { fmtDateTime } from "@/lib/date";
 import type { Tone } from "@/lib/colorize";
 import type { PipelineStatusResponse } from "@/types/forecast";
 
@@ -99,19 +100,9 @@ function statusLabel(s: StepStatus): string {
   return "Idle";
 }
 
-function fmtTimestamp(ts: string | null): string {
-  if (!ts) return "";
-  try {
-    return new Date(ts).toLocaleString(undefined, {
-      month: "short",
-      day: "numeric",
-      hour: "2-digit",
-      minute: "2-digit",
-    });
-  } catch {
-    return ts;
-  }
-}
+// Timestamp formatter delegates to the shared fmtDateTime so every
+// "last finished/started at" label across the app reads the same way.
+const fmtTimestamp = (ts: string | null): string => (ts ? fmtDateTime(ts) : "");
 
 function daysSince(ts: string | null): number | null {
   if (!ts) return null;

@@ -28,12 +28,9 @@ from recommended_order.services.db_pusher import DbPusher
 from recommended_order.api.schemas import (
     EmptyRouteCustomer,
     EmptyRouteDiagnosis,
-    ExistsRequest,
-    ExistsResponse,
     FilterOptionsResponse,
     GenerateRequest,
     GenerateResponse,
-    GenerationInfoResponse,
     HealthResponse,
     RecommendationSummaryResponse,
     RetrieveRequest,
@@ -125,13 +122,6 @@ def health(
         feedback_routes_active=engine.feedback_routes_active(),
         **fresh,
     )
-
-
-@router.get("/metrics/last-generation")
-def metrics_last_generation():
-    """Per-generator counts, source mix, and calibration snapshot for the
-    most recent generation run. Useful for dashboarding; not paginated."""
-    return get_last_generation_tracker().snapshot()
 
 
 # ------------------------------------------------------------------
@@ -653,31 +643,6 @@ def get_recommendations(
 # ------------------------------------------------------------------
 
 
-@router.post("/exists", response_model=ExistsResponse)
-def check_exists(
-    req: ExistsRequest,
-    store: RecommendationStore = Depends(get_store),
-    dm: DataManager = Depends(get_fresh_data_manager),
-):
-    routes = req.route_codes or dm.get_route_codes()
-    exists_map = store.exists_batch(req.date, routes)
-    return ExistsResponse(date=req.date, exists=exists_map)
-
-
-# ------------------------------------------------------------------
-# Generation info
-# ------------------------------------------------------------------
-
-
-@router.get("/info/{date}", response_model=GenerationInfoResponse)
-def generation_info(
-    date: str,
-    store: RecommendationStore = Depends(get_store),
-):
-    info = store.generation_info(date)
-    return GenerationInfoResponse(**info)
-
-
 # ------------------------------------------------------------------
 # Analytics: adoption (historical) + upcoming plan (forward)
 # ------------------------------------------------------------------
@@ -688,10 +653,15 @@ def adoption(
     start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     route_code: Optional[str] = Query(default=None),
+    category_codes: List[str] = Query(default=[], alias="category_codes"),
+    item_codes: List[str] = Query(default=[], alias="item_codes"),
     svc: AdoptionService = Depends(get_adoption_service),
 ):
-    """Did recommendations convert? Read-only join of stored recs and sales."""
-    return svc.get_adoption(start_date, end_date, route_code)
+    """Did recommendations convert? Read-only join of stored recs and sales,
+    optionally narrowed to specific categories and/or items so the drawer's
+    filters can scope adoption metrics in the same shape as the dashboard.
+    """
+    return svc.get_adoption(start_date, end_date, route_code, category_codes, item_codes)
 
 
 @router.get("/analytics/upcoming")
@@ -704,30 +674,3 @@ def upcoming_plan(
     return svc.get_upcoming(days, route_code)
 
 
-# ------------------------------------------------------------------
-# Refresh cached data
-# ------------------------------------------------------------------
-
-
-@router.post("/refresh-data")
-def refresh_data(dm: DataManager = Depends(get_data_manager)):
-    result = dm.refresh()
-    # Sprint-1: drop per-route calibration cache so next generate recomputes.
-    from recommended_order.core.calibration import invalidate_cache
-    invalidate_cache()
-    return {"success": result["success"], "data": result["data"], "errors": result["errors"]}
-
-
-# ------------------------------------------------------------------
-# Push to DB
-# ------------------------------------------------------------------
-
-
-@router.post("/push-to-db")
-def push_to_db(
-    date: str = Query(..., description="Date YYYY-MM-DD"),
-    route_code: str = Query(default=None),
-    pusher: DbPusher = Depends(get_db_pusher),
-):
-    """Push local recommendation files to YaumiAIML database."""
-    return pusher.push_recommendations(date, route_code)

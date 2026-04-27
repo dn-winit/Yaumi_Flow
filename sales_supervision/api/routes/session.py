@@ -1,29 +1,36 @@
 """
-Session endpoints -- create, process visit, update, save, get summary.
+Session lifecycle: initialize -> visit -> save-active. Plus the live
+unplanned-visits poll the live UI uses to flag drop-ins. Everything else
+(update-actuals, get-summary, full-session, route-score) had no UI
+consumer and was dropped to keep the surface minimal.
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from sales_supervision.api.dependencies import get_db_saver, get_live_actuals, get_session_manager, get_store
-from sales_supervision.services.db_saver import DbSaver
-from sales_supervision.services.live_actuals import LiveActualsClient
+from sales_supervision.api.dependencies import (
+    get_db_saver,
+    get_live_actuals,
+    get_session_manager,
+    get_store,
+)
 from sales_supervision.api.schemas import (
     InitSessionRequest,
     ProcessVisitRequest,
-    SaveSessionRequest,
     SessionResponse,
-    UpdateActualsRequest,
     VisitResponse,
-    ScoreResponse,
 )
 from sales_supervision.core.session import SessionManager
+from sales_supervision.services.db_saver import DbSaver
+from sales_supervision.services.live_actuals import LiveActualsClient
 from sales_supervision.services.storage.store import SessionStore
 
 router = APIRouter(prefix="/session", tags=["session"])
 
-# In-memory session registry (keyed by session_id)
+# In-memory active sessions, keyed by session_id. Entries are dropped
+# when /save-active completes so a long-lived process won't accumulate
+# completed sessions.
 _sessions: dict = {}
 
 
@@ -43,8 +50,8 @@ def process_visit(
     mgr: SessionManager = Depends(get_session_manager),
     live: LiveActualsClient = Depends(get_live_actuals),
 ):
-    """Mark a customer as visited. Actual per-item quantities are fetched LIVE
-    from YaumiLive via data_import -- the client does not supply them."""
+    """Mark a customer visited. Per-item actuals are pulled live from
+    YaumiLive via data_import -- the client never supplies them."""
     session = _sessions.get(req.session_id)
     if session is None:
         return VisitResponse(success=False, visit={"error": f"Session {req.session_id} not found"})
@@ -53,13 +60,11 @@ def process_visit(
     if customer is None:
         return VisitResponse(success=False, visit={"error": f"Customer {req.customer_code} not in session"})
 
-    # Live fetch: exact (route, date, customer) match on YaumiLive.
     actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
 
-    # Scoring is evaluated per-planned-item (session.customer.items loop in the
-    # processor), so passing the full actuals dict is safe: only planned items
-    # can contribute to the score. Stray items are surfaced in ``alsoBought``
-    # for operator awareness -- "customer bought stuff we didn't plan for".
+    # Scoring evaluates planned items only; surface any extras the
+    # customer bought as ``alsoBought`` so the UI can show them as
+    # awareness-only context (no score impact).
     planned_item_codes = {it.item_code for it in customer.items}
     also_bought = [
         {"item_code": code, "qty": qty}
@@ -70,32 +75,10 @@ def process_visit(
 
     result = mgr.process_visit(session, req.customer_code, actual_sales)
     payload = result.to_dict()
-    payload["actualSales"] = actual_sales          # full dict, incl. unplanned
-    payload["alsoBought"] = also_bought            # unplanned only, sorted
+    payload["actualSales"] = actual_sales
+    payload["alsoBought"] = also_bought
     payload["actualFetchedFromLive"] = True
     return VisitResponse(success=True, visit=payload)
-
-
-@router.post("/update-actuals", response_model=ScoreResponse)
-def update_actuals(
-    req: UpdateActualsRequest,
-    mgr: SessionManager = Depends(get_session_manager),
-):
-    session = _sessions.get(req.session_id)
-    if session is None:
-        return ScoreResponse(success=False, score=0, coverage=0, accuracy=0)
-
-    score = mgr.update_actuals(session, req.customer_code, req.actuals)
-    return ScoreResponse(success=True, score=score.score, coverage=score.coverage, accuracy=score.accuracy)
-
-
-@router.post("/save")
-def save_session(
-    req: SaveSessionRequest,
-    store: SessionStore = Depends(get_store),
-):
-    result = store.save(req.session_data)
-    return {"success": True, **result}
 
 
 @router.post("/save-active")
@@ -105,7 +88,8 @@ def save_active_session(
     store: SessionStore = Depends(get_store),
     db_saver: DbSaver = Depends(get_db_saver),
 ):
-    """Save the active in-memory session to file + DB (if configured)."""
+    """Persist the active in-memory session to disk + DB (when configured)
+    and free its slot in the in-memory registry."""
     session = _sessions.get(session_id)
     if session is None:
         return {"success": False, "error": f"Session {session_id} not found"}
@@ -113,33 +97,11 @@ def save_active_session(
     mgr.close_session(session)
     data = session.to_dict()
 
-    # Save to local file
     file_result = store.save(data)
+    db_result = db_saver.save_session(data) if db_saver.available else None
 
-    # Save to DB if configured
-    db_result = None
-    if db_saver.available:
-        db_result = db_saver.save_session(data)
-
-    # Clean up memory
     _sessions.pop(session_id, None)
     return {"success": True, "file": file_result, "db": db_result}
-
-
-@router.get("/summary/{session_id}")
-def get_session_summary(session_id: str):
-    session = _sessions.get(session_id)
-    if session is None:
-        return {"success": False, "error": f"Session {session_id} not found"}
-    return {"success": True, "session": session.summary()}
-
-
-@router.get("/full/{session_id}")
-def get_full_session(session_id: str):
-    session = _sessions.get(session_id)
-    if session is None:
-        return {"success": False, "error": f"Session {session_id} not found"}
-    return {"success": True, "session": session.to_dict()}
 
 
 @router.get("/unplanned/{session_id}")
@@ -147,22 +109,18 @@ def get_unplanned_visits(
     session_id: str,
     live: LiveActualsClient = Depends(get_live_actuals),
 ):
-    """Customers who had live invoices on this session's (route, date) but were
-    NOT in the journey plan. Items are shown read-only -- no recommendation to
-    score against."""
+    """Customers who invoiced live on this session's (route, date) but
+    weren't on the journey plan. Splits the live visitor set into
+    ``planned_visited_codes`` (so planned tiles can show a live dot
+    without a second round-trip) and ``customers`` (the unplanned list).
+    """
     session = _sessions.get(session_id)
     if session is None:
         return {"success": False, "error": f"Session {session_id} not found", "customers": []}
 
-    route_code = session.route_code
-    date = session.date
     planned = {str(c).strip() for c in session.customers.keys()}
+    visitors = live.get_route_sales(session.route_code, session.date)
 
-    visitors = live.get_route_sales(route_code, date)
-
-    # Single pass: split the live visitor set into planned-visited vs unplanned
-    # so the UI can show a "visited live" indicator on planned customers without
-    # a second backend round-trip.
     planned_visited: list[str] = []
     unplanned: list[dict] = []
     for v in visitors:
@@ -178,30 +136,11 @@ def get_unplanned_visits(
 
     return {
         "success": True,
-        "route_code": route_code,
-        "date": date,
+        "route_code": session.route_code,
+        "date": session.date,
         "planned_count": len(planned),
         "live_count": len(visitors),
         "unplanned_count": len(unplanned),
         "planned_visited_codes": planned_visited,
         "customers": unplanned,
-    }
-
-
-@router.get("/route-score/{session_id}")
-def get_route_score(
-    session_id: str,
-    mgr: SessionManager = Depends(get_session_manager),
-):
-    session = _sessions.get(session_id)
-    if session is None:
-        return {"success": False, "error": f"Session {session_id} not found"}
-
-    rs = mgr.route_score(session)
-    return {
-        "success": True,
-        "routeScore": rs.route_score,
-        "customerCoverage": rs.customer_coverage,
-        "qtyFulfillment": rs.qty_fulfillment,
-        "customerScores": rs.customer_scores,
     }

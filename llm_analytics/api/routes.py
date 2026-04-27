@@ -13,8 +13,6 @@ from llm_analytics.api.schemas import (
     CacheStatsResponse,
     CustomerAnalysisRequest,
     HealthResponse,
-    LlmSummaryResponse,
-    PlanningAnalysisRequest,
     PreVisitRequest,
     RouteAnalysisRequest,
 )
@@ -93,51 +91,13 @@ def pre_visit_briefing(
 
 
 # ------------------------------------------------------------------
-# Planning insights
-# ------------------------------------------------------------------
-
-@router.post("/analyze/planning", response_model=AnalysisResponse)
-def analyze_planning(
-    req: PlanningAnalysisRequest,
-    analyzer: Analyzer = Depends(get_analyzer),
-):
-    result = analyzer.analyze_planning(
-        route_code=req.route_code,
-        date=req.date,
-        van_load_items=req.van_load_items,
-        customer_recommendations=req.customer_recommendations,
-        van_load_skus=req.van_load_skus,
-        van_load_qty=req.van_load_qty,
-        total_customers=req.total_customers,
-        total_rec_qty=req.total_rec_qty,
-    )
-
-    return AnalysisResponse(success=True, analysis_type="planning", data=result)
-
-
-# ------------------------------------------------------------------
 # Health + cache
 # ------------------------------------------------------------------
 
 @router.get("/health", response_model=HealthResponse)
 def health_check(analyzer: Analyzer = Depends(get_analyzer)):
+    """Liveness probe -- mirrors the analyzer's provider / model / cache state."""
     return HealthResponse(**analyzer.health())
-
-
-@router.get("/summary", response_model=LlmSummaryResponse)
-def summary(analyzer: Analyzer = Depends(get_analyzer)):
-    """Aggregated KPI summary reshaped from analyzer.health()."""
-    h = analyzer.health()
-    cache = h.get("cache", {}) or {}
-    return LlmSummaryResponse(
-        provider=h.get("provider", ""),
-        model=h.get("model", ""),
-        available=bool(h.get("available", False)),
-        cache_hits=int(cache.get("hits", 0)),
-        cache_misses=int(cache.get("misses", 0)),
-        cache_hit_rate=float(cache.get("hit_rate", 0.0)),
-        prompts_loaded=list(h.get("prompts", [])),
-    )
 
 
 @router.get("/cache/stats", response_model=CacheStatsResponse)

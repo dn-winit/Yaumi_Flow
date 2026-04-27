@@ -1,30 +1,29 @@
-import { getClient } from "./client";
-import type {
-  AnalysisResponse,
-  CacheStatsResponse,
-  AnalyticsHealthResponse,
-} from "@/types/analytics";
-import type { LlmSummary } from "@/types/common";
+import { getClient, TIMEOUTS } from "./client";
+import type { AnalysisResponse, CacheStatsResponse } from "@/types/analytics";
 
 const c = () => getClient("analytics");
 
+/**
+ * Frontend surface for the LLM analytics service. Mirrors the
+ * server-side route list: customer / route / pre-visit analyses plus
+ * cache management. Every call goes through the LLM, so all use the
+ * `heavy` timeout.
+ */
 export const analyticsApi = {
-  getSummary: () => c().get<LlmSummary>("/summary").then((r) => r.data),
-
   analyzeCustomer: (data: Record<string, unknown>) =>
-    c().post<AnalysisResponse>("/analyze/customer", data, { timeout: 180000 }).then((r) => r.data),
+    c().post<AnalysisResponse>("/analyze/customer", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),
 
   analyzeRoute: (data: Record<string, unknown>) =>
-    c().post<AnalysisResponse>("/analyze/route", data, { timeout: 180000 }).then((r) => r.data),
+    c().post<AnalysisResponse>("/analyze/route", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),
 
-  analyzePlanning: (data: Record<string, unknown>) =>
-    c().post<AnalysisResponse>("/analyze/planning", data, { timeout: 180000 }).then((r) => r.data),
-
-  preVisitBriefing: (data: { customer_code: string; customer_name: string; route_code: string; date: string; items: Record<string, unknown>[] }) =>
-    c().post<AnalysisResponse>("/analyze/pre-visit", data, { timeout: 60000 }).then((r) => r.data),
-
-  getHealth: () =>
-    c().get<AnalyticsHealthResponse>("/health").then((r) => r.data),
+  preVisitBriefing: (data: {
+    customer_code: string;
+    customer_name: string;
+    route_code: string;
+    date: string;
+    items: Record<string, unknown>[];
+  }) =>
+    c().post<AnalysisResponse>("/analyze/pre-visit", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),
 
   getCacheStats: () =>
     c().get<CacheStatsResponse>("/cache/stats").then((r) => r.data),

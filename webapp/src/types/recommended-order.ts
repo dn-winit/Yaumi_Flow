@@ -77,33 +77,12 @@ export interface RetrieveResponse {
   diagnosis?: EmptyRouteDiagnosis | null;
 }
 
-export interface ExistsResponse {
-  date: string;
-  exists: Record<string, boolean>;
-}
-
-export interface GenerationInfoResponse {
-  exists: boolean;
-  date: string;
-  total_records: number;
-  routes_count: number;
-  customers_count: number;
-  items_count: number;
-  generated_at?: string;
-}
-
 export interface FilterOptionsResponse {
   routes: string[];
   journey_counts: Record<string, number>;
   // Per-route diagnosis for routes that have planned customers but no stored
   // recommendations -- powers the route picker grid's empty-state message.
   route_diagnoses?: Record<string, EmptyRouteDiagnosis>;
-}
-
-export interface OrderHealthResponse {
-  status: string;
-  last_refresh: string | null;
-  route_codes: string[];
 }
 
 // ---------- Analytics: Adoption ----------

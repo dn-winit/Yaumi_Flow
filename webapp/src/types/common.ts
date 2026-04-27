@@ -1,12 +1,6 @@
-// Shared types across all modules
+// Shared types across all modules.
 
 export type Row = Record<string, unknown>;
-
-export interface HealthStatus {
-  service: string;
-  status: string;
-  ok: boolean;
-}
 
 // Summary responses (aggregated KPIs for dashboard)
 
@@ -33,21 +27,4 @@ export interface RecommendationSummary {
   total_recs_latest_date: number;
   routes_with_recs_latest: number;
   customers_latest: number;
-}
-
-export interface SupervisionSummary {
-  saved_sessions: number;
-  sessions_today: number;
-  storage_dir: string;
-  has_db: boolean;
-}
-
-export interface LlmSummary {
-  provider: string;
-  model: string;
-  available: boolean;
-  cache_hits: number;
-  cache_misses: number;
-  cache_hit_rate: number;
-  prompts_loaded: string[];
 }

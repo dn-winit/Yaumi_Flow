@@ -11,6 +11,7 @@ import {
   str,
 } from "./explain/atoms";
 import { pickDate } from "@/lib/format";
+import { fmtDate } from "@/lib/date";
 import { accuracyTone } from "@/lib/colorize";
 import { useItemStats } from "@/hooks/useDataImport";
 import type { ItemStatsWindow } from "@/types/data-import";
@@ -89,7 +90,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
       <div className={MODAL_BODY}>
         <ExplainHeader
           left={{ label: "Item", primary: itemCode, secondary: itemName }}
-          right={{ label: "Route / Date", primary: routeCode, secondary: date }}
+          right={{ label: "Route / Date", primary: routeCode, secondary: fmtDate(date) }}
         />
 
         {/* Section 1: The forecast itself */}

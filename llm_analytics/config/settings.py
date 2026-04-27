@@ -22,7 +22,6 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8003, ge=1024, le=65535)
     workers: int = Field(default=1, ge=1)
-    debug: bool = Field(default=False)
     log_level: str = Field(default="INFO")
     api_prefix: str = Field(default="/api/v1")
 
@@ -51,9 +50,6 @@ class Settings(BaseSettings):
 
     # Data limits (prevent oversized prompts)
     max_items_per_customer: int = Field(default=12)
-    max_customers_per_analysis: int = Field(default=12)
-    max_van_load_items: int = Field(default=15)
-    max_items_per_customer_detail: int = Field(default=5)
 
     @field_validator("log_level")
     @classmethod

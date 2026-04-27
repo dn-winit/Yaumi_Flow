@@ -10,6 +10,14 @@ import time
 
 logger = logging.getLogger(__name__)
 
+# How long acquire() waits for a token before giving up. Sized to be
+# noticeably shorter than the LLM client timeout so a request that
+# can't get a token fails fast instead of stacking on the budget.
+_DEFAULT_ACQUIRE_TIMEOUT_SECONDS = 5.0
+# Poll interval between token re-checks while waiting. Small enough to
+# feel responsive, large enough that the busy loop is not a CPU sink.
+_ACQUIRE_POLL_INTERVAL_SECONDS = 0.1
+
 
 class RateLimiter:
     """Token bucket rate limiter with configurable window."""
@@ -21,7 +29,7 @@ class RateLimiter:
         self._last_refill = time.monotonic()
         self._lock = threading.Lock()
 
-    def acquire(self, timeout: float = 5.0) -> bool:
+    def acquire(self, timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_SECONDS) -> bool:
         """Try to acquire a token. Returns True if allowed, False if rate limited."""
         deadline = time.monotonic() + timeout
 
@@ -34,7 +42,7 @@ class RateLimiter:
 
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(0.1)
+            time.sleep(_ACQUIRE_POLL_INTERVAL_SECONDS)
 
     def _refill(self) -> None:
         now = time.monotonic()

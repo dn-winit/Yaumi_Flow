@@ -15,7 +15,7 @@ from llm_analytics.core.client import LLMClient
 from llm_analytics.core.formatter import DataFormatter
 from llm_analytics.core.prompt_loader import PromptLoader
 from llm_analytics.core.validator import sanitize_customer_codes
-from llm_analytics.models.schemas import CustomerAnalysis, PreVisitBriefing, RouteAnalysis, PlanningInsights
+from llm_analytics.models.schemas import CustomerAnalysis, PreVisitBriefing, RouteAnalysis
 from llm_analytics.services.cache import LLMCache
 from llm_analytics.services.rate_limiter import RateLimiter
 
@@ -126,46 +126,6 @@ class Analyzer:
             result = sanitize_customer_codes(result, actual_customer_codes)
 
         self._cache.set("route_analysis", result, **cache_kwargs)
-        return result
-
-    # ------------------------------------------------------------------
-    # Planning insights
-    # ------------------------------------------------------------------
-
-    def analyze_planning(
-        self,
-        route_code: str,
-        date: str,
-        van_load_items: List[Dict[str, Any]],
-        customer_recommendations: List[Dict[str, Any]],
-        van_load_skus: int = 0,
-        van_load_qty: int = 0,
-        total_customers: int = 0,
-        total_rec_qty: int = 0,
-    ) -> Dict[str, Any]:
-        cache_kwargs = dict(route_code=route_code, date=date, analysis_type="planning")
-        cached = self._cache.get("planning_analysis", **cache_kwargs)
-        if cached:
-            return cached
-
-        if not self._limiter.acquire():
-            return self._fallback("planning", route_code=route_code, reason="Rate limit exceeded")
-
-        van_table = self._formatter.format_van_load(van_load_items)
-        cust_table = self._formatter.format_customer_recommendations(customer_recommendations)
-
-        system = self._prompts.get_system_prompt("planning_analysis")
-        user = self._prompts.render(
-            "planning_analysis", "planning_analysis_template",
-            route_code=route_code, date=date,
-            van_load_skus=van_load_skus, van_load_qty=van_load_qty,
-            van_load_table=van_table,
-            total_customers=total_customers, total_rec_qty=total_rec_qty,
-            customer_recommendations_table=cust_table,
-        )
-
-        result = self._call_with_retry(system, user, PlanningInsights, "planning_analysis")
-        self._cache.set("planning_analysis", result, **cache_kwargs)
         return result
 
     # ------------------------------------------------------------------
@@ -317,16 +277,15 @@ class Analyzer:
         base = {
             "performance_summary": f"Analysis not available: {reason}",
             "route_summary": f"Analysis not available: {reason}",
+            "briefing": f"Analysis not available: {reason}",
             "supervisor_instructions": [],
             "supervisor_priorities": [],
             "strengths": [],
             "weaknesses": [],
             "high_performers_with_practices": [],
             "critical_issues": [],
-            "priority_customers": [],
-            "van_load_alerts": [],
-            "opportunities": [],
-            "quick_tips": [],
+            "key_items": [],
+            "heads_up": "",
         }
         for k, v in context.items():
             if k != "reason":

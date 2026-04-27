@@ -11,11 +11,9 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from demand_forecasting_pipeline.api.routes import (
-    accuracy_router,
     explainability_router,
     health_router,
     metrics_router,
-    models_router,
     pipeline_router,
     predictions_router,
     retrain_router,
@@ -102,11 +100,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health_router, prefix=prefix)
     app.include_router(predictions_router, prefix=prefix)
     app.include_router(metrics_router, prefix=prefix)
-    app.include_router(models_router, prefix=prefix)
     app.include_router(explainability_router, prefix=prefix)
     app.include_router(pipeline_router, prefix=prefix)
     app.include_router(summary_router, prefix=prefix)
-    app.include_router(accuracy_router, prefix=prefix)
     app.include_router(retrain_router, prefix=prefix)
 
     return app

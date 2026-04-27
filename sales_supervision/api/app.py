@@ -12,8 +12,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from sales_supervision.api.routes import (
     health_router,
-    review_router,
-    scoring_router,
     session_router,
 )
 from sales_supervision.config.settings import Settings, get_settings
@@ -54,7 +52,5 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     prefix = f"{settings.api_prefix}/supervision"
     app.include_router(health_router, prefix=prefix)
     app.include_router(session_router, prefix=prefix)
-    app.include_router(review_router, prefix=prefix)
-    app.include_router(scoring_router, prefix=prefix)
 
     return app

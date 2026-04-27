@@ -85,13 +85,28 @@ export const ON_TARGET_POOR_RATIO = 0.4;
 export const LAST_30_DAYS = 30;
 
 /**
- * Time-window options for the Dashboard page tab selector. Drives sales +
- * customer overview hooks together so every chart and table rolls on the
- * same window. DEFAULT is the option highlighted on first load.
+ * Reporting-period options for the Dashboard page. A "working day" is any
+ * date with actual sales activity in sales_recent.csv, so weekends,
+ * public holidays, and any other closure are excluded automatically.
+ * Drives sales + customer overview hooks together so every chart and
+ * table rolls on the same period. Keys + day counts mirror the backend
+ * enum (data_import.services.eda_service.LOOKBACK_OPTIONS) -- single
+ * source of truth, no scattered magic numbers.
  */
-export const DASHBOARD_WINDOWS = [7, 30, 90, 180] as const;
-export type DashboardWindow = (typeof DASHBOARD_WINDOWS)[number];
-export const DEFAULT_DASHBOARD_WINDOW: DashboardWindow = 90;
+export const LOOKBACK_OPTIONS = [
+  { key: "last_working_day", label: "Last working day", days: 1 },
+  { key: "last_7_working_days", label: "Last 7 working days", days: 7 },
+] as const;
+export type Lookback = (typeof LOOKBACK_OPTIONS)[number]["key"];
+export const DEFAULT_LOOKBACK: Lookback = "last_7_working_days";
+
+export function lookbackLabel(key: Lookback): string {
+  return LOOKBACK_OPTIONS.find((o) => o.key === key)?.label ?? key;
+}
+
+export function lookbackDays(key: Lookback): number {
+  return LOOKBACK_OPTIONS.find((o) => o.key === key)?.days ?? 7;
+}
 
 /**
  * Top-N rows shown in dashboard ranking charts. Five is enough to convey the

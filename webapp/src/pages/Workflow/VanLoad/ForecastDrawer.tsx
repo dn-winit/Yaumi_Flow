@@ -12,7 +12,7 @@ import PredictedValue from "@/components/ui/PredictedValue";
 import ConfidenceBadge from "@/components/ui/ConfidenceBadge";
 import { useFutureForecast } from "@/hooks/useForecast";
 import { toNum, pickDate, fmtNum } from "@/lib/format";
-import { todayIso } from "@/lib/date";
+import { fmtDate, fmtDateRange, todayIso } from "@/lib/date";
 import type { Row } from "@/types/common";
 
 interface Props {
@@ -90,7 +90,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
   }, [filteredRows]);
 
   const columns = [
-    { key: "Date", label: "Date", render: (r: Row) => pickDate(r) },
+    { key: "Date", label: "Date", render: (r: Row) => fmtDate(pickDate(r)) },
     { key: "ItemCode", label: "Item", render: (r: Row) => String(r.ItemCode ?? "-") },
     {
       key: "Predicted",
@@ -116,8 +116,8 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
 
   const windowLabel =
     summary.horizon > 0
-      ? `${chartData[0].date} to ${chartData[chartData.length - 1].date}`
-      : `from ${today}`;
+      ? fmtDateRange(chartData[0].date, chartData[chartData.length - 1].date)
+      : `from ${fmtDate(today)}`;
 
   return (
     <Drawer open={open} onClose={onClose} title="Upcoming van load" width="xl">

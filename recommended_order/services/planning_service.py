@@ -60,10 +60,6 @@ class PlanningService:
             self._cache[key] = (now, result)
         return result
 
-    def invalidate(self) -> None:
-        with self._lock:
-            self._cache.clear()
-
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

@@ -59,12 +59,3 @@ def update_config(
 def get_history(cfg: AutoRetrainConfig = Depends(get_retrain_config)):
     """Return retrain history array."""
     return cfg.get().get("history", [])
-
-
-@router.get("/drift")
-def get_drift(
-    artifact_svc: ArtifactService = Depends(get_artifact_service),
-    accuracy_svc: AccuracyService = Depends(get_accuracy_service),
-):
-    """Return live drift analysis (predicted vs YaumiLive actuals)."""
-    return compute_drift_status(artifact_svc, accuracy_svc)

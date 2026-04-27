@@ -1,8 +1,7 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Drawer from "@/components/ui/Drawer";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
-import DrawerContextBar from "@/components/ui/DrawerContextBar";
 import KpiRow from "@/components/ui/KpiRow";
 import HighlightsStrip, { type Highlight } from "@/components/ui/HighlightsStrip";
 import MetricCard from "@/components/charts/MetricCard";
@@ -10,9 +9,9 @@ import LineChart from "@/components/charts/LineChart";
 import BarChart from "@/components/charts/BarChart";
 import { CHART_COLOR } from "@/components/charts/theme";
 import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
+import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
-import { useAccuracyComparison } from "@/hooks/useForecast";
-import { useItemPrices } from "@/hooks/useDataImport";
+import { useForecastRows } from "@/hooks/useDataImport";
 import {
   fmtNum,
   fmtCurrency,
@@ -22,9 +21,12 @@ import {
   LEAKAGE_SHARE_WARN,
   ON_TARGET_GOOD_RATIO,
   ON_TARGET_POOR_RATIO,
-  LAST_30_DAYS,
+  DEFAULT_LOOKBACK,
+  type Lookback,
 } from "@/lib/format";
-import { addDays, todayIso } from "@/lib/date";
+import { fmtDate } from "@/lib/date";
+import type { DashboardFilters, ForecastRow } from "@/types/data-import";
+import { EMPTY_FILTERS } from "@/types/data-import";
 import type { Row } from "@/types/common";
 
 interface VarianceRow {
@@ -37,55 +39,47 @@ interface VarianceRow {
 interface Props {
   open: boolean;
   onClose: () => void;
+  // The drawer is opened from a specific route's van-load context, so the
+  // route is fixed and pre-applied. The user can further narrow inside
+  // the drawer by category and item. Warehouse + route would be redundant
+  // here so the filter bar hides them.
   routeCode?: string;
-  itemCodes?: string[];
 }
 
-export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: Props) {
+/**
+ * "Past analysis" drawer: predicted vs actual for the route the user is
+ * viewing, scoped further by Category and Item via the same multi-select
+ * cascading filter bar the dashboard uses. The four tiles, daily trend
+ * chart, and items-variance bar chart are computed client-side from the
+ * shared (sales ⋈ forecast) merge served by /eda/forecast-rows -- the
+ * same merge that powers the dashboard KPIs, so numbers reconcile.
+ */
+export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
   const [explainRow, setExplainRow] = useState<Row | null>(null);
-  const { params, windowDays } = useMemo(() => {
-    const endDate = todayIso();
-    const startDate = addDays(endDate, -(LAST_30_DAYS - 1));
-    const p: Record<string, unknown> = {
-      start_date: startDate,
-      end_date: endDate,
-    };
-    if (routeCode) p.route_code = routeCode;
-    // Only push item_code to the API when a single SKU is picked. With 2+ SKUs
-    // the API can only filter one, so we fetch the route-wide window and filter
-    // client-side below; the backend summary in that case isn't useful.
-    if (itemCodes && itemCodes.length === 1) p.item_code = itemCodes[0];
-    return { params: p, windowDays: LAST_30_DAYS };
-  }, [routeCode, itemCodes]);
+  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  // Only run the cross-DB join when the drawer is actually open.
-  const { data, loading } = useAccuracyComparison(params, open);
-  const prices = useItemPrices(open);
+  // Seed the drawer's filter scope with the active route on every open so
+  // the user always lands on "this route's history". The route field is
+  // hidden in the filter bar but still pinned in state.
+  useEffect(() => {
+    if (!open) return;
+    setFilters({
+      ...EMPTY_FILTERS,
+      route_codes: routeCode ? [routeCode] : [],
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, routeCode]);
 
-  const multiItemFilter = !!(itemCodes && itemCodes.length > 1);
+  const { data, loading } = useForecastRows(
+    open ? lookback : undefined,
+    open ? filters : undefined,
+    open,
+  );
+  const rows = (data?.rows ?? []) as ForecastRow[];
 
-  const filteredRows = useMemo(() => {
-    const rows = (data?.rows ?? []) as unknown as Row[];
-    if (!multiItemFilter) return rows;
-    const set = new Set(itemCodes);
-    return rows.filter((r) => set.has(String(r.item_code ?? "")));
-  }, [data, itemCodes, multiItemFilter]);
-
-  // Single-pass client-side stats.
-  //
-  // Four tiles — arithmetic identity on the FORECAST dimension:
-  //   demandServed + unsoldForecast = totalPredicted (every forecasted unit
-  //   either sold through or stayed in the van). Tile 1 and Tile 4 reconcile
-  //   exactly on what we told the van to carry.
-  //
-  //   * demandServed    -- Σ min(predicted, actual): forecast units that sold
-  //   * accuracyPct     -- WAPE-based quality; scored where both > 0
-  //   * daysOnTarget    -- days with |pred − actual|/actual ≤ TOLERANCE_PCT
-  //   * Lost sales      -- Σ max(0, predicted − actual): forecast units that
-  //                        DIDN'T sell -- stock we loaded, customers didn't take,
-  //                        valued at avg unit price
-  //
-  // Highlights strip reuses bestDay + bestStreak from the same pass.
+  // ----- Single-pass client-side stats (forecast-dimension identity:
+  // demandServed + unsoldForecast = totalPredicted). -----
   const wapeAccuracy = (absErr: number, actual: number) =>
     actual > 0 ? Math.max(0, 100 - (absErr / actual) * 100) : null;
 
@@ -101,24 +95,20 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     let unsoldRevenue = 0;
     let pricesSeen = false;
 
-    filteredRows.forEach((r) => {
+    rows.forEach((r) => {
       const p = toNum(r.predicted) ?? 0;
       const a = toNum(r.actual_qty) ?? 0;
       totalActual += a;
       totalPredicted += p;
-      // Score rows where actual > 0 AND predicted > 0 -- same filter the
-      // backend wape_summary helper uses so every accuracy display agrees.
       if (a > 0 && p > 0) {
         scoredAbsErr += Math.abs(a - p);
         scoredActual += a;
       }
-      // Decompose forecast into sold-through + unsold.
       demandServed += Math.min(p, a);
       const excess = Math.max(0, p - a);
       if (excess > 0) {
         unsoldForecast += excess;
-        const code = String(r.item_code ?? "");
-        const price = code ? prices[code] ?? 0 : 0;
+        const price = r.price ?? 0;
         if (price > 0) {
           unsoldRevenue += excess * price;
           pricesSeen = true;
@@ -141,12 +131,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       }
     });
 
-    // SKU counts for the context bar + tile subtitles:
-    //   forecastedSkuCount -- master set: items our forecast told the van to carry
-    //   servedSkuCount     -- subset: forecast items that sold at least some units
-    //   unsoldSkuCount     -- subset: items where forecast exceeded actual
-    // A partially-over-forecast SKU can appear in served AND unsold; that's
-    // honest since it contributed units to served AND to the unsold remainder.
     let forecastedSkuCount = 0;
     let servedSkuCount = 0;
     let unsoldSkuCount = 0;
@@ -156,7 +140,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       if (predicted > actual) unsoldSkuCount += 1;
     });
 
-    // Day entries for on-target count, streak + best-day highlights.
     const dayEntries = Array.from(byDay.entries())
       .filter(([, v]) => v.a > 0 && v.p > 0)
       .sort(([a], [b]) => a.localeCompare(b));
@@ -198,12 +181,11 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       unsoldSkuCount,
       unsoldRevenue: pricesSeen ? unsoldRevenue : null,
     };
-  }, [filteredRows, prices]);
+  }, [rows]);
 
-  // Daily aggregated chart
   const dailyChart = useMemo(() => {
     const map = new Map<string, { predicted: number; actual: number }>();
-    filteredRows.forEach((r) => {
+    rows.forEach((r) => {
       const d = String(r.trx_date ?? "").slice(0, 10);
       if (!d) return;
       const predicted = toNum(r.predicted) ?? 0;
@@ -220,12 +202,11 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
         predicted: Number(v.predicted.toFixed(2)),
         actual: Number(v.actual.toFixed(2)),
       }));
-  }, [filteredRows]);
+  }, [rows]);
 
-  // Top 10 items by absolute variance -- bar chart
   const itemVarianceChart = useMemo(() => {
     const byItem = new Map<string, { predicted: number; actual: number }>();
-    filteredRows.forEach((r) => {
+    rows.forEach((r) => {
       const code = String(r.item_code ?? "");
       if (!code) return;
       const predicted = toNum(r.predicted) ?? 0;
@@ -244,14 +225,8 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       }))
       .sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance))
       .slice(0, 10);
-  }, [filteredRows]);
+  }, [rows]);
 
-  const windowLabel = `${params.start_date} to ${params.end_date}`;
-
-  // Smallest |variance| / actual across items -- our "most accurate item" win.
-  // Only considers items whose 30-day actual volume crosses the same
-  // significance threshold we use for lost-sales / dead-weight, so a SKU that
-  // sold 1 unit doesn't hijack the highlight.
   const mostAccurateItem = useMemo(() => {
     const significantVolume = stats.totalActual * LEAKAGE_SHARE_WARN;
     let bestCode = "";
@@ -273,7 +248,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       items.push({
         label: "Best day",
         value: `${stats.bestDay.accuracy.toFixed(1)}% accurate`,
-        detail: stats.bestDay.date,
+        detail: fmtDate(stats.bestDay.date),
       });
     }
     if (stats.bestStreak > 0) {
@@ -293,8 +268,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
     return items;
   }, [stats.bestDay, stats.bestStreak, mostAccurateItem]);
 
-  // Arrows only on tiles where "up = unambiguously good." Lost sales tile
-  // carries no arrow -- it's a loss magnitude, not a direction.
   const servedArrow: "up" | "down" | undefined = stats.demandServed > 0 ? "up" : undefined;
   const accuracyArrow: "up" | "down" | undefined =
     stats.accuracyPct == null
@@ -313,37 +286,30 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
       ? "down"
       : undefined;
 
+  const windowLabel = data?.working_days
+    ? `${data.working_days} working day${data.working_days === 1 ? "" : "s"}`
+    : "this period";
+
   return (
-    <Drawer open={open} onClose={onClose} title="Last 30 Days Performance" width="xl">
+    <Drawer open={open} onClose={onClose} title="Past analysis" width="xl">
       <div className="space-y-6">
-        <DrawerContextBar
-          routeCode={routeCode}
-          itemCodes={itemCodes}
-          dateRange={windowLabel}
-          extra={
-            stats.forecastedSkuCount > 0 && (
-              <span className="text-caption text-text-tertiary">
-                {fmtNum(stats.forecastedSkuCount)} unique items forecast
-              </span>
-            )
-          }
+        <DashboardFilterBar
+          value={filters}
+          onChange={setFilters}
+          lookback={lookback}
+          onLookbackChange={setLookback}
+          hideWarehouse
+          hideRoute
         />
 
         {loading ? (
-          <Loading message="Loading accuracy data..." />
-        ) : data && data.success === false ? (
-          <EmptyState
-            icon="⚠️"
-            title="Could not load accuracy data"
-            message={data.error ?? "Backend returned an error."}
-          />
-        ) : filteredRows.length === 0 ? (
+          <Loading message="Loading past analysis..." />
+        ) : rows.length === 0 ? (
           <EmptyState
             title="No historical data"
             message={
-              routeCode
-                ? `No predictions matched actuals for route ${routeCode} in the last 30 days.`
-                : "Pick a route to see accuracy."
+              data?.message ??
+              `No predictions matched actuals for route ${routeCode ?? "this scope"} in ${windowLabel}.`
             }
           />
         ) : (
@@ -364,8 +330,8 @@ export default function AccuracyDrawer({ open, onClose, routeCode, itemCodes }: 
                 value={stats.accuracyPct != null ? `${stats.accuracyPct.toFixed(1)}%` : "-"}
                 subtitle={
                   stats.daysScored > 0
-                    ? `${stats.daysScored} of ${windowDays} days with records`
-                    : `No records in last ${windowDays} days`
+                    ? `${stats.daysScored} of ${windowLabel} with records`
+                    : `No records in ${windowLabel}`
                 }
                 trend={accuracyArrow}
               />

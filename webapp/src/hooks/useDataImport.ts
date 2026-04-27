@@ -1,20 +1,66 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dataImportApi } from "@/api/data-import";
+import type { DashboardFilters } from "@/types/data-import";
 import { tier } from "./refresh";
 
-export function useSalesOverview(days?: number) {
+// Stable, sorted-tuple cache key for a filter combination so different
+// orderings of the same selection share a query slot (mirrors the backend
+// _filter_key strategy). Memoized in callers via `useMemo`-driven props,
+// but cheap enough to recompute every call.
+function filterKey(f?: Partial<DashboardFilters>): string {
+  const part = (name: string, vals?: string[]) =>
+    vals && vals.length ? `${name}=${[...vals].sort().join("|")}` : `${name}=`;
+  return [
+    part("w", f?.warehouse_codes),
+    part("r", f?.route_codes),
+    part("c", f?.category_codes),
+    part("i", f?.item_codes),
+  ].join(";");
+}
+
+export function useSalesOverview(lookback?: string, filters?: Partial<DashboardFilters>) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-sales", days ?? "default"],
-    queryFn: () => dataImportApi.getSalesOverview(days),
+    queryKey: ["eda-sales", lookback ?? "default", filterKey(filters)],
+    queryFn: () => dataImportApi.getSalesOverview(lookback, filters),
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useBusinessKpis() {
+export function useBusinessKpis(lookback?: string, filters?: Partial<DashboardFilters>) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-business-kpis"],
-    queryFn: () => dataImportApi.getBusinessKpis(),
+    queryKey: ["eda-business-kpis", lookback ?? "default", filterKey(filters)],
+    queryFn: () => dataImportApi.getBusinessKpis(lookback, filters),
+    ...tier("dashboard"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
+}
+
+export function useForecastRows(
+  lookback?: string,
+  filters?: Partial<DashboardFilters>,
+  enabled = true,
+) {
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["eda-forecast-rows", lookback ?? "default", filterKey(filters)],
+    queryFn: () => dataImportApi.getForecastRows(lookback, filters),
+    enabled,
+    ...tier("dashboard"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
+}
+
+export function useFilterDimensions(filters?: Partial<DashboardFilters>) {
+  // Item selections don't shrink the upstream dropdowns, so we exclude
+  // them from the cache key to avoid pointless refetches.
+  const upstream = {
+    warehouse_codes: filters?.warehouse_codes,
+    route_codes: filters?.route_codes,
+    category_codes: filters?.category_codes,
+  };
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["eda-filter-dimensions", filterKey(upstream)],
+    queryFn: () => dataImportApi.getFilterDimensions(upstream),
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
@@ -38,28 +84,6 @@ export function useItemStats(itemCode: string | undefined, routeCode?: string) {
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null };
-}
-
-export function useCustomerOverview(lookbackDays = 90) {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-customers", lookbackDays],
-    queryFn: () => dataImportApi.getCustomerOverview(lookbackDays),
-    ...tier("dashboard"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
-
-// Shared item-price lookup ({ItemCode: avg_unit_price}). Cached under the
-// "static" tier since prices change slowly and every caller can dedupe via
-// react-query. Callers treat a missing key as "price unknown".
-export function useItemPrices(enabled = true) {
-  const { data } = useQuery({
-    queryKey: ["item-prices"],
-    queryFn: () => dataImportApi.getItemPrices(),
-    enabled,
-    ...tier("static"),
-  });
-  return data ?? {};
 }
 
 export function useDataStatus() {

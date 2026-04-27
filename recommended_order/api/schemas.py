@@ -34,12 +34,6 @@ class RetrieveRequest(BaseModel):
     offset: int = Field(default=0, ge=0)
 
 
-class ExistsRequest(BaseModel):
-    """Check if recommendations exist."""
-    date: str = Field(..., pattern=r"^\d{4}-\d{2}-\d{2}$")
-    route_codes: Optional[List[str]] = None
-
-
 # ------------------------------------------------------------------
 # Responses
 # ------------------------------------------------------------------
@@ -109,22 +103,6 @@ class RetrieveResponse(BaseModel):
     source: str = Field(default="store", description="store | generated")
     generated_routes: int = 0
     diagnosis: Optional[EmptyRouteDiagnosis] = None
-
-
-class ExistsResponse(BaseModel):
-    date: str
-    exists: Dict[str, bool]
-
-
-class GenerationInfoResponse(BaseModel):
-    exists: bool
-    date: str
-    total_records: int = 0
-    routes_count: int = 0
-    customers_count: int = 0
-    items_count: int = 0
-    generated_at: Optional[str] = None
-    generated_by: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

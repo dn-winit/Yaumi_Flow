@@ -1,0 +1,11 @@
+# Aggregator -- pulls in every service's requirements in one shot.
+# Each service still owns its own requirements.txt (used by Render /
+# Dockerfile.backend / standalone deploys); this top-level file exists
+# so a single `pip install -r requirements.txt` from the repo root
+# bootstraps a full local dev environment.
+
+-r data_import/requirements.txt
+-r demand_forecasting_pipeline/requirements.txt
+-r recommended_order/requirements.txt
+-r sales_supervision/requirements.txt
+-r llm_analytics/requirements.txt

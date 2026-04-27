@@ -2,6 +2,16 @@ import React, { useMemo, useState } from "react";
 import EmptyState from "./EmptyState";
 import { Skeleton } from "./Skeleton";
 
+/**
+ * Shared scroll container for any tabular surface in the app. Keeps the
+ * table self-contained -- once the row count crosses ~20, the table
+ * scrolls internally instead of pushing the rest of the page down. The
+ * sticky header keeps column labels visible while scrolling. Inline
+ * tables that don't use the generic <Table> below should still wrap
+ * their <table> in this class for visual + behavioural consistency.
+ */
+export const TABLE_SCROLL_CLASS = "overflow-auto max-h-[800px]";
+
 interface Column<T> {
   key: string;
   label: string;
@@ -57,9 +67,9 @@ export default function Table<T extends Record<string, unknown>>({
   }
 
   return (
-    <div className={`overflow-auto ${className}`}>
+    <div className={`${TABLE_SCROLL_CLASS} ${className}`}>
       <table className="w-full text-body text-left">
-        <thead className="sticky top-0 bg-surface-sunken border-b border-default">
+        <thead className="sticky top-0 z-10 bg-surface-sunken border-b border-default">
           <tr>
             {columns.map((col) => (
               <th

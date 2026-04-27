@@ -1,11 +1,13 @@
 import Card from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
 import Select from "@/components/ui/Select";
+import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
 import {
   useRetrainConfig,
   useRetrainHistory,
   useUpdateRetrainConfig,
 } from "@/hooks/useForecast";
+import { fmtDate } from "@/lib/date";
 import type { Tone } from "@/lib/colorize";
 
 /* ------------------------------------------------------------------ */
@@ -68,30 +70,6 @@ function driftLabel(status: string): string {
   if (status === "significant") return "Significant drift";
   if (status === "drifting") return "Drifting";
   return "Stable";
-}
-
-function fmtDate(iso: string | null): string {
-  if (!iso) return "\u2014";
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
-    });
-  } catch {
-    return iso;
-  }
-}
-
-function fmtShortDate(iso: string): string {
-  try {
-    return new Date(iso).toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-    });
-  } catch {
-    return iso;
-  }
 }
 
 function timeAgo(iso: string | null): string {
@@ -247,10 +225,10 @@ export default function AutoRetrainSection() {
           <h4 className="text-caption font-semibold text-text-secondary uppercase tracking-wider mb-2">
             History (last {recentHistory.length})
           </h4>
-          <div className="overflow-x-auto">
+          <div className={TABLE_SCROLL_CLASS}>
             <table className="w-full text-left text-body">
-              <thead>
-                <tr className="border-b border-default">
+              <thead className="sticky top-0 z-10 bg-surface-raised border-b border-default">
+                <tr>
                   <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Date</th>
                   <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Trigger</th>
                   <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Before</th>
@@ -261,7 +239,7 @@ export default function AutoRetrainSection() {
               <tbody>
                 {recentHistory.map((h, i) => (
                   <tr key={i} className="border-b border-default last:border-b-0">
-                    <td className="py-2 pr-4 text-text-secondary">{fmtShortDate(h.date)}</td>
+                    <td className="py-2 pr-4 text-text-secondary">{fmtDate(h.date)}</td>
                     <td className="py-2 pr-4 text-text-secondary capitalize">{h.trigger}</td>
                     <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_before)}</td>
                     <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_after)}</td>

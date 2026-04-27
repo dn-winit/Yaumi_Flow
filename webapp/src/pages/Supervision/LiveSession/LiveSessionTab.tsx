@@ -5,17 +5,38 @@ import Card from "@/components/ui/Card";
 import ContextStrip from "@/components/ui/ContextStrip";
 import KpiRow from "@/components/ui/KpiRow";
 import Tabs from "@/components/ui/Tabs";
+import CustomerGrid, { type CustomerStat } from "@/components/ui/CustomerGrid";
 import MetricCard from "@/components/charts/MetricCard";
 import { supervisionApi } from "@/api/supervision";
 import { useUnplannedVisits } from "@/hooks/useSupervision";
-import SessionInit from "./SessionInit";
 import CustomerVisit from "./CustomerVisit";
 import CustomerAnalysisModal, { type CustomerAnalysisContext } from "./CustomerAnalysisModal";
 import RouteAnalysisModal, { type RouteAnalysisContext } from "./RouteAnalysisModal";
 import UnplannedVisits from "./UnplannedVisits";
 
 import { GOOD_SCORE_THRESHOLD } from "@/lib/format";
+import { fmtDate } from "@/lib/date";
 import { useToast } from "@/hooks/useToast";
+
+interface LiveSessionTabProps {
+  sessionId: string;
+  sessionData: Record<string, unknown> | null;
+  routeCode: string;
+  date: string;
+  /**
+   * Optional workflow-level actions injected into the ContextStrip --
+   * e.g. "Last 30 days" / "Upcoming week" drawer triggers from the
+   * Visit step. Kept generic so this component stays unaware of the
+   * specific drawers its parent owns.
+   */
+  extraActions?: ReactNode;
+  /**
+   * Called when the supervisor wants to pick a different route. Renders
+   * a "Pick another route →" CTA after a successful save so there's an
+   * obvious next step instead of a dead-end "Saved" indicator.
+   */
+  onPickAnotherRoute?: () => void;
+}
 
 interface CustomerItem {
   itemCode: string;
@@ -29,6 +50,10 @@ interface CustomerItem {
   daysSinceLastPurchase?: number;
   frequencyPercent?: number;
   trendFactor?: number;
+  // Raw PascalCase recommendation row -- carried unchanged so the
+  // RecommendationModal can render the full explainability (Signals,
+  // WhyItem, WhyQuantity, Confidence, etc.) without a second mapping.
+  raw: Record<string, unknown>;
 }
 
 interface CustomerData {
@@ -44,10 +69,17 @@ interface VisitRecord {
   recommendedQty: number;
 }
 
-export default function LiveSessionTab() {
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionData, setSessionData] = useState<Record<string, unknown> | null>(null);
+export default function LiveSessionTab({
+  sessionId,
+  sessionData,
+  routeCode,
+  date,
+  extraActions,
+  onPickAnotherRoute,
+}: LiveSessionTabProps) {
   const [visits, setVisits] = useState<Record<string, VisitRecord>>({});
+  // Tile-grid → drill-in: null = show grid, set = show that customer's visit.
+  const [selectedCustomerCode, setSelectedCustomerCode] = useState<string | null>(null);
 
   // Save flow
   const [saving, setSaving] = useState(false);
@@ -59,15 +91,11 @@ export default function LiveSessionTab() {
   const [custCtx, setCustCtx] = useState<CustomerAnalysisContext | null>(null);
   const [routeModalOpen, setRouteModalOpen] = useState(false);
 
-  const handleSessionCreated = (id: string, data: Record<string, unknown>) => {
-    setSessionId(id);
-    setSessionData(data);
-    setVisits({});
-    setSaved(false);
-    setSaveErr(null);
-  };
-
-  // Normalise recommendation rows into a per-customer structure.
+  // Normalise recommendation rows into a per-customer structure. Drops
+  // any line where recommendedQty <= 0 -- a quantity of zero means the
+  // model decided not to recommend the item, so showing it would be
+  // misleading. Customers left with no items after filtering are also
+  // dropped (nothing to record for them).
   const customers = useMemo<CustomerData[]>(() => {
     if (!sessionData) return [];
     const recs = (sessionData.recommendations as Record<string, unknown>[]) ?? [];
@@ -79,12 +107,14 @@ export default function LiveSessionTab() {
     for (const rec of recs) {
       const code = String(pick(rec, "CustomerCode", "customerCode", "customer_code") ?? "");
       if (!code) continue;
+      const qty = Number(pick(rec, "RecommendedQuantity", "recommendedQty", "recommended_qty") ?? 0);
+      if (!(qty > 0)) continue;
       const name = String(pick(rec, "CustomerName", "customerName", "customer_name") ?? code);
       if (!grouped.has(code)) grouped.set(code, { customerCode: code, customerName: name, items: [] });
       grouped.get(code)!.items.push({
         itemCode: String(pick(rec, "ItemCode", "itemCode", "item_code") ?? ""),
         itemName: pick(rec, "ItemName", "itemName", "item_name") as string | undefined,
-        recommendedQty: Number(pick(rec, "RecommendedQuantity", "recommendedQty", "recommended_qty") ?? 0),
+        recommendedQty: qty,
         tier: pick(rec, "Tier", "tier") as string | undefined,
         source: pick(rec, "Source", "source") as string | undefined,
         whyItem: pick(rec, "WhyItem", "whyItem") as string | undefined,
@@ -93,13 +123,11 @@ export default function LiveSessionTab() {
         daysSinceLastPurchase: pick(rec, "DaysSinceLastPurchase", "daysSinceLastPurchase") as number | undefined,
         frequencyPercent: pick(rec, "FrequencyPercent", "frequencyPercent") as number | undefined,
         trendFactor: pick(rec, "TrendFactor", "trendFactor") as number | undefined,
+        raw: rec,
       });
     }
-    return Array.from(grouped.values());
+    return Array.from(grouped.values()).filter((c) => c.items.length > 0);
   }, [sessionData]);
-
-  const routeCode = String(sessionData?.routeCode ?? sessionData?.route_code ?? "");
-  const date = String(sessionData?.date ?? "");
 
   const totals = useMemo(() => {
     const uniqueItems = new Set<string>();
@@ -185,27 +213,20 @@ export default function LiveSessionTab() {
 
   // Live-visited codes drive the small "visited live" indicator on planned
   // customer cards. Reuses the same React Query key as VisitsTabs / UnplannedVisits
-  // so only one network request runs per polling cycle. Called before any early
-  // return so hook order is stable across the pre-init/active transition.
-  const { data: unplannedData } = useUnplannedVisits(sessionId ?? "");
+  // so only one network request runs per polling cycle.
+  const { data: unplannedData } = useUnplannedVisits(sessionId);
   const liveVisitedSet = useMemo(
     () => new Set(unplannedData?.planned_visited_codes ?? []),
     [unplannedData?.planned_visited_codes],
   );
 
-  // ---- Pre-init view ----
-  if (!sessionId) {
-    return <SessionInit onSessionCreated={handleSessionCreated} />;
-  }
-
-  // ---- Active session ----
   return (
     <div className="space-y-6">
       {/* Context strip */}
       <ContextStrip
         items={[
           { label: "Route", value: <Badge variant="info">{routeCode}</Badge> },
-          { label: "Date", value: <Badge variant="neutral">{date}</Badge> },
+          { label: "Date", value: <Badge variant="neutral">{fmtDate(date)}</Badge> },
           {
             label: "Progress",
             value: (
@@ -217,29 +238,24 @@ export default function LiveSessionTab() {
         ]}
         actions={
           <>
+            {extraActions}
             {saved && <span className="text-caption text-success-700 font-medium">Saved</span>}
             {saveErr && <span className="text-caption text-danger-600">{saveErr}</span>}
-            <Button
-              variant="primary"
-              size="sm"
-              loading={saving}
-              disabled={saved || totals.visitedCount === 0}
-              onClick={handleSave}
-            >
-              Save session
-            </Button>
-            <Button
-              variant="ghost"
-              size="sm"
-              onClick={() => {
-                setSessionId(null);
-                setSessionData(null);
-                setVisits({});
-                setSaved(false);
-              }}
-            >
-              New session
-            </Button>
+            {saved && onPickAnotherRoute ? (
+              <Button variant="primary" size="sm" onClick={onPickAnotherRoute}>
+                Pick another route →
+              </Button>
+            ) : (
+              <Button
+                variant="primary"
+                size="sm"
+                loading={saving}
+                disabled={saved || totals.visitedCount === 0}
+                onClick={handleSave}
+              >
+                Save session
+              </Button>
+            )}
           </>
         }
       />
@@ -266,33 +282,71 @@ export default function LiveSessionTab() {
       <VisitsTabs
         sessionId={sessionId}
         plannedCount={customers.length}
-        renderPlanned={() => (
-          <div className="space-y-2">
-            {customers.map((c) => (
-              <CustomerVisit
-                key={c.customerCode}
-                sessionId={sessionId}
-                routeCode={routeCode}
-                date={date}
-                customerCode={c.customerCode}
-                customerName={c.customerName}
-                items={c.items}
-                liveVisited={liveVisitedSet.has(c.customerCode)}
-                onVisitComplete={(result) => handleVisitComplete(c, result)}
-                onRequestAnalysis={(payload) =>
-                  setCustCtx({
-                    customerCode: payload.customerCode,
-                    customerName: payload.customerName,
-                    routeCode,
-                    date,
-                    items: payload.items,
-                    score: payload.score,
-                  })
-                }
-              />
-            ))}
-          </div>
-        )}
+        renderPlanned={() => {
+          const selected = selectedCustomerCode
+            ? customers.find((c) => c.customerCode === selectedCustomerCode)
+            : null;
+
+          if (selected) {
+            return (
+              <div className="space-y-3">
+                <Button
+                  variant="ghost"
+                  size="sm"
+                  onClick={() => setSelectedCustomerCode(null)}
+                >
+                  ← Back to customers
+                </Button>
+                <CustomerVisit
+                  sessionId={sessionId}
+                  routeCode={routeCode}
+                  date={date}
+                  customerCode={selected.customerCode}
+                  customerName={selected.customerName}
+                  items={selected.items}
+                  liveVisited={liveVisitedSet.has(selected.customerCode)}
+                  onVisitComplete={(result) => handleVisitComplete(selected, result)}
+                  onRequestAnalysis={(payload) =>
+                    setCustCtx({
+                      customerCode: payload.customerCode,
+                      customerName: payload.customerName,
+                      routeCode,
+                      date,
+                      items: payload.items,
+                      score: payload.score,
+                    })
+                  }
+                />
+              </div>
+            );
+          }
+
+          const tiles: CustomerStat[] = customers.map((c) => {
+            const skus = new Set(c.items.map((it) => it.itemCode)).size;
+            const units = c.items.reduce((n, it) => n + (it.recommendedQty || 0), 0);
+            return {
+              customerCode: c.customerCode,
+              customerName: c.customerName,
+              uniqueSkus: skus,
+              totalUnits: units,
+              visited: visits[c.customerCode] != null,
+              liveVisited: liveVisitedSet.has(c.customerCode),
+            };
+          });
+
+          return (
+            <CustomerGrid
+              customers={tiles}
+              onSelect={setSelectedCustomerCode}
+              summary={
+                <>
+                  Pick a customer to record the visit — {customers.length} planned for{" "}
+                  <strong>{fmtDate(date)}</strong>
+                </>
+              }
+            />
+          );
+        }}
       />
 
       {/* Route review trigger -- available once at least one visit exists */}

@@ -4,9 +4,8 @@ export const ROUTES = {
   dashboard: "/",
   pipeline: "/pipeline",
   workflow: "/workflow",
-  workflowVanLoad: "/workflow/van-load",
-  workflowOrders: "/workflow/orders",
-  workflowSupervision: "/workflow/supervision",
+  workflowPlan: "/workflow/plan",
+  workflowVisit: "/workflow/visit",
 
   // Admin
   adminData: "/admin/data",
@@ -21,10 +20,12 @@ export const NAV_ITEMS = [
   { path: ROUTES.workflow, label: "Workflow", icon: "clipboard" },
 ] as const;
 
+// Two-step supervisor flow. Plan = pick a route and review its van load.
+// Visit = preview per-customer recommendations, then run the live session.
+// Order matters: the stepper renders left-to-right in this order.
 export const WORKFLOW_TABS = [
-  { path: ROUTES.workflowVanLoad, label: "Van Load", key: "van-load" },
-  { path: ROUTES.workflowOrders, label: "Recommended Orders", key: "orders" },
-  { path: ROUTES.workflowSupervision, label: "Supervision", key: "supervision" },
+  { path: ROUTES.workflowPlan, label: "Plan", key: "plan", subtitle: "Van load for the route" },
+  { path: ROUTES.workflowVisit, label: "Visit", key: "visit", subtitle: "Review recs, run the session" },
 ] as const;
 
 export const ADMIN_NAV_ITEMS = [
