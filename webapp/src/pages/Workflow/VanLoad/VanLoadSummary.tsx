@@ -1,7 +1,13 @@
 import { useMemo } from "react";
 import MetricCard from "@/components/charts/MetricCard";
 
-import { fmtNum, fmtCurrency, toNum, AT_RISK_CONFIDENCE } from "@/lib/format";
+import {
+  fmtNum,
+  fmtCurrency,
+  toNum,
+  AT_RISK_CONFIDENCE,
+  hasRealConfidence,
+} from "@/lib/format";
 
 interface Props {
   rows: Record<string, unknown>[];
@@ -29,8 +35,13 @@ export default function VanLoadSummary({ rows }: Props) {
         revenue += predicted * price;
       }
 
+      // Only score "risky" on items whose model produces a real
+      // probability -- smooth/erratic emit synthetic 0/1 fallbacks
+      // that would skew the count.
       const p = toNum(r.p_demand);
-      if (p != null && p < AT_RISK_CONFIDENCE) atRisk += 1;
+      if (p != null && hasRealConfidence(r.class as string | undefined) && p < AT_RISK_CONFIDENCE) {
+        atRisk += 1;
+      }
     });
 
     return {

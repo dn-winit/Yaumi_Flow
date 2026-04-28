@@ -77,7 +77,13 @@ class RecommendationStore:
         return bool(list(self._dir.glob(f"recommendations_{date}_*.csv")))
 
     def exists_batch(self, date: str, route_codes: List[str]) -> Dict[str, bool]:
-        return {rc: self._path(date, rc).exists() for rc in route_codes}
+        # One glob beats N stat() calls -- builds the present-routes set
+        # once, then a dict comprehension over the requested codes.
+        present = {
+            p.stem.rsplit("_", 1)[-1]
+            for p in self._dir.glob(f"recommendations_{date}_*.csv")
+        }
+        return {rc: rc in present for rc in route_codes}
 
     # ------------------------------------------------------------------
     # Info (used by the /info/{date} endpoint)

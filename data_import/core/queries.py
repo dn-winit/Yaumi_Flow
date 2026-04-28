@@ -46,7 +46,7 @@ class QueryBuilder:
                 s.ItemName,
                 s.CategoryCode,
                 s.CategoryName,
-                SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END) AS TotalQuantity,
+                CEILING(SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END)) AS TotalQuantity,
                 ROUND(AVG(s.UnitPrice), 2) AS AvgUnitPrice
             FROM {self._s.sales_view} s WITH (NOLOCK)
             WHERE s.ItemType  = 'OrderItem'
@@ -173,7 +173,7 @@ class QueryBuilder:
                 s.ItemCode,
                 s.ItemName,
                 s.CategoryName,
-                SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END) AS TotalQuantity,
+                CEILING(SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END)) AS TotalQuantity,
                 ROUND(AVG(s.UnitPrice), 2) AS AvgUnitPrice
             FROM {self._s.sales_view} s WITH (NOLOCK)
             WHERE s.ItemType  = 'OrderItem'

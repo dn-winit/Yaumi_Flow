@@ -456,6 +456,25 @@ evaluation:
       # class-wide offset (and classes with no rows fall back to global).
       # Keep this above ~5 so the per-pair empirical quantile is stable.
       min_samples_per_pair: 8
+      # After per-pair offsets are computed, audit how often actuals land
+      # inside the calibrated band on the held-out test slice -- per
+      # demand class. If a class under-covers (observed < target -
+      # convergence_pp), scale all that class's offsets up by
+      # target/observed (clamped to [scale_floor, scale_ceiling]) and
+      # re-measure. Stops after max_iterations or when every class is
+      # within convergence_pp of target. Enforces the ``target_coverage``
+      # promise that raw conformal alone often misses (LightGBM quantile
+      # bands trained on val don't always generalise to test, especially
+      # for erratic / lumpy demand). Disable by setting ``enabled: false``.
+      coverage_audit:
+        enabled: true
+        max_iterations: 3
+        convergence_pp: 2.0
+        # Per-iteration safety cap on the additive widening any one
+        # class can receive. Bounds runaway behaviour if the holdout
+        # has heavy outliers; raise if your demand units are very large
+        # (the unit is the same as the target column).
+        max_shift_per_iter: 50.0
 
 inference:
   forecast_horizon: 30

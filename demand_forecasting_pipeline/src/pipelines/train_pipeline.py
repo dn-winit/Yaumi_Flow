@@ -6,7 +6,9 @@ import pandas as pd
 
 from ..utils.config_loader import ensure_dirs, load_config, resolve_dtypes
 from ..utils.logger import get_logger
-from ..utils.io_utils import save_json, save_pickle, save_dataframe, pair_mask
+from ..utils.io_utils import (
+    ceil_int_columns, save_json, save_pickle, save_dataframe, pair_mask,
+)
 from ..utils.time_utils import period_offset, build_date_range
 from ..data_processing.loader import load_raw
 from ..data_processing.aggregator import build_panel
@@ -913,7 +915,30 @@ def run_training(config_path, on_step=None):
                 # BEFORE the lo<=hi guard, so the guard catches any residual
                 # inversion from a pathological negative offset.
                 if conformal_offsets_df is not None and not conformal_offsets_df.empty:
-                    from ..evaluation.conformal import apply_pair_offsets
+                    from ..evaluation.conformal import apply_pair_offsets, calibrate_to_target_coverage
+                    audit_cfg = (conformal_cfg or {}).get("coverage_audit", {}) or {}
+                    if bool(audit_cfg.get("enabled", True)) and "class" in final_test_pred.columns:
+                        conformal_offsets_df, audit_log = calibrate_to_target_coverage(
+                            conformal_offsets_df,
+                            final_test_pred,
+                            group_keys=group_keys,
+                            target_col=target_col,
+                            target_coverage=target_coverage,
+                            max_iterations=int(audit_cfg.get("max_iterations", 3)),
+                            convergence_pp=float(audit_cfg.get("convergence_pp", 2.0)),
+                            max_shift_per_iter=float(audit_cfg.get("max_shift_per_iter", 50.0)),
+                        )
+                        if audit_log:
+                            artifacts["conformal_coverage_audit"] = audit_log
+                            final = audit_log[-1]
+                            logger.info(
+                                "Conformal coverage after %d iteration(s): %s",
+                                final["iteration"], final["coverage"],
+                            )
+                            save_dataframe(
+                                conformal_offsets_df,
+                                os.path.join(cfg["paths"]["artifacts_dir"], "conformal_offsets.csv"),
+                            )
                     final_test_pred = apply_pair_offsets(
                         final_test_pred, conformal_offsets_df, group_keys=group_keys,
                     )
@@ -945,6 +970,13 @@ def run_training(config_path, on_step=None):
                     pred = final_test_pred["prediction"]
                     final_test_pred["q_10"] = pd.concat([raw_q10, raw_q90, pred], axis=1).min(axis=1)
                     final_test_pred["q_90"] = pd.concat([raw_q10, raw_q90, pred], axis=1).max(axis=1)
+    # Quantities ship as physical units -- ceiling at the source so every
+    # downstream reader (drift, drawer, /summary) sees ints without
+    # having to re-round.
+    ceil_int_columns(
+        final_test_pred,
+        (target_col, "prediction", "qty_if_demand", "q_10", "q_90"),
+    )
     save_dataframe(final_test_pred, os.path.join(cfg["paths"]["predictions_dir"], "test_predictions.csv"))
 
     # Audit snapshot of training-time composite accuracy. UI tiles still

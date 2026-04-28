@@ -132,13 +132,31 @@ def cache_size() -> int:
         return len(_CACHE)
 
 
+_MTIME_CACHE: dict[str, tuple[float, float]] = {}
+_MTIME_CACHE_TTL = 1.0  # seconds -- collapses N stats within a single
+                        # generation run into one filesystem touch.
+
+
 def _csv_mtime(settings: Optional[Settings] = None) -> float:
-    """Max mtime of the source CSVs -- any refresh invalidates cache."""
+    """Max mtime of the source CSVs -- any refresh invalidates cache.
+
+    Memoised at 1-second TTL so a single ``/generate`` request that
+    iterates 50+ routes doesn't stat the same three CSVs 50+ times.
+    The TTL keeps cross-request invalidation responsive (next refresh
+    cycle picks up new files within a second).
+    """
     s = settings or get_settings()
+    cache_key = s.shared_data_dir
+    now = time.time()
+    cached = _MTIME_CACHE.get(cache_key)
+    if cached and (now - cached[0]) < _MTIME_CACHE_TTL:
+        return cached[1]
     d = Path(s.shared_data_dir)
     files = [d / s.customer_data_file, d / s.demand_forecast_file, d / s.journey_plan_file]
     mtimes = [p.stat().st_mtime for p in files if p.exists()]
-    return max(mtimes) if mtimes else 0.0
+    value = max(mtimes) if mtimes else 0.0
+    _MTIME_CACHE[cache_key] = (now, value)
+    return value
 
 
 # ---------------------------------------------------------------------------

@@ -91,15 +91,15 @@ def _generate_daily(settings: Settings | None = None) -> None:
 
 
 def _refresh_data() -> None:
-    """Incremental refresh of cached data from databases (03:00 Dubai).
+    """Reload data from the shared CSVs (03:00 Dubai).
 
-    Pulls only new dates since the last successful refresh and prunes rows
-    outside the lookback window. Falls back to full refresh if cache is empty.
+    data_import owns the database refresh; this job only re-reads the CSVs
+    once they're current so the in-memory frames pick up the new rows.
     """
     from recommended_order.api.dependencies import get_data_manager
 
-    logger.info("[cron] Incremental data refresh starting")
-    result = get_data_manager().refresh_incremental()
+    logger.info("[cron] Data refresh starting")
+    result = get_data_manager().refresh()
     # Sprint-1: drop cached per-route calibration so next generate recomputes
     try:
         from recommended_order.core.calibration import invalidate_cache

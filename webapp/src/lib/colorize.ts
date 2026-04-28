@@ -36,10 +36,14 @@ export const accuracyTone = (pct: number | null | undefined): Tone => {
   return "danger";
 };
 
-/** Confidence score: 0..1, higher is better. */
+/** Confidence score: 0..1, higher is better.
+ *  Breakpoints come from format.ts so the badge and the "Risky items"
+ *  KPI tile share one source of truth. */
+import { AT_RISK_CONFIDENCE, STRONG_CONFIDENCE } from "./format";
+
 export const confidenceTone = (value: number | null | undefined): Tone =>
   toneFromValue(value, [
-    [0.7, "danger"],
-    [0.9, "warning"],
-    [1,   "success"],
+    [AT_RISK_CONFIDENCE, "danger"],
+    [STRONG_CONFIDENCE, "warning"],
+    [1, "success"],
   ]);

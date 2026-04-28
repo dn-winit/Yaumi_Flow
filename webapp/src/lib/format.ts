@@ -33,15 +33,34 @@ export function fmtCurrency(v: unknown): string {
 }
 
 /**
- * Shared thresholds used across score displays.
- * - GOOD_SCORE_THRESHOLD: percentage cut-off above which a score is treated as
- *   "good" (green/up trend). Used by dashboard KPI tiles, live-session metrics
- *   and accuracy drawers so the visual language stays consistent.
- * - AT_RISK_CONFIDENCE: cycle-confidence floor below which a customer is
- *   surfaced as "at risk" of churn in the risk panels.
+ * Shared score thresholds. All consumers (KPI tiles, badges, risk panels,
+ * confidence chips) read from these so a change here flips every surface
+ * in lockstep.
+ *  - GOOD_SCORE_THRESHOLD: % cut-off for "good" score colouring.
+ *  - AT_RISK_CONFIDENCE:    p_demand floor below which an item is "risky".
+ *  - STRONG_CONFIDENCE:     p_demand floor for the green confidence chip.
+ *
+ * The two confidence values are also the danger / warning breakpoints
+ * the ConfidenceBadge uses, so badge colour and "Risky items" tile
+ * cannot disagree about what counts as low confidence.
+ *
+ * Demand classes that produce a real probability (two-stage models).
+ * Smooth and erratic models emit a binary 0/1 fallback that should not
+ * be rendered as a real percentage -- the badge hides itself for them.
  */
 export const GOOD_SCORE_THRESHOLD = 75;
 export const AT_RISK_CONFIDENCE = 0.7;
+export const STRONG_CONFIDENCE = 0.9;
+export const PROBABILISTIC_DEMAND_CLASSES: ReadonlySet<string> = new Set([
+  "intermittent",
+  "lumpy",
+]);
+
+/** True when the row's class produces a real p_demand (vs synthetic 0/1). */
+export function hasRealConfidence(demandClass: string | null | undefined): boolean {
+  if (demandClass == null) return false;
+  return PROBABILISTIC_DEMAND_CLASSES.has(String(demandClass).trim().toLowerCase());
+}
 
 /**
  * Van-load accuracy thresholds used on the Past-analysis drawer.

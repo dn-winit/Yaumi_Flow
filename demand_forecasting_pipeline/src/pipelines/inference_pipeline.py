@@ -38,7 +38,9 @@ from ..data_processing.validator import validate_input
 from ..feature_engineering.builder import build_features
 from ..models.ensemble import weighted_average_ensemble
 from ..utils.config_loader import ensure_dirs, load_config, resolve_dtypes
-from ..utils.io_utils import ensure_tuple, load_json, load_pickle, pair_mask, save_dataframe
+from ..utils.io_utils import (
+    ceil_int_columns, ensure_tuple, load_json, load_pickle, pair_mask, save_dataframe,
+)
 from ..utils.logger import get_logger
 from ..utils.time_utils import build_date_range, period_offset
 
@@ -538,6 +540,10 @@ def run_inference(config_path, on_step=None):
             expl = pd.read_csv(expl_path, dtype=dtypes)
             forecast = forecast.merge(expl, on=group_keys, how="left", suffixes=("", "_expl"))
 
+    # Quantities ship as physical units. Ceiling once at the source so
+    # every downstream reader (DbPusher, data_import merge, UI tiles)
+    # sees ints without each having to re-round.
+    ceil_int_columns(forecast, ("prediction", "qty_if_demand", "q_10", "q_90"))
     save_dataframe(forecast, os.path.join(cfg["paths"]["predictions_dir"], "future_forecast.csv"))
     _step("inference", "completed")
     logger.info("Inference complete: %d rows", len(forecast))

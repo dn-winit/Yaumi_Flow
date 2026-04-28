@@ -99,7 +99,7 @@ class AdoptionService:
         # that recs and sales should be filtered to. Both empty -> None
         # (no filter). Done once per request -- the result is reused by
         # both loaders so they always see the same scope.
-        item_filter = self._resolve_item_set(category_codes, item_codes)
+        item_filter = self._resolve_item_set(category_codes, item_codes, route_code)
         if item_filter is not None and not item_filter:
             return self._empty_response(
                 start_date, end_date,
@@ -135,10 +135,11 @@ class AdoptionService:
             "by_tier": self._by_tier(merged),
         }
 
-    def _resolve_item_set(
+    def _resolve_item_set(  # noqa: D401 -- signature widened, see body
         self,
         category_codes: tuple,
         item_codes: tuple,
+        route_code: Optional[str] = None,
     ) -> Optional[set]:
         """Translate (categories, items) filter into a flat ItemCode set.
 
@@ -154,7 +155,10 @@ class AdoptionService:
 
         if category_codes:
             cats = set(map(str, category_codes))
-            sales_all = self._dm.get_customer_data(None)
+            # Prefilter to the active route when the request is route-
+            # scoped -- avoids loading the corpus-wide customer frame
+            # just to expand a category list.
+            sales_all = self._dm.get_customer_data(route_code)
             if sales_all.empty or "CategoryName" not in sales_all.columns:
                 # No way to expand category -> item; if explicit items also
                 # absent, treat as "no match" rather than "no filter".

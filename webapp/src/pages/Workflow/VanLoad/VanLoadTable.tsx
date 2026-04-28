@@ -39,7 +39,12 @@ export default function VanLoadTable({ rows }: Props) {
     {
       key: "Confidence",
       label: "Chance of selling",
-      render: (r: Row) => <ConfidenceBadge value={toNum(r.p_demand)} />,
+      render: (r: Row) => (
+        <ConfidenceBadge
+          value={toNum(r.p_demand)}
+          demandClass={r.class as string | undefined}
+        />
+      ),
     },
     {
       key: "Range",
