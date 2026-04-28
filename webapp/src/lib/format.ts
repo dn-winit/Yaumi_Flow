@@ -32,14 +32,6 @@ export function fmtCurrency(v: unknown): string {
   return `AED ${n.toFixed(2)}`;
 }
 
-/** Format a percentage delta as e.g. "+12.3%" / "-4.5%" with tone classification. */
-export function fmtDelta(pct: number | null | undefined): { text: string; tone: "up" | "down" | "flat" } {
-  if (pct == null) return { text: "no baseline", tone: "flat" };
-  const sign = pct > 0 ? "+" : "";
-  const tone = pct > 0.5 ? "up" : pct < -0.5 ? "down" : "flat";
-  return { text: `${sign}${pct.toFixed(1)}%`, tone };
-}
-
 /**
  * Shared thresholds used across score displays.
  * - GOOD_SCORE_THRESHOLD: percentage cut-off above which a score is treated as
@@ -52,11 +44,12 @@ export const GOOD_SCORE_THRESHOLD = 75;
 export const AT_RISK_CONFIDENCE = 0.7;
 
 /**
- * Van-load accuracy thresholds used on the Last-30-Days drawer.
- * Kept here so every tile + tooltip reads from the same place.
+ * Van-load accuracy thresholds used on the Past-analysis drawer.
  *  - TOLERANCE_PCT: a day is "on target" when |predicted - actual| / actual is
- *    within this fraction. 20% mirrors the supervision perfect-zone ±20% band.
- *  - LEAKAGE_SHARE_WARN: an item's 30-day volume must exceed this share of
+ *    within this fraction. 20% mirrors the supervision perfect-zone ±20% band
+ *    AND the recommended_order adoption tolerance (kept aligned manually since
+ *    Python and TS can't share a single source).
+ *  - LEAKAGE_SHARE_WARN: an item's window volume must exceed this share of
  *    route totals before it's eligible for the "most accurate item" highlight
  *    (keeps a 1-unit SKU from hijacking the strip).
  */
@@ -64,25 +57,15 @@ export const TOLERANCE_PCT = 0.2;
 export const LEAKAGE_SHARE_WARN = 0.05;
 
 /**
- * Recommendation-adoption thresholds (used in the Last-30-Days drawers).
+ * Recommendation-adoption thresholds.
  *  - DELIVERY_GOOD: green when volume/revenue delivered >= this % of recommended.
- *  - TREND_STEP_PP: percentage-point change that counts as improving/declining;
- *    smaller deltas are shown as "stable".
  *  - ON_TARGET_GOOD_RATIO / ON_TARGET_POOR_RATIO: arrow direction on the
  *    "On-target days" tile -- up when at least this share of scored days
  *    landed within tolerance, down when below the poor cutoff.
  */
 export const DELIVERY_GOOD = 80;
-export const TREND_STEP_PP = 2;
 export const ON_TARGET_GOOD_RATIO = 0.7;
 export const ON_TARGET_POOR_RATIO = 0.4;
-
-/**
- * Shared Last-30-Days window size. Both the Adoption drawer and VanLoad
- * accuracy drawer query the same span, so they import the same constant.
- * Changing here updates both dashboards + their context-bar labels.
- */
-export const LAST_30_DAYS = 30;
 
 /**
  * Reporting-period options for the Dashboard page. A "working day" is any

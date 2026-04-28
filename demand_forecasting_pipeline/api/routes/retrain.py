@@ -14,6 +14,10 @@ from demand_forecasting_pipeline.api.dependencies import (
     get_artifact_service,
     get_retrain_config,
 )
+from demand_forecasting_pipeline.api.schemas import (
+    RetrainConfigResponse,
+    RetrainHistoryResponse,
+)
 from demand_forecasting_pipeline.services.accuracy_service import AccuracyService
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
 from demand_forecasting_pipeline.services.retrain_scheduler import (
@@ -30,7 +34,7 @@ class RetrainConfigUpdate(BaseModel):
     auto_inference_after_train: Optional[bool] = None
 
 
-@router.get("/config")
+@router.get("/config", response_model=RetrainConfigResponse)
 def get_config(
     cfg: AutoRetrainConfig = Depends(get_retrain_config),
     artifact_svc: ArtifactService = Depends(get_artifact_service),
@@ -39,23 +43,29 @@ def get_config(
     """Return current retrain config plus live drift status."""
     data = cfg.get()
     drift = compute_drift_status(artifact_svc, accuracy_svc)
-    return {**data, "drift": drift}
+    return RetrainConfigResponse(**data, drift=drift)
 
 
-@router.post("/config")
+@router.post("/config", response_model=RetrainConfigResponse)
 def update_config(
     body: RetrainConfigUpdate,
     cfg: AutoRetrainConfig = Depends(get_retrain_config),
+    artifact_svc: ArtifactService = Depends(get_artifact_service),
+    accuracy_svc: AccuracyService = Depends(get_accuracy_service),
 ):
-    """Update retrain settings (partial update)."""
-    return cfg.update_settings(
+    """Update retrain settings (partial update). Returns the same envelope
+    as GET /config so the frontend can swap state in one round-trip."""
+    cfg.update_settings(
         enabled=body.enabled,
         frequency_days=body.frequency_days,
         auto_inference_after_train=body.auto_inference_after_train,
     )
+    data = cfg.get()
+    drift = compute_drift_status(artifact_svc, accuracy_svc)
+    return RetrainConfigResponse(**data, drift=drift)
 
 
-@router.get("/history")
+@router.get("/history", response_model=RetrainHistoryResponse)
 def get_history(cfg: AutoRetrainConfig = Depends(get_retrain_config)):
     """Return retrain history array."""
-    return cfg.get().get("history", [])
+    return RetrainHistoryResponse(history=cfg.get().get("history", []))

@@ -7,6 +7,9 @@ consumer and was dropped to keep the surface minimal.
 
 from __future__ import annotations
 
+import time
+from collections import OrderedDict
+
 from fastapi import APIRouter, Depends
 
 from sales_supervision.api.dependencies import (
@@ -18,7 +21,9 @@ from sales_supervision.api.dependencies import (
 from sales_supervision.api.schemas import (
     InitSessionRequest,
     ProcessVisitRequest,
+    SaveSessionResponse,
     SessionResponse,
+    UnplannedVisitsResponse,
     VisitResponse,
 )
 from sales_supervision.core.session import SessionManager
@@ -28,10 +33,54 @@ from sales_supervision.services.storage.store import SessionStore
 
 router = APIRouter(prefix="/session", tags=["session"])
 
-# In-memory active sessions, keyed by session_id. Entries are dropped
-# when /save-active completes so a long-lived process won't accumulate
-# completed sessions.
-_sessions: dict = {}
+
+# In-memory active sessions, keyed by session_id. Without a save the
+# entry would otherwise live forever in a long-running process and leak
+# memory. We cap the registry and evict the least-recently-used entry
+# whenever the cap is hit, plus drop entries idle past _SESSION_TTL_S so
+# abandoned visits are reclaimed automatically.
+_SESSION_REGISTRY_MAX = 256
+_SESSION_TTL_S = 8 * 60 * 60  # 8 hours -- one supervisor day
+
+
+class _SessionRegistry:
+    """LRU + TTL store for in-flight supervision sessions."""
+
+    def __init__(self, maxsize: int, ttl_seconds: int) -> None:
+        self._maxsize = maxsize
+        self._ttl = ttl_seconds
+        self._items: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
+
+    def _sweep(self) -> None:
+        cutoff = time.time() - self._ttl
+        stale = [sid for sid, (ts, _) in self._items.items() if ts < cutoff]
+        for sid in stale:
+            self._items.pop(sid, None)
+
+    def set(self, session_id: str, session: object) -> None:
+        self._sweep()
+        self._items[session_id] = (time.time(), session)
+        self._items.move_to_end(session_id)
+        while len(self._items) > self._maxsize:
+            self._items.popitem(last=False)
+
+    def get(self, session_id: str):
+        self._sweep()
+        entry = self._items.get(session_id)
+        if entry is None:
+            return None
+        ts, session = entry
+        # Refresh access time so an actively-used session does not get
+        # evicted purely because it was created early in the day.
+        self._items[session_id] = (time.time(), session)
+        self._items.move_to_end(session_id)
+        return session
+
+    def pop(self, session_id: str) -> None:
+        self._items.pop(session_id, None)
+
+
+_sessions = _SessionRegistry(_SESSION_REGISTRY_MAX, _SESSION_TTL_S)
 
 
 @router.post("/initialize", response_model=SessionResponse)
@@ -40,7 +89,7 @@ def initialize_session(
     mgr: SessionManager = Depends(get_session_manager),
 ):
     session = mgr.create_session(req.route_code, req.date, req.recommendations)
-    _sessions[session.session_id] = session
+    _sessions.set(session.session_id, session)
     return SessionResponse(success=True, session=session.summary())
 
 
@@ -81,7 +130,7 @@ def process_visit(
     return VisitResponse(success=True, visit=payload)
 
 
-@router.post("/save-active")
+@router.post("/save-active", response_model=SaveSessionResponse)
 def save_active_session(
     session_id: str,
     mgr: SessionManager = Depends(get_session_manager),
@@ -99,37 +148,39 @@ def save_active_session(
     """
     session = _sessions.get(session_id)
     if session is None:
-        return {"success": False, "error": f"Session {session_id} not found"}
+        return SaveSessionResponse(
+            success=False, db_ok=False,
+            error=f"Session {session_id} not found",
+        )
 
     mgr.close_session(session)
     data = session.to_dict()
 
     file_result = store.save(data)
     if not file_result.get("success"):
-        return {
-            "success": False,
-            "error": file_result.get("error", "File save failed"),
-            "file": file_result,
-            "db": None,
-        }
+        return SaveSessionResponse(
+            success=False, db_ok=False,
+            error=file_result.get("error", "File save failed"),
+            file=file_result,
+        )
 
     db_result = db_saver.save_session(data) if db_saver.available else None
     db_ok = db_result is None or db_result.get("success", False)
 
-    _sessions.pop(session_id, None)
-    return {
-        "success": True,
-        "db_ok": db_ok,
-        "warning": (
+    _sessions.pop(session_id)
+    return SaveSessionResponse(
+        success=True,
+        db_ok=db_ok,
+        warning=(
             None if db_ok
             else f"Session saved to disk but DB write failed: {db_result.get('error', 'unknown')}"
         ),
-        "file": file_result,
-        "db": db_result,
-    }
+        file=file_result,
+        db=db_result,
+    )
 
 
-@router.get("/unplanned/{session_id}")
+@router.get("/unplanned/{session_id}", response_model=UnplannedVisitsResponse)
 def get_unplanned_visits(
     session_id: str,
     live: LiveActualsClient = Depends(get_live_actuals),
@@ -141,7 +192,10 @@ def get_unplanned_visits(
     """
     session = _sessions.get(session_id)
     if session is None:
-        return {"success": False, "error": f"Session {session_id} not found", "customers": []}
+        return UnplannedVisitsResponse(
+            success=False,
+            error=f"Session {session_id} not found",
+        )
 
     planned = {str(c).strip() for c in session.customers.keys()}
     visitors = live.get_route_sales(session.route_code, session.date)
@@ -159,13 +213,13 @@ def get_unplanned_visits(
             unplanned.append(v)
     unplanned.sort(key=lambda v: v.get("total_qty", 0), reverse=True)
 
-    return {
-        "success": True,
-        "route_code": session.route_code,
-        "date": session.date,
-        "planned_count": len(planned),
-        "live_count": len(visitors),
-        "unplanned_count": len(unplanned),
-        "planned_visited_codes": planned_visited,
-        "customers": unplanned,
-    }
+    return UnplannedVisitsResponse(
+        success=True,
+        route_code=session.route_code,
+        date=session.date,
+        planned_count=len(planned),
+        live_count=len(visitors),
+        unplanned_count=len(unplanned),
+        planned_visited_codes=planned_visited,
+        customers=unplanned,
+    )

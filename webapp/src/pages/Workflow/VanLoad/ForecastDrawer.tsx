@@ -94,7 +94,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
     { key: "ItemCode", label: "Item", render: (r: Row) => String(r.ItemCode ?? "-") },
     {
       key: "Predicted",
-      label: "Recommended qty",
+      label: "Units to load",
       render: (r: Row) => <PredictedValue row={r} value={toNum(r.prediction)} />,
     },
     {
@@ -120,7 +120,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
       : `from ${fmtDate(today)}`;
 
   return (
-    <Drawer open={open} onClose={onClose} title="Upcoming van load" width="xl">
+    <Drawer open={open} onClose={onClose} title="Upcoming plan — van load" width="xl">
       <div className="space-y-6">
         <DrawerContextBar
           routeCode={routeCode}

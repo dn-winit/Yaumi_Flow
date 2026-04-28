@@ -26,6 +26,7 @@ from recommended_order.services.adoption_service import AdoptionService
 from recommended_order.services.planning_service import PlanningService
 from recommended_order.services.db_pusher import DbPusher
 from recommended_order.api.schemas import (
+    AdoptionResponse,
     EmptyRouteCustomer,
     EmptyRouteDiagnosis,
     FilterOptionsResponse,
@@ -35,6 +36,7 @@ from recommended_order.api.schemas import (
     RecommendationSummaryResponse,
     RetrieveRequest,
     RetrieveResponse,
+    UpcomingPlanResponse,
 )
 from recommended_order.config.constants import SafetyClamps
 from recommended_order.config.settings import get_settings
@@ -648,7 +650,7 @@ def get_recommendations(
 # ------------------------------------------------------------------
 
 
-@router.get("/analytics/adoption")
+@router.get("/analytics/adoption", response_model=AdoptionResponse)
 def adoption(
     start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
@@ -664,7 +666,7 @@ def adoption(
     return svc.get_adoption(start_date, end_date, route_code, category_codes, item_codes)
 
 
-@router.get("/analytics/upcoming")
+@router.get("/analytics/upcoming", response_model=UpcomingPlanResponse)
 def upcoming_plan(
     days: int = Query(default=7, ge=1, le=30),
     route_code: Optional[str] = Query(default=None),

@@ -10,6 +10,7 @@ from fastapi import APIRouter, Depends
 from llm_analytics.api.dependencies import get_analyzer
 from llm_analytics.api.schemas import (
     AnalysisResponse,
+    CacheClearResponse,
     CacheStatsResponse,
     CustomerAnalysisRequest,
     HealthResponse,
@@ -105,7 +106,7 @@ def cache_stats(analyzer: Analyzer = Depends(get_analyzer)):
     return CacheStatsResponse(**analyzer.cache_stats())
 
 
-@router.post("/cache/clear")
+@router.post("/cache/clear", response_model=CacheClearResponse)
 def clear_cache(analyzer: Analyzer = Depends(get_analyzer)):
     cleared = analyzer.clear_cache()
-    return {"success": True, "cleared": cleared}
+    return CacheClearResponse(success=True, cleared=cleared)

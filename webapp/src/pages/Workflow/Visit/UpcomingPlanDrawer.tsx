@@ -49,7 +49,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
   ];
 
   return (
-    <Drawer open={open} onClose={onClose} title="Upcoming Week Plan" width="xl">
+    <Drawer open={open} onClose={onClose} title="Upcoming plan — customer visits" width="xl">
       <div className="space-y-6">
         <DrawerContextBar
           routeCode={routeCode}

@@ -33,7 +33,7 @@ export default function VanLoadTable({ rows }: Props) {
     },
     {
       key: "Predicted",
-      label: "Recommended qty",
+      label: "Units to load",
       render: (r: Row) => <PredictedValue row={r} value={toNum(r.prediction)} />,
     },
     {

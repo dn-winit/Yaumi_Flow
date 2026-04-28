@@ -87,6 +87,21 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   );
   const s = data?.summary ?? null;
 
+  // Pad daily series to every working day in the lookback window so the
+  // X-axis never skips a day -- shared canonical list with the dashboard
+  // and the AccuracyDrawer.
+  const activeDates = w?.active_dates ?? [];
+  const dailyPadded = useMemo(() => {
+    const rows = data?.daily ?? [];
+    if (activeDates.length === 0) return rows;
+    const byDate = new Map<string, (typeof rows)[number]>();
+    for (const row of rows) byDate.set(row.date, row);
+    return activeDates.map((date) => {
+      const r = byDate.get(date);
+      return r ?? { date, recommended: 0, adopted: 0, adoption_pct: 0 };
+    });
+  }, [data?.daily, activeDates]);
+
   // All four tiles derive from the same backend summary snapshot.
   const derived = useMemo(() => {
     if (!s) return null;
@@ -147,7 +162,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       : "down";
 
   return (
-    <Drawer open={open} onClose={onClose} title="Past analysis — recommendation follow-through" width="xl">
+    <Drawer open={open} onClose={onClose} title="Past performance — what customers actually bought" width="xl">
       <div className="space-y-6">
         <DashboardFilterBar
           value={filters}
@@ -236,10 +251,10 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
             <HighlightsStrip items={highlights} />
 
             <div className="space-y-6">
-              {data.daily.length > 0 && (
+              {dailyPadded.length > 0 && (
                 <LineChart
                   title="Daily share of suggestions that sold"
-                  data={data.daily as unknown as Record<string, unknown>[]}
+                  data={dailyPadded as unknown as Record<string, unknown>[]}
                   xKey="date"
                   series={[{ key: "adoption_pct", label: "% sold", color: CHART_COLOR.success }]}
                   height={260}

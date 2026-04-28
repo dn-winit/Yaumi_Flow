@@ -11,7 +11,7 @@ import { CHART_COLOR } from "@/components/charts/theme";
 import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
-import { useForecastRows } from "@/hooks/useDataImport";
+import { useForecastRows, useLookbackWindow } from "@/hooks/useDataImport";
 import {
   fmtNum,
   fmtCurrency,
@@ -78,6 +78,12 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
     open,
   );
   const rows = (data?.rows ?? []) as ForecastRow[];
+
+  // Canonical working-day list for the lookback. Daily chart uses it as
+  // the X-axis so the same N-working-day window always shows N ticks --
+  // scope filters can no longer leave gaps in the trend.
+  const windowQ = useLookbackWindow(open ? lookback : undefined);
+  const activeDates = windowQ.data?.active_dates ?? [];
 
   // ----- Single-pass client-side stats (forecast-dimension identity:
   // demandServed + unsoldForecast = totalPredicted). -----
@@ -196,14 +202,21 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
       cur.actual += actual;
       map.set(d, cur);
     });
-    return Array.from(map.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, v]) => ({
+    // Pad against the canonical working-day list so the X-axis always
+    // shows every working day in the window. Falls back to the dates
+    // that have data if active_dates is still loading.
+    const axis = activeDates.length > 0
+      ? activeDates
+      : Array.from(map.keys()).sort();
+    return axis.map((date) => {
+      const v = map.get(date) ?? { predicted: 0, actual: 0 };
+      return {
         date,
         predicted: Number(v.predicted.toFixed(2)),
         actual: Number(v.actual.toFixed(2)),
-      }));
-  }, [rows]);
+      };
+    });
+  }, [rows, activeDates]);
 
   const itemVarianceChart = useMemo(() => {
     const byItem = new Map<string, { predicted: number; actual: number }>();
@@ -292,7 +305,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
     : "this period";
 
   return (
-    <Drawer open={open} onClose={onClose} title="Past analysis" width="xl">
+    <Drawer open={open} onClose={onClose} title="Past performance — forecast vs actual" width="xl">
       <div className="space-y-6">
         <DashboardFilterBar
           value={filters}

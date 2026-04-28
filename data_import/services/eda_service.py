@@ -9,7 +9,6 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
@@ -261,19 +260,28 @@ class EdaService:
 
     def _compute_lookback_window(self, canonical: str, n_working: int) -> Dict[str, Any]:
         df = self._load_sales_df()
+        empty = {
+            "available": False, "lookback": canonical, "working_days": 0,
+            "start_date": None, "end_date": None, "active_dates": [],
+        }
         if df.empty:
-            return {"available": False, "lookback": canonical, "working_days": 0,
-                    "start_date": None, "end_date": None}
+            return empty
         active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
         if not active_dates:
-            return {"available": False, "lookback": canonical, "working_days": 0,
-                    "start_date": None, "end_date": None}
+            return empty
+        # Ascending, ISO-formatted -- single source of truth for any
+        # daily chart that needs to render every working day in the
+        # window (chart axes pad to this list to avoid gap-skipping
+        # when scope filters strip a day's activity).
+        active_iso = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in active_dates]
+        active_iso.sort()
         return {
             "available": True,
             "lookback": canonical,
-            "working_days": len(active_dates),
-            "start_date": pd.Timestamp(active_dates[-1]).strftime("%Y-%m-%d"),
-            "end_date":   pd.Timestamp(active_dates[0]).strftime("%Y-%m-%d"),
+            "working_days": len(active_iso),
+            "start_date": active_iso[0],
+            "end_date":   active_iso[-1],
+            "active_dates": active_iso,
         }
 
     # ------------------------------------------------------------------
@@ -347,13 +355,20 @@ class EdaService:
         total_qty = float(df["TotalQuantity"].sum())
         total_rev = float(df["revenue"].sum())
 
+        # Reindex daily series to the full working-day window so the
+        # chart axis always shows N ticks for an N-working-day lookback,
+        # even when the filter scope strips activity from some days.
+        # Missing days surface as zero rather than as gaps.
+        full_dates = pd.DatetimeIndex(active_dates).normalize()
         daily = (
-            df.groupby(df["TrxDate"].dt.date)
+            df.groupby(df["TrxDate"].dt.normalize())
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
+            .reindex(full_dates, fill_value=0.0)
+            .sort_index()
             .reset_index()
-            .rename(columns={"TrxDate": "date"})
+            .rename(columns={"index": "date"})
         )
-        daily["date"] = daily["date"].astype(str)
+        daily["date"] = daily["date"].dt.strftime("%Y-%m-%d")
 
         top_routes = (
             df.groupby("RouteCode", as_index=False)
@@ -922,7 +937,11 @@ class EdaService:
             GROUP BY CustomerCode, ItemCode
         """
         try:
-            conn = pyodbc.connect(self._s.db.connection_string(), autocommit=False)
+            conn = pyodbc.connect(
+                self._s.db.connection_string(live=True), autocommit=False,
+                timeout=self._s.db.live_connection_timeout,
+            )
+            conn.timeout = self._s.db.live_query_timeout
             cursor = conn.cursor()
             cursor.execute(sql, (str(route_code), date))
             rows = cursor.fetchall()
@@ -971,7 +990,11 @@ class EdaService:
             GROUP BY ItemCode
         """
         try:
-            conn = pyodbc.connect(self._s.db.connection_string(), autocommit=False)
+            conn = pyodbc.connect(
+                self._s.db.connection_string(live=True), autocommit=False,
+                timeout=self._s.db.live_connection_timeout,
+            )
+            conn.timeout = self._s.db.live_query_timeout
             cursor = conn.cursor()
             cursor.execute(sql, (str(route_code), str(customer_code), date))
             rows = cursor.fetchall()
@@ -993,7 +1016,6 @@ class EdaService:
             "items": items,
             "fetched_at": pd.Timestamp.now().isoformat(),
         }
-
     def _cached_with_ttl(self, key: str, loader, *, ttl_seconds: int) -> Any:
         """Variant of ``_cached`` that overrides the default TTL for short-lived
         live queries (the main EDA cache is 24 h)."""

@@ -45,9 +45,9 @@ export default function VanLoadSummary({ rows }: Props) {
   return (
     <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
       <MetricCard
-        label="Van load"
+        label="Units to load"
         value={fmtNum(metrics.totalQty)}
-        subtitle="Units to carry today"
+        subtitle="Pieces to carry today"
       />
       <MetricCard
         label="Expected revenue"
@@ -55,9 +55,9 @@ export default function VanLoadSummary({ rows }: Props) {
         subtitle={metrics.hasRevenue ? "Units x unit price" : "No price data"}
       />
       <MetricCard
-        label="Items on van"
+        label="Different items"
         value={fmtNum(metrics.skus)}
-        subtitle="Different products"
+        subtitle="Distinct products on the van"
       />
       <MetricCard
         label="Risky items"

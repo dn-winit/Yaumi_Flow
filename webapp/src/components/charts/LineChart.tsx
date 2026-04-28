@@ -33,6 +33,14 @@ interface LineChartProps {
   title?: string;
   emptyMessage?: string;
   loading?: boolean;
+  /**
+   * Minimum horizontal width allocated per data point. When the chart
+   * width exceeds the container, the wrapper scrolls horizontally so
+   * every tick stays legible. Default 80px is wide enough for a
+   * `dd-mm-yyyy` label at the standard axis font size without crowding
+   * adjacent labels.
+   */
+  pxPerPoint?: number;
 }
 
 export default function LineChart({
@@ -43,6 +51,7 @@ export default function LineChart({
   title,
   emptyMessage = "No data",
   loading = false,
+  pxPerPoint = 80,
 }: LineChartProps) {
   if (loading) {
     return (
@@ -63,33 +72,48 @@ export default function LineChart({
       {data.length === 0 ? (
         <EmptyState title={emptyMessage} />
       ) : (
-        <ResponsiveContainer width="100%" height={height}>
-          <RechartsLineChart
-            data={data}
-            margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
-          >
-            <CartesianGrid {...GRID_PROPS} />
-            <XAxis dataKey={xKey} tickFormatter={fmtAxisDate} {...AXIS_PROPS} />
-            <YAxis {...AXIS_PROPS} />
-            <Tooltip {...TOOLTIP_PROPS} labelFormatter={fmtAxisDate} />
-            {series.length > 1 && <Legend wrapperStyle={{ fontSize: "0.875rem" }} />}
-            {series.map((s, idx) => {
-              const stroke = s.color ?? CHART_PALETTE[idx % CHART_PALETTE.length];
-              return (
-                <Line
-                  key={s.key}
-                  type="monotone"
-                  dataKey={s.key}
-                  name={s.label ?? s.key}
-                  stroke={stroke}
-                  strokeWidth={2}
-                  dot={{ r: 3, fill: stroke }}
-                  activeDot={{ r: 5 }}
+        <div className="overflow-x-auto">
+          <div style={{ minWidth: `${data.length * pxPerPoint}px` }}>
+            <ResponsiveContainer width="100%" height={height}>
+              <RechartsLineChart
+                data={data}
+                margin={{ top: 5, right: 20, left: 0, bottom: 12 }}
+              >
+                <CartesianGrid {...GRID_PROPS} />
+                {/* interval=0 + minTickGap=0 forces every working day
+                    to render. The wrapper's overflow-x-auto + minWidth
+                    guarantees each label has its own column, so labels
+                    never collide. */}
+                <XAxis
+                  dataKey={xKey}
+                  tickFormatter={fmtAxisDate}
+                  interval={0}
+                  minTickGap={0}
+                  tickMargin={8}
+                  {...AXIS_PROPS}
                 />
-              );
-            })}
-          </RechartsLineChart>
-        </ResponsiveContainer>
+                <YAxis {...AXIS_PROPS} />
+                <Tooltip {...TOOLTIP_PROPS} labelFormatter={fmtAxisDate} />
+                {series.length > 1 && <Legend wrapperStyle={{ fontSize: "0.875rem" }} />}
+                {series.map((s, idx) => {
+                  const stroke = s.color ?? CHART_PALETTE[idx % CHART_PALETTE.length];
+                  return (
+                    <Line
+                      key={s.key}
+                      type="monotone"
+                      dataKey={s.key}
+                      name={s.label ?? s.key}
+                      stroke={stroke}
+                      strokeWidth={2}
+                      dot={{ r: 3, fill: stroke }}
+                      activeDot={{ r: 5 }}
+                    />
+                  );
+                })}
+              </RechartsLineChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       )}
     </div>
   );

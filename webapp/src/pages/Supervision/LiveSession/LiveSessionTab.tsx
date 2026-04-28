@@ -276,7 +276,11 @@ export default function LiveSessionTab({
 
       {/* Metric row */}
       <KpiRow>
-        <MetricCard label="Unique items" value={fmtNum(totals.itemsCount)} subtitle={`${fmtNum(totals.totalUnits)} units to deliver`} />
+        <MetricCard
+          label="Different items"
+          value={fmtNum(totals.itemsCount)}
+          subtitle={`${fmtNum(totals.totalUnits)} units across all customers`}
+        />
         <MetricCard label="Customers planned" value={fmtNum(totals.custCount)} subtitle="On today's route" />
         <MetricCard
           label="Visited"
@@ -285,9 +289,9 @@ export default function LiveSessionTab({
           trend={allVisited ? "up" : undefined}
         />
         <MetricCard
-          label="Avg score"
+          label="Avg visit score"
           value={totals.avgScore != null ? `${totals.avgScore.toFixed(1)}%` : "--"}
-          subtitle={totals.avgScore != null ? "Visited customers" : "No visits yet"}
+          subtitle={totals.avgScore != null ? "Across visited customers" : "No visits yet"}
           trend={totals.avgScore != null && totals.avgScore >= GOOD_SCORE_THRESHOLD ? "up" : totals.avgScore != null ? "down" : undefined}
         />
       </KpiRow>

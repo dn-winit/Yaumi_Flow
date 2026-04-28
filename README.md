@@ -77,15 +77,15 @@ React 18 + TypeScript + Vite + Tailwind CSS v4
 - **Dashboard** — business KPIs, sales trends, forecast accuracy, lost-opportunity tile
 - **Forecasting** — pipeline status (train / inference / forecast / push), model metrics, auto-retrain config + drift
 - **Workflow** — two-step supervisor flow:
-  - **Plan** — warehouse-grouped route grid → click a route → Van Load detail (top-10 chart, items table, past-analysis + future-forecast drawers)
-  - **Visit** — reachable only from Plan's "Continue to Visit →"; auto-initialises a live supervision session with planned + unplanned customer tiles, per-customer recording, AI route review and pre-visit briefings
+  - **Plan** — warehouse-grouped route grid → click a route → Van Load detail (top-10 chart, items table, *Past performance* + *Upcoming plan* drawers)
+  - **Visit** — reachable only from Plan's "Continue to Visit →"; auto-initialises a live supervision session with planned + unplanned customer tiles, per-customer recording, AI route review and pre-visit briefings. Same *Past performance* / *Upcoming plan* drawer pair as Plan, so vocabulary stays unified across both steps.
 - **Admin** — data import status, LLM cache control
 
 ### Design system
 - Centralised design tokens (`src/theme/tokens.ts`) — Yaumi brand crimson + gold
 - Semantic Tailwind classes generated from tokens via `tailwind.config.ts`
 - Reusable primitives: Card, Badge, Button, Modal, Drawer, Tabs, Table, MetricCard, KpiRow, ContextStrip, HighlightsStrip, Skeleton, DatePicker, CommandPalette
-- Unified chart theming across LineChart, BarChart, HorizontalBarChart, PieChart with auto dd-mm-yyyy date-axis formatting
+- Unified chart theming across LineChart, BarChart, HorizontalBarChart, PieChart with auto dd-mm-yyyy date-axis formatting; daily charts pad to the lookback's `active_dates` and scroll horizontally when the window exceeds the container so every working day stays visible without label collision
 - All dates rendered as `dd-mm-yyyy` via `lib/date.ts#fmtDate`; backend transport stays canonical `yyyy-mm-dd`
 - Tiered React Query polling (`hooks/refresh.ts`): live 45s · pipeline 10s · dashboard 5m · windowed 10m · static 1h
 
@@ -231,7 +231,8 @@ forecast_new/
 - **Single DB reader** — only `data_import` queries YaumiLive; other services consume shared CSVs or call `data_import` via HTTP. Eliminates connection pool contention.
 - **File-based recommendation store** — one CSV per route-date. `DbPusher` replicates to YaumiAIML as a one-way sync. No dual-write race conditions.
 - **Data-driven calibration** — all recommendation thresholds (frequency floor, dormancy window, tier cuts, priority weights) are computed per-route from observed data. Zero hardcoded business numbers in the engine.
-- **WAPE over MAPE** — forecast accuracy uses weighted absolute percentage error, robust to demand spikes and low-volume days.
+- **WAPE over MAPE** — forecast accuracy uses weighted absolute percentage error, robust to demand spikes and low-volume days. The same `wape_summary()` helper is the single source of truth across the pipeline, drift detection, dashboard KPIs, and the Past-performance drawer — no parallel formulas can drift.
+- **Atomic DB writes** — every push (`recommended_order/db_pusher`, `demand_forecasting_pipeline/db_pusher`, `sales_supervision/db_saver`) runs DELETE+INSERT in a single transaction with try/finally + explicit rollback. Bulk writes carry `cursor.timeout` so a slow warehouse cannot hang the writer; reads use a separate live timeout pair on `data_import` so interactive supervisor calls stay snappy.
 - **Linear Plan → Visit flow** — Visit is reachable only after a route is picked in Plan (URL guard + disabled stepper step + gated keyboard shortcut). No accidental jumps into a stale-context session.
 - **One canonical date format** — every backend payload speaks `yyyy-mm-dd`; the UI funnels every rendered date through `lib/date.ts#fmtDate` so the user always sees `dd-mm-yyyy`. Charts auto-detect ISO ticks via `components/charts/formatters.ts`.
 - **Centralised request budgets** — `webapp/src/api/client.ts#TIMEOUTS` exposes `default` (30 s) and `heavy` (3 min) so every long-running mutation reads from the same constant.

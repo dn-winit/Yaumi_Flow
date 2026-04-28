@@ -159,3 +159,29 @@ class ForecastSummaryResponse(BaseModel):
     last_forecast_date: Optional[str] = None
     training_summary_exists: bool
     training_overview: Optional[Dict[str, Any]] = None
+
+
+# ------------------------------------------------------------------
+# Retrain config / history
+# ------------------------------------------------------------------
+
+class RetrainConfigResponse(BaseModel):
+    """Mirrors AutoRetrainConfig._data + the live drift assessment.
+
+    Field names match retrain_config.json on disk and the webapp's
+    `RetrainConfig` interface so the JSON round-trips through the API
+    without renaming.
+    """
+    enabled: bool = False
+    frequency_days: int = 14
+    auto_inference_after_train: bool = True
+    last_auto_retrain: Optional[str] = None
+    next_scheduled: Optional[str] = None
+    history: List[Dict[str, Any]] = Field(default_factory=list)
+    drift: Optional[Dict[str, Any]] = None
+
+    model_config = {"extra": "ignore"}
+
+
+class RetrainHistoryResponse(BaseModel):
+    history: List[Dict[str, Any]] = Field(default_factory=list)

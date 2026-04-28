@@ -128,10 +128,10 @@ function VisitSession({
         ← Back to Plan
       </Button>
       <Button variant="secondary" size="sm" onClick={() => setAdoptionOpen(true)}>
-        Last 30 days
+        Past performance
       </Button>
       <Button variant="secondary" size="sm" onClick={() => setUpcomingOpen(true)}>
-        Upcoming week
+        Upcoming plan
       </Button>
     </>
   );

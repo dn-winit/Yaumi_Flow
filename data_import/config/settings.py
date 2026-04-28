@@ -23,10 +23,17 @@ class _BaseDbSettings(BaseSettings):
     username: str = Field(default="")
     password: str = Field(default="")
     connection_timeout: int = Field(default=120, ge=10)
+    # Short connect timeout used by interactive live-sales queries served
+    # to the supervisor UI. The bulk import flow still uses the full
+    # connection_timeout above so a slow initial handshake during a
+    # nightly refresh does not abort.
+    live_connection_timeout: int = Field(default=10, ge=1)
+    live_query_timeout: int = Field(default=15, ge=1)
     retry_attempts: int = Field(default=3, ge=1)
     retry_delay: int = Field(default=2, ge=1)
 
-    def connection_string(self) -> str:
+    def connection_string(self, *, live: bool = False) -> str:
+        timeout = self.live_connection_timeout if live else self.connection_timeout
         return (
             f"DRIVER={self.driver};"
             f"SERVER={self.host},{self.port};"
@@ -34,7 +41,7 @@ class _BaseDbSettings(BaseSettings):
             f"UID={self.username};"
             f"PWD={self.password};"
             f"TrustServerCertificate=yes;"
-            f"Connection Timeout={self.connection_timeout};"
+            f"Connection Timeout={timeout};"
         )
 
 

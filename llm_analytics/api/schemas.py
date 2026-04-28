@@ -55,3 +55,8 @@ class CacheStatsResponse(BaseModel):
     misses: int
     hit_rate: float
     cached_entries: int
+
+
+class CacheClearResponse(BaseModel):
+    success: bool
+    cleared: int = 0

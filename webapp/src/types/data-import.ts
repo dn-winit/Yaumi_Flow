@@ -230,4 +230,8 @@ export interface LookbackWindowResponse {
   working_days: number;
   start_date: string | null;
   end_date: string | null;
+  // Ascending list of every working day inside the window (ISO YYYY-MM-DD).
+  // Charts use this as the canonical X-axis so an N-working-day lookback
+  // always renders N ticks, even when scope filters strip a day's activity.
+  active_dates: string[];
 }

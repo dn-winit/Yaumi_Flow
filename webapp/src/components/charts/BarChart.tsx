@@ -28,6 +28,13 @@ interface BarChartProps {
   emptyMessage?: string;
   onBarClick?: (payload: Record<string, unknown>) => void;
   loading?: boolean;
+  /**
+   * Minimum horizontal width allocated per bar. When the chart width
+   * exceeds the container, the wrapper scrolls horizontally so every
+   * label stays legible without skipping. Default 80px is wide enough
+   * for a `dd-mm-yyyy` label without crowding adjacent labels.
+   */
+  pxPerPoint?: number;
 }
 
 export default function BarChart({
@@ -40,6 +47,7 @@ export default function BarChart({
   emptyMessage = "No data",
   onBarClick,
   loading = false,
+  pxPerPoint = 80,
 }: BarChartProps) {
   if (loading) {
     return (
@@ -60,29 +68,43 @@ export default function BarChart({
       {data.length === 0 ? (
         <EmptyState title={emptyMessage} />
       ) : (
-        <ResponsiveContainer width="100%" height={height}>
-          <RechartsBarChart
-            data={data}
-            margin={{ top: 5, right: 20, left: 0, bottom: 5 }}
-          >
-            <CartesianGrid {...GRID_PROPS} />
-            <XAxis dataKey={xKey} tickFormatter={fmtAxisDate} {...AXIS_PROPS} />
-            <YAxis {...AXIS_PROPS} />
-            <Tooltip {...TOOLTIP_PROPS} labelFormatter={fmtAxisDate} />
-            <Bar
-              dataKey={yKey}
-              fill={color}
-              radius={[4, 4, 0, 0]}
-              onClick={
-                onBarClick
-                  ? (d: { payload?: Record<string, unknown> }) =>
-                      d.payload && onBarClick(d.payload)
-                  : undefined
-              }
-              style={onBarClick ? { cursor: "pointer" } : undefined}
-            />
-          </RechartsBarChart>
-        </ResponsiveContainer>
+        <div className="overflow-x-auto">
+          <div style={{ minWidth: `${data.length * pxPerPoint}px` }}>
+            <ResponsiveContainer width="100%" height={height}>
+              <RechartsBarChart
+                data={data}
+                margin={{ top: 5, right: 20, left: 0, bottom: 12 }}
+              >
+                <CartesianGrid {...GRID_PROPS} />
+                {/* interval=0 + minTickGap=0 keeps every label visible;
+                    the wrapper's overflow-x-auto + minWidth guarantees
+                    each label has its own column with no collision. */}
+                <XAxis
+                  dataKey={xKey}
+                  tickFormatter={fmtAxisDate}
+                  interval={0}
+                  minTickGap={0}
+                  tickMargin={8}
+                  {...AXIS_PROPS}
+                />
+                <YAxis {...AXIS_PROPS} />
+                <Tooltip {...TOOLTIP_PROPS} labelFormatter={fmtAxisDate} />
+                <Bar
+                  dataKey={yKey}
+                  fill={color}
+                  radius={[4, 4, 0, 0]}
+                  onClick={
+                    onBarClick
+                      ? (d: { payload?: Record<string, unknown> }) =>
+                          d.payload && onBarClick(d.payload)
+                      : undefined
+                  }
+                  style={onBarClick ? { cursor: "pointer" } : undefined}
+                />
+              </RechartsBarChart>
+            </ResponsiveContainer>
+          </div>
+        </div>
       )}
     </div>
   );

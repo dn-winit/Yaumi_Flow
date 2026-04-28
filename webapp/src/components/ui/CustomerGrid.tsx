@@ -82,13 +82,13 @@ export default function CustomerGrid({
             </div>
             <div className="space-y-0.5">
               <p className="text-body text-text-tertiary">
-                Items:{" "}
+                Different items:{" "}
                 <span className="font-medium text-text-secondary">
                   {fmtNum(c.uniqueSkus)}
                 </span>
               </p>
               <p className="text-body text-text-tertiary">
-                Total units:{" "}
+                Units to deliver:{" "}
                 <span className="font-medium text-text-secondary">
                   {fmtNum(c.totalUnits)}
                 </span>

@@ -137,3 +137,28 @@ class RecommendationSummaryResponse(BaseModel):
     total_recs_latest_date: int = 0
     routes_with_recs_latest: int = 0
     customers_latest: int = 0
+
+
+# ----------------------------------------------------------------------
+# Analytics envelopes (rich nested payloads stay Dict[str, Any] to avoid
+# locking the backend into the exact frontend shape on every additive
+# field; the success/availability fields are still validated).
+# ----------------------------------------------------------------------
+
+
+class AdoptionResponse(BaseModel):
+    available: bool = True
+    message: Optional[str] = None
+    summary: Optional[Dict[str, Any]] = None
+    daily: List[Dict[str, Any]] = Field(default_factory=list)
+    top_over_recommended: List[Dict[str, Any]] = Field(default_factory=list)
+    top_missed: List[Dict[str, Any]] = Field(default_factory=list)
+
+
+class UpcomingPlanResponse(BaseModel):
+    available: bool = True
+    message: Optional[str] = None
+    today: Optional[str] = None
+    days: int = 0
+    summary: Optional[Dict[str, Any]] = None
+    daily: List[Dict[str, Any]] = Field(default_factory=list)

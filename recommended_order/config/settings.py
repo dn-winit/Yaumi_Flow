@@ -25,6 +25,11 @@ class DatabaseSettings(BaseSettings):
     username: str = Field(default="", description="Database username")
     password: str = Field(default="", description="Database password")
     connection_timeout: int = Field(default=120, ge=10)
+    # Per-query (cursor) timeout for the bulk recommendation push -- bounds
+    # how long the writer can stall on a slow warehouse before we abort and
+    # retry. Larger than the supervision query budget because pushes are
+    # expected to handle thousands of rows in a single executemany.
+    query_timeout: int = Field(default=300, ge=10)
 
     @property
     def aiml_connection_string(self) -> str:

@@ -115,19 +115,34 @@ class DbPusher:
             for row in db_df[_DB_COLUMNS].values.tolist()
         ]
 
+        conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
             cursor.fast_executemany = True
+            cursor.timeout = self._db.query_timeout
+            # DELETE + chunked INSERT in one transaction so a partial
+            # INSERT failure rolls the DELETE back too -- no orphaned
+            # gaps, idempotent on retry.
             cursor.execute(delete_sql, delete_params)
             for i in range(0, len(records), 1000):
                 cursor.executemany(insert_sql, records[i : i + 1000])
             conn.commit()
-            conn.close()
 
             duration = round(time.time() - t0, 2)
             logger.info("Pushed %d recs to %s for %s in %.1fs", len(records), table, date, duration)
             return {"success": True, "table": table, "rows": len(records), "duration_seconds": duration}
         except Exception as exc:
-            logger.error("Push failed: %s", exc)
+            logger.error("Push failed for %s/%s: %s", date, route_code or "ALL", exc)
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             return {"success": False, "error": str(exc)}
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass

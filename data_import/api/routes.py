@@ -10,13 +10,22 @@ from fastapi import APIRouter, Depends, Query
 
 from data_import.api.dependencies import get_eda_service, get_importer
 from data_import.api.schemas import (
+    BusinessKpisResponse,
     DataSummaryResponse,
     DatasetInfo,
+    FilterDimensionsResponse,
+    ForecastRowsResponse,
     HealthResponse,
     ImportAllRequest,
     ImportAllResponse,
     ImportRequest,
     ImportResponse,
+    ItemCatalogResponse,
+    ItemStatsResponse,
+    LiveCustomerSalesResponse,
+    LiveRouteSalesResponse,
+    LookbackWindowResponse,
+    SalesOverviewResponse,
     StatusResponse,
 )
 from data_import.config.settings import get_settings
@@ -32,11 +41,19 @@ def import_dataset(
     importer: DataImporter = Depends(get_importer),
     eda: EdaService = Depends(get_eda_service),
 ):
-    """Import a single dataset (incremental or full)."""
-    result = importer.import_dataset(req.dataset, req.mode)
-    if result.get("success") and result.get("new_rows", 0) > 0:
-        eda.invalidate()  # CSV changed -> aggregations are now stale
-    return ImportResponse(**result)
+    """Import a single dataset (incremental or full).
+
+    Cache invalidation runs in a finally so that any partial import which
+    still touched the CSV (rows written before a downstream raise) does
+    not leave aggregations serving stale data.
+    """
+    result: dict = {}
+    try:
+        result = importer.import_dataset(req.dataset, req.mode)
+        return ImportResponse(**result)
+    finally:
+        if result.get("new_rows", 0) > 0:
+            eda.invalidate()
 
 
 @router.post("/import-all", response_model=ImportAllResponse)
@@ -45,12 +62,15 @@ def import_all(
     importer: DataImporter = Depends(get_importer),
     eda: EdaService = Depends(get_eda_service),
 ):
-    """Import all datasets."""
-    results = importer.import_all(req.mode)
-    success = all(r.get("success", False) for r in results.values())
-    if any(r.get("new_rows", 0) > 0 for r in results.values()):
-        eda.invalidate()
-    return ImportAllResponse(success=success, results=results)
+    """Import all datasets. Same try/finally invariant as /import."""
+    results: dict = {}
+    try:
+        results = importer.import_all(req.mode)
+        success = all(r.get("success", False) for r in results.values())
+        return ImportAllResponse(success=success, results=results)
+    finally:
+        if any(r.get("new_rows", 0) > 0 for r in results.values()):
+            eda.invalidate()
 
 
 @router.get("/status", response_model=StatusResponse)
@@ -91,7 +111,7 @@ def health(importer: DataImporter = Depends(get_importer)):
     )
 
 
-@router.get("/eda/sales")
+@router.get("/eda/sales", response_model=SalesOverviewResponse)
 def eda_sales(
     lookback: str = Query(
         default="last_30_working_days",
@@ -115,13 +135,13 @@ def eda_sales(
     )
 
 
-@router.get("/eda/items")
+@router.get("/eda/items", response_model=ItemCatalogResponse)
 def eda_items(svc: EdaService = Depends(get_eda_service)):
     """Item catalog: item_code, name, category, avg_price, last_price, total_quantity."""
     return svc.get_item_catalog()
 
 
-@router.get("/eda/lookback-window")
+@router.get("/eda/lookback-window", response_model=LookbackWindowResponse)
 def eda_lookback_window(
     lookback: str = Query(
         default="last_30_working_days",
@@ -137,7 +157,7 @@ def eda_lookback_window(
     return svc.get_lookback_window(lookback)
 
 
-@router.get("/eda/business-kpis")
+@router.get("/eda/business-kpis", response_model=BusinessKpisResponse)
 def eda_business_kpis(
     lookback: str = Query(
         default="last_30_working_days",
@@ -165,7 +185,7 @@ def eda_business_kpis(
     )
 
 
-@router.get("/eda/filter-dimensions")
+@router.get("/eda/filter-dimensions", response_model=FilterDimensionsResponse)
 def eda_filter_dimensions(
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
@@ -189,7 +209,7 @@ def eda_filter_dimensions(
 # ------------------------------------------------------------------
 
 
-@router.get("/eda/live-route-sales")
+@router.get("/eda/live-route-sales", response_model=LiveRouteSalesResponse)
 def eda_live_route_sales(
     route_code: str = Query(..., description="Route code"),
     date: str = Query(..., description="YYYY-MM-DD"),
@@ -198,7 +218,7 @@ def eda_live_route_sales(
     return svc.get_live_route_sales(route_code, date)
 
 
-@router.get("/eda/live-customer-sales")
+@router.get("/eda/live-customer-sales", response_model=LiveCustomerSalesResponse)
 def eda_live_customer_sales(
     route_code: str = Query(..., description="Route code"),
     date: str = Query(..., description="YYYY-MM-DD"),
@@ -208,7 +228,7 @@ def eda_live_customer_sales(
     return svc.get_live_customer_sales(route_code, date, customer_code)
 
 
-@router.get("/eda/item-stats")
+@router.get("/eda/item-stats", response_model=ItemStatsResponse)
 def eda_item_stats(
     item_code: str = Query(..., description="Item code to compute rolling stats for"),
     route_code: Optional[str] = Query(default=None, description="Optional route filter"),
@@ -218,7 +238,7 @@ def eda_item_stats(
     return svc.get_item_stats(item_code, route_code)
 
 
-@router.get("/eda/forecast-rows")
+@router.get("/eda/forecast-rows", response_model=ForecastRowsResponse)
 def eda_forecast_rows(
     lookback: str = Query(
         default="last_30_working_days",

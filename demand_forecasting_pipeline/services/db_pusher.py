@@ -118,12 +118,16 @@ class DbPusher:
             for row in df[_DB_COLUMNS].values.tolist()
         ]
 
+        last_error: Optional[str] = None
         for attempt in range(1, self._db.retry_attempts + 1):
             conn: Optional[pyodbc.Connection] = None
             try:
                 conn = self._connect()
                 cursor = conn.cursor()
                 cursor.fast_executemany = True
+                cursor.timeout = self._db.query_timeout
+                # DELETE + chunked INSERT in one transaction; rollback on
+                # any failure keeps the table in its pre-push state.
                 cursor.execute(delete_sql, (datasplit.capitalize(),))
                 for i in range(0, len(records), 1000):
                     cursor.executemany(insert_sql, records[i : i + 1000])
@@ -140,7 +144,13 @@ class DbPusher:
                     "duration_seconds": duration,
                 }
             except Exception as exc:
+                last_error = str(exc)
                 logger.error("Push attempt %d failed: %s", attempt, exc)
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
                 if attempt < self._db.retry_attempts:
                     time.sleep(self._db.retry_delay * attempt)
             finally:
@@ -150,4 +160,4 @@ class DbPusher:
                     except Exception:
                         pass
 
-        return {"success": False, "error": "All push attempts failed"}
+        return {"success": False, "error": last_error or "All push attempts failed"}

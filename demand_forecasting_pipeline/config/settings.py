@@ -28,6 +28,10 @@ class DbSettings(BaseSettings):
     password: str = Field(default="")
     driver: str = Field(default="{ODBC Driver 17 for SQL Server}")
     connection_timeout: int = Field(default=120, ge=10)
+    # Per-query (cursor) timeout for the bulk forecast push. Larger than
+    # the connect handshake budget because executemany batches thousands
+    # of rows in one round-trip.
+    query_timeout: int = Field(default=300, ge=10)
     retry_attempts: int = Field(default=3, ge=1)
     retry_delay: int = Field(default=2, ge=1)
 

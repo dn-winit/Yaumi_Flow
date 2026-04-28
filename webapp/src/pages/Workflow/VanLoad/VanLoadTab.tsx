@@ -136,10 +136,10 @@ export default function VanLoadTab() {
               ← Back to routes
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setAccuracyOpen(true)}>
-              Past analysis
+              Past performance
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setForecastOpen(true)}>
-              Future forecast
+              Upcoming plan
             </Button>
             <InfoPanel {...VAN_LOAD_INFO} />
           </>

@@ -72,32 +72,37 @@ class DbSaver:
         customers = data.get("customers", {})
         now = datetime.now()
 
+        conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
             cursor.fast_executemany = True
+            cursor.timeout = self._db.query_timeout
 
-            # 1. Route summary (delete + insert)
+            # All three writes share one transaction so DELETE+INSERT
+            # stays atomic per session_id -- any failure rolls the whole
+            # session back, never leaves partial rows behind.
             self._write_route(cursor, session_id, data, now)
-
-            # 2. Customer summaries
             cust_count = self._write_customers(cursor, session_id, customers, now)
-
-            # 3. Item details
             item_count = self._write_items(cursor, session_id, customers, now)
 
             conn.commit()
-            conn.close()
-
             logger.info("Session %s -> DB: 1 route, %d customers, %d items", session_id, cust_count, item_count)
             return {"success": True, "session_id": session_id, "customers": cust_count, "items": item_count}
         except Exception as exc:
-            logger.error("DB save failed: %s", exc)
-            try:
-                conn.close()
-            except Exception:
-                pass
+            logger.error("DB save failed for session %s: %s", session_id, exc)
+            if conn is not None:
+                try:
+                    conn.rollback()
+                except Exception:
+                    pass
             return {"success": False, "error": str(exc)}
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Load
@@ -106,11 +111,12 @@ class DbSaver:
     def load_session(self, route_code: str, date: str) -> Optional[Dict[str, Any]]:
         if not self.available:
             return None
+        conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
+            cursor.timeout = self._db.query_timeout
 
-            # Find latest session
             cursor.execute(
                 f"SELECT TOP 1 session_id FROM {self._s.route_summary_table} "
                 f"WHERE route_code = ? AND supervision_date = ? ORDER BY session_started_at DESC",
@@ -118,37 +124,46 @@ class DbSaver:
             )
             row = cursor.fetchone()
             if not row:
-                conn.close()
                 return None
             session_id = row[0]
 
-            # Load all 3 tables
             route = self._fetch_dict(cursor, self._s.route_summary_table, session_id)
             custs = self._fetch_all(cursor, self._s.customer_summary_table, session_id)
             items = self._fetch_all(cursor, self._s.item_details_table, session_id)
-            conn.close()
-
             return self._reconstruct(session_id, route_code, date, route, custs, items)
         except Exception as exc:
-            logger.error("DB load failed: %s", exc)
+            logger.error("DB load failed for %s/%s: %s", route_code, date, exc)
             return None
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     def check_exists(self, route_code: str, date: str) -> bool:
         if not self.available:
             return False
+        conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
             cursor = conn.cursor()
+            cursor.timeout = self._db.query_timeout
             cursor.execute(
                 f"SELECT COUNT(*) FROM {self._s.route_summary_table} "
                 f"WHERE route_code = ? AND supervision_date = ?",
                 (route_code, date),
             )
-            count = cursor.fetchone()[0]
-            conn.close()
-            return count > 0
-        except Exception:
+            return cursor.fetchone()[0] > 0
+        except Exception as exc:
+            logger.warning("DB exists-check failed for %s/%s: %s", route_code, date, exc)
             return False
+        finally:
+            if conn is not None:
+                try:
+                    conn.close()
+                except Exception:
+                    pass
 
     # ------------------------------------------------------------------
     # Write helpers

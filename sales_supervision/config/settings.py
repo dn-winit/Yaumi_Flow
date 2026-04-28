@@ -26,6 +26,10 @@ class DbSettings(BaseSettings):
     password: str = Field(default="")
     driver: str = Field(default="{ODBC Driver 17 for SQL Server}")
     connection_timeout: int = Field(default=120, ge=10)
+    # Per-query (cursor) timeout. Bounds the longest a save_session
+    # write can stall the supervisor UI when the warehouse is slow --
+    # without this a hung server keeps the request open indefinitely.
+    query_timeout: int = Field(default=60, ge=5)
 
     @property
     def configured(self) -> bool:
