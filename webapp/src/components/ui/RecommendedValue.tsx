@@ -1,5 +1,6 @@
 import { useState } from "react";
 import RecommendationModal from "./RecommendationModal";
+import { fmtNum } from "@/lib/format";
 import type { Row } from "@/types/common";
 
 interface Props {
@@ -18,9 +19,9 @@ export default function RecommendedValue({ row, value }: Props) {
         type="button"
         onClick={() => setOpen(true)}
         className="font-medium text-brand-700 hover:text-brand-700 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-100 rounded px-1 -mx-1"
-        title="Click for recommendation explainability"
+        title="Click to see why we suggested this"
       >
-        {value.toLocaleString()}
+        {fmtNum(value)}
       </button>
       <RecommendationModal open={open} onClose={() => setOpen(false)} row={row} />
     </>

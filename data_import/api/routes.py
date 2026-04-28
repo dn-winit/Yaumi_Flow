@@ -94,8 +94,8 @@ def health(importer: DataImporter = Depends(get_importer)):
 @router.get("/eda/sales")
 def eda_sales(
     lookback: str = Query(
-        default="last_7_working_days",
-        description="Reporting period: last_working_day | last_7_working_days",
+        default="last_30_working_days",
+        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
     ),
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
@@ -121,11 +121,27 @@ def eda_items(svc: EdaService = Depends(get_eda_service)):
     return svc.get_item_catalog()
 
 
+@router.get("/eda/lookback-window")
+def eda_lookback_window(
+    lookback: str = Query(
+        default="last_30_working_days",
+        description="last_working_day | last_7_working_days | last_30_working_days",
+    ),
+    svc: EdaService = Depends(get_eda_service),
+):
+    """Resolve a reporting-period enum to a concrete (start_date, end_date)
+    based on the most recent N **working days** in sales_recent.csv. Used by
+    drawers in other services that need to filter their own data on the same
+    window the dashboard uses, without re-implementing working-day detection.
+    """
+    return svc.get_lookback_window(lookback)
+
+
 @router.get("/eda/business-kpis")
 def eda_business_kpis(
     lookback: str = Query(
-        default="last_7_working_days",
-        description="Reporting period: last_working_day | last_7_working_days",
+        default="last_30_working_days",
+        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
     ),
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
@@ -205,8 +221,8 @@ def eda_item_stats(
 @router.get("/eda/forecast-rows")
 def eda_forecast_rows(
     lookback: str = Query(
-        default="last_7_working_days",
-        description="Reporting period: last_working_day | last_7_working_days",
+        default="last_30_working_days",
+        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
     ),
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),

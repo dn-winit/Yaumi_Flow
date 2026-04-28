@@ -1,5 +1,6 @@
 import Card from "./Card";
 import EmptyState from "./EmptyState";
+import { fmtNum } from "@/lib/format";
 
 export interface CustomerStat {
   customerCode: string;
@@ -81,15 +82,15 @@ export default function CustomerGrid({
             </div>
             <div className="space-y-0.5">
               <p className="text-body text-text-tertiary">
-                Unique SKUs:{" "}
+                Items:{" "}
                 <span className="font-medium text-text-secondary">
-                  {c.uniqueSkus}
+                  {fmtNum(c.uniqueSkus)}
                 </span>
               </p>
               <p className="text-body text-text-tertiary">
                 Total units:{" "}
                 <span className="font-medium text-text-secondary">
-                  {c.totalUnits.toLocaleString()}
+                  {fmtNum(c.totalUnits)}
                 </span>
               </p>
             </div>

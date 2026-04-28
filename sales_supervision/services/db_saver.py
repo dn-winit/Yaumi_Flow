@@ -160,8 +160,12 @@ class DbSaver:
 
         total_c = data.get("totalCustomers", 0)
         visited_c = data.get("visitedCustomers", 0)
-        total_rec = data.get("totalRecommended", 0)
-        total_act = data.get("totalActual", 0)
+        # Fulfillment rate is "of what we recommended for the customers we
+        # actually visited, how much sold". Mixing all-customer recommended
+        # with visited-only actuals would let unvisited customers drag the
+        # rate down, which has nothing to do with forecast quality.
+        visited_rec = data.get("visitedRecommended", 0)
+        visited_act = data.get("visitedActual", 0)
 
         ph = ", ".join("?" for _ in _ROUTE_COLS)
         cursor.execute(
@@ -170,8 +174,8 @@ class DbSaver:
                 sid, data.get("routeCode", ""), data.get("date", ""),
                 total_c, visited_c,
                 round(visited_c / max(total_c, 1) * 100, 1),
-                total_rec, total_act,
-                round(total_act / max(total_rec, 1) * 100, 1),
+                visited_rec, visited_act,
+                round(visited_act / max(visited_rec, 1) * 100, 1),
                 data.get("visitedAchievement", 0),
                 data.get("status", "closed"), now,
             ),
@@ -216,9 +220,13 @@ class DbSaver:
             for it in c.get("items", []):
                 rec_qty = it.get("recommendedQuantity", 0)
                 adj = it.get("adjustment", 0)
+                # Prefer the stored effectiveRecommended so the DB row matches
+                # the JSON snapshot exactly; fall back to the sum only if an
+                # older payload omits it.
+                effective = it.get("effectiveRecommended", rec_qty + adj)
                 rows.append((
                     sid, code, it.get("itemCode", ""), it.get("itemName", ""),
-                    rec_qty, rec_qty + adj, adj,
+                    rec_qty, effective, adj,
                     it.get("actualQuantity", 0),
                     1 if it.get("wasEdited") else 0,
                     1 if it.get("wasSold") else 0,

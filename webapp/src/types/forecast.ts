@@ -23,13 +23,35 @@ export interface PipelineRunResponse {
   config: string | null;
 }
 
+export interface CascadeStepResult {
+  success: boolean;
+  skipped?: boolean;
+  reason?: string;
+  error?: string;
+  rows?: number;
+  table?: string;
+  datasplit?: string;
+  dataset?: string;
+  new_rows?: number;
+  total_rows?: number;
+}
+
+export interface PipelineCascade {
+  db_push?: CascadeStepResult;
+  data_import_refresh?: CascadeStepResult;
+}
+
 export interface PipelineStatusResponse {
   pipeline: string;
   status: string;
   started_at: string | null;
   finished_at: string | null;
   duration_seconds: number;
+  /** Most recent successful run's duration -- used as an ETA hint while a fresh run is in flight. */
+  last_success_duration_seconds: number | null;
   error: string | null;
+  result: { output_type?: string; cascade?: PipelineCascade } & Record<string, unknown>;
+  steps: Record<string, string>;
 }
 
 /* ---- Auto-retrain ---- */

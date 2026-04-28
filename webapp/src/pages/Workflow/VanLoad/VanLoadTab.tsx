@@ -20,7 +20,7 @@ import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
 import InfoPanel from "@/components/ui/InfoPanel";
 import { VAN_LOAD_INFO } from "@/config/module-info";
 import { ROUTES } from "@/config/routes";
-import { toNum, pickDate } from "@/lib/format";
+import { toNum, pickDate, fmtNum } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 import type { Row } from "@/types/common";
 import type { FilterDimensionOption } from "@/types/data-import";
@@ -152,11 +152,11 @@ export default function VanLoadTab() {
         <Card>
           <EmptyState
             title="No forecast for this date"
-            message={`No forecast rows found for route ${routeCode} on ${fmtDate(date)}.`}
+            message={`Nothing forecast for route ${routeCode} on ${fmtDate(date)}.`}
             icon="📅"
             action={
               <span className="text-body text-text-tertiary">
-                Generate via Admin -&gt; Pipeline
+                Run a fresh forecast from the Pipeline page.
               </span>
             }
           />
@@ -255,8 +255,8 @@ function VanLoadRouteGrid({
         out[r.code] = {
           badge: { label: `${jc} customers`, variant: "info" },
           lines: [
-            { label: "Items", value: String(f.skus) },
-            { label: "Van load", value: f.qty.toLocaleString() },
+            { label: "Items", value: fmtNum(f.skus) },
+            { label: "Van load", value: fmtNum(f.qty) },
           ],
         };
       } else if (jc > 0) {

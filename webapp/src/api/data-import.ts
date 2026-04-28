@@ -10,6 +10,7 @@ import type {
   DashboardFilters,
   FilterDimensions,
   ForecastRowsResponse,
+  LookbackWindowResponse,
 } from "@/types/data-import";
 import type { DataSummary } from "@/types/common";
 
@@ -72,6 +73,11 @@ export const dataImportApi = {
       .get<ItemStatsResponse>("/eda/item-stats", {
         params: { item_code: itemCode, ...(routeCode ? { route_code: routeCode } : {}) },
       })
+      .then((r) => r.data),
+
+  getLookbackWindow: (lookback: string) =>
+    c()
+      .get<LookbackWindowResponse>("/eda/lookback-window", { params: { lookback } })
       .then((r) => r.data),
 
   importDataset: (dataset: string, mode = "incremental") =>

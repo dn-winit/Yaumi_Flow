@@ -8,6 +8,7 @@ import Modal from "@/components/ui/Modal";
 import RecommendedValue from "@/components/ui/RecommendedValue";
 import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
 import { fmtDate } from "@/lib/date";
+import { fmtNum } from "@/lib/format";
 import type { Row } from "@/types/common";
 import AnalysisList from "./AnalysisList";
 
@@ -357,7 +358,7 @@ export default function CustomerVisit({
               <span className="text-body text-text-tertiary">Date</span>
               <Badge variant="neutral">{fmtDate(date)}</Badge>
               <span className="ml-auto text-body text-text-tertiary">
-                {items.length} items · {items.reduce((n, i) => n + i.recommendedQty, 0)} units
+                {fmtNum(items.length)} items · {fmtNum(items.reduce((n, i) => n + i.recommendedQty, 0))} units
               </span>
             </div>
 

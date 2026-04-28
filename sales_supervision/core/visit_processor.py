@@ -44,14 +44,15 @@ class VisitProcessor:
             customer.visited = True
             customer.visit_sequence = session.visit_sequence_counter + 1
 
-        # Apply actual quantities
+        # Apply actual quantities. Actuals come straight from YaumiLive
+        # via data_import, so `was_edited` (manual override) is always
+        # False in this flow -- left at the dataclass default rather than
+        # being conflated with `was_sold`.
         unsold: Dict[str, int] = {}
         for item in customer.items:
             qty = actual_sales.get(item.item_code, 0)
             item.actual_qty = qty
             item.was_sold = qty > 0
-            if item.item_code in actual_sales:
-                item.was_edited = True
 
             # Calculate unsold for redistribution
             diff = item.effective_recommended - qty

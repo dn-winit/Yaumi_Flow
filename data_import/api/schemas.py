@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 
 
 class ImportRequest(BaseModel):
-    dataset: str = Field(description="customer_data | journey_plan | sales_recent")
+    dataset: str = Field(description="customer_data | journey_plan | sales_recent | demand_forecast")
     mode: str = Field(default="incremental", description="incremental | full")
 
 

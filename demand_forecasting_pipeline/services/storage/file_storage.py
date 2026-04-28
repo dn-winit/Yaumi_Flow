@@ -31,9 +31,10 @@ class FileStorage(StorageBackend):
             "pair_model_lookup": self._s.artifact_path(self._s.pair_model_lookup_file),
             "pair_classes": self._s.explainability_path(self._s.pair_classes_file),
             "pair_explainability": self._s.explainability_path(self._s.pair_explainability_file),
+            "data_quality": self._s.artifact_path(self._s.data_quality_file),
         }
         # Keys stored as JSON (not CSV)
-        self._json_keys = {"training_summary"}
+        self._json_keys = {"training_summary", "data_quality"}
 
     @property
     def name(self) -> str:

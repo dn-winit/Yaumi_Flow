@@ -1,5 +1,12 @@
 """
-Auto-retrain scheduler -- persisted config, drift detection, and periodic check.
+Auto-retrain scheduler -- persisted config and drift detection.
+
+The drift computation here is the single source of truth consumed by:
+  * ``api/routes/retrain.py`` (interactive UI)
+  * ``jobs/drift_check.py`` (Step Functions / Fargate scheduled job)
+
+Retrain orchestration itself lives outside this module (Step Functions),
+so there is no in-process scheduler tick here.
 """
 
 from __future__ import annotations
@@ -14,13 +21,22 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-import numpy as np
+import httpx
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
 
 logger = logging.getLogger(__name__)
+
+# Window resolution for "recent" accuracy. data_import is the canonical
+# authority on what counts as a working day, so we ask it for the
+# trailing-7-working-days span instead of guessing on calendar weeks.
+# Short timeout: this is on a 5-min-cached UI hot path and we always
+# have the calendar fallback ready.
+_LOOKBACK_PATH = "/api/v1/data/eda/lookback-window"
+_LOOKBACK_QUERY = "last_7_working_days"
+_LOOKBACK_TIMEOUT_SECONDS = 5.0
 
 # ---------------------------------------------------------------------------
 #  AutoRetrainConfig -- thread-safe JSON persistence
@@ -162,10 +178,9 @@ _NO_DRIFT: Dict[str, Any] = {
     "source": "unavailable",
 }
 
-# Drift result cache — avoids hammering YaumiLive on every page load.
-# TTL matches the dashboard refresh tier (5 min). The scheduler's own
-# 6-hour check also calls this, so worst case YaumiLive sees one drift
-# query every 5 min (from the UI) + one every 6 hours (from the scheduler).
+# Drift result cache — avoids hammering YaumiLive on every UI page load.
+# The Step Functions drift job calls compute_drift_status with
+# ``bypass_cache=True``, so this TTL only applies to interactive API calls.
 _drift_cache: Dict[str, Any] = {}
 _drift_cache_ts: float = 0.0
 _DRIFT_CACHE_TTL = 5 * 60  # seconds
@@ -179,10 +194,15 @@ def compute_drift_status(
 ) -> Dict[str, Any]:
     """Compare live post-training accuracy against the training-time baseline.
 
-    **Primary (live)**: queries the last 7 days of predictions vs actual sales
-    from YaumiLive via ``AccuracyService.get_comparison``. This is real drift
-    detection — the model's predictions are scored against what customers
-    actually bought AFTER training.
+    **Primary (live)**: queries the last 7 working days of predictions vs
+    actual sales from YaumiLive via ``AccuracyService.get_comparison``.
+    The window is resolved through ``data_import``'s
+    ``/eda/lookback-window`` so "recent" aligns with the dashboard's
+    reporting period (working days, not calendar days). Falls back to a
+    7-calendar-day window if data_import is unreachable so drift never
+    silently breaks. This is real drift detection -- the model's
+    predictions are scored against what customers actually bought
+    AFTER training.
 
     **Fallback (test-set)**: if the live DB is unavailable, splits the static
     test predictions into recent vs baseline. Less meaningful but still a
@@ -200,14 +220,10 @@ def compute_drift_status(
     warn = s.drift_warn_threshold
     alert = s.drift_alert_threshold
 
-    # Baseline accuracy from the summary (training-time WAPE, already stored).
-    baseline_acc: Optional[float] = None
-    try:
-        from demand_forecasting_pipeline.api.routes.summary import forecast_summary
-        summary = forecast_summary(artifact_svc)
-        baseline_acc = summary.accuracy_pct
-    except Exception as exc:
-        logger.warning("Drift: cannot get baseline accuracy: %s", exc)
+    # Baseline accuracy = training-time WAPE over the test split. Computed
+    # inline so this module does not import from the API layer (services must
+    # not depend on routes — the dependency runs the other direction).
+    baseline_acc = _training_baseline_accuracy(artifact_svc)
 
     # --- Primary: live accuracy from YaumiLive ---
     recent_acc: Optional[float] = None
@@ -215,8 +231,7 @@ def compute_drift_status(
 
     if accuracy_svc is not None and getattr(accuracy_svc, "available", False):
         try:
-            end = datetime.now().strftime("%Y-%m-%d")
-            start = (datetime.now() - timedelta(days=7)).strftime("%Y-%m-%d")
+            start, end = _recent_window(s)
             result = accuracy_svc.get_comparison(start_date=start, end_date=end)
             if result.get("success") and result.get("summary"):
                 live_acc = result["summary"].get("accuracy_pct")
@@ -252,8 +267,67 @@ def compute_drift_status(
     return result
 
 
+def _recent_window(settings: Settings) -> tuple[str, str]:
+    """Resolve the (start_date, end_date) for the "recent" drift window.
+
+    Asks data_import for the trailing 7 working-day span so drift aligns
+    with the dashboard's reporting period. Falls back to 7 calendar days
+    when ``DF_DATA_IMPORT_URL`` is unset or the service is unreachable --
+    drift never silently fails because of a downstream config gap.
+    """
+    base = (settings.data_import_url or "").rstrip("/")
+    if base:
+        try:
+            resp = httpx.get(
+                f"{base}{_LOOKBACK_PATH}",
+                params={"lookback": _LOOKBACK_QUERY},
+                timeout=_LOOKBACK_TIMEOUT_SECONDS,
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+            start = payload.get("start_date")
+            end = payload.get("end_date")
+            if payload.get("available") and start and end:
+                return start, end
+        except Exception as exc:
+            logger.warning("Drift: lookback-window fetch failed, using 7 calendar days: %s", exc)
+    now = datetime.now()
+    return (
+        (now - timedelta(days=7)).strftime("%Y-%m-%d"),
+        now.strftime("%Y-%m-%d"),
+    )
+
+
+def _wape_accuracy(actual: pd.Series, pred: pd.Series) -> Optional[float]:
+    """Shared WAPE helper: coerces to float, runs the canonical summary,
+    returns ``accuracy_pct`` or ``None`` if nothing was scorable."""
+    a = pd.to_numeric(actual, errors="coerce").fillna(0).to_numpy()
+    p = pd.to_numeric(pred, errors="coerce").fillna(0).to_numpy()
+    stats = wape_summary(a, p)
+    return stats["accuracy_pct"] if stats["rows_compared"] > 0 else None
+
+
+def _training_baseline_accuracy(svc: Any) -> Optional[float]:
+    """Full-test-set WAPE — the same number ``/summary`` surfaces as the
+    training-time accuracy. Column names come from ``svc.target_col`` so we
+    stay in lockstep with the pipeline config.
+    """
+    try:
+        test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
+    except Exception as exc:
+        logger.warning("Drift: baseline fetch failed: %s", exc)
+        return None
+    if test_df.empty:
+        return None
+    actual_col = getattr(svc, "target_col", "") or ""
+    if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
+        return None
+    return _wape_accuracy(test_df[actual_col], test_df["prediction"])
+
+
 def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
-    """WAPE on the last 7 days of the static test-predictions CSV."""
+    """WAPE on the last 7 days of the static test-predictions CSV — fallback
+    when the live DB is unreachable. Column names are config-driven."""
     try:
         test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
     except Exception:
@@ -261,28 +335,22 @@ def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
     if test_df.empty:
         return None
 
-    actual_col = "TotalQuantity" if "TotalQuantity" in test_df.columns else "actual_qty"
-    pred_col = "prediction" if "prediction" in test_df.columns else "predicted"
-    date_col = "TrxDate" if "TrxDate" in test_df.columns else "trx_date"
-
-    if actual_col not in test_df.columns or pred_col not in test_df.columns:
+    actual_col = getattr(svc, "target_col", "") or ""
+    if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
         return None
 
-    actual = pd.to_numeric(test_df[actual_col], errors="coerce").fillna(0)
-    pred = pd.to_numeric(test_df[pred_col], errors="coerce").fillna(0)
+    actual = test_df[actual_col]
+    pred = test_df["prediction"]
 
-    if date_col in test_df.columns:
-        dates = pd.to_datetime(test_df[date_col], errors="coerce")
+    if "TrxDate" in test_df.columns:
+        dates = pd.to_datetime(test_df["TrxDate"], errors="coerce")
         max_date = dates.max()
         if pd.notna(max_date):
             mask = dates >= (max_date - pd.Timedelta(days=7))
             actual = actual[mask]
             pred = pred[mask]
 
-    stats = wape_summary(actual.to_numpy(), pred.to_numpy())
-    return stats["accuracy_pct"] if stats["rows_compared"] > 0 else None
-
-
+    return _wape_accuracy(actual, pred)
 # ---------------------------------------------------------------------------
 #  Scheduler job: check_and_retrain
 # ---------------------------------------------------------------------------

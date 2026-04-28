@@ -28,8 +28,9 @@ logger = logging.getLogger(__name__)
 LOOKBACK_OPTIONS: Dict[str, int] = {
     "last_working_day": 1,
     "last_7_working_days": 7,
+    "last_30_working_days": 30,
 }
-DEFAULT_LOOKBACK = "last_7_working_days"
+DEFAULT_LOOKBACK = "last_30_working_days"
 
 
 def _resolve_lookback(lookback: Optional[str]) -> tuple[str, int]:
@@ -242,6 +243,40 @@ class EdaService:
         return {str(k): round(float(v), 2) for k, v in grouped.items()}
 
     # ------------------------------------------------------------------
+    # Lookback window resolution -- shared with downstream services
+    # ------------------------------------------------------------------
+
+    def get_lookback_window(self, lookback: Optional[str] = None) -> Dict[str, Any]:
+        """Resolve a reporting-period enum to the actual ``(start_date, end_date)``
+        of the trailing N working days from sales_recent.csv.
+
+        Used by drawers in other services (recommended_order's adoption,
+        for instance) so they can filter their own data on exactly the
+        same date span the dashboard uses, without each service having
+        to reimplement working-day detection.
+        """
+        canonical, n_working = _resolve_lookback(lookback)
+        key = f"lookback_window::{canonical}"
+        return self._cached(key, lambda: self._compute_lookback_window(canonical, n_working))
+
+    def _compute_lookback_window(self, canonical: str, n_working: int) -> Dict[str, Any]:
+        df = self._load_sales_df()
+        if df.empty:
+            return {"available": False, "lookback": canonical, "working_days": 0,
+                    "start_date": None, "end_date": None}
+        active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
+        if not active_dates:
+            return {"available": False, "lookback": canonical, "working_days": 0,
+                    "start_date": None, "end_date": None}
+        return {
+            "available": True,
+            "lookback": canonical,
+            "working_days": len(active_dates),
+            "start_date": pd.Timestamp(active_dates[-1]).strftime("%Y-%m-%d"),
+            "end_date":   pd.Timestamp(active_dates[0]).strftime("%Y-%m-%d"),
+        }
+
+    # ------------------------------------------------------------------
     # Sales overview (from local sales_recent.csv)
     # ------------------------------------------------------------------
 
@@ -283,9 +318,11 @@ class EdaService:
 
         A "working day" is any date that has actual sales activity in
         sales_recent.csv -- naturally excludes weekends, holidays, and any
-        other closure without a hard-coded calendar. All four breakdowns
-        (daily trend, top items, top routes, categories) share the window
-        so the dashboard period selector drives every chart consistently.
+        other closure without a hard-coded calendar. All breakdowns share
+        the window so the dashboard period selector drives every chart
+        consistently. Both leaderboards (top routes, categories) are
+        sorted by REVENUE so the response order matches the card titles
+        the dashboard shows -- no silent re-sort on the frontend.
         """
         df = self._load_sales_df()
         if df.empty:
@@ -298,14 +335,14 @@ class EdaService:
         active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
         if not active_dates:
             return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
-                    "top_items": [], "top_routes": [], "categories": []}
+                    "top_routes": [], "categories": []}
         df = df[df["TrxDate"].dt.normalize().isin(active_dates)]
         df = self._apply_sales_filters(
             df, warehouse_codes or [], route_codes or [], category_codes or [], item_codes or [],
         )
         if df.empty:
             return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
-                    "top_items": [], "top_routes": [], "categories": []}
+                    "top_routes": [], "categories": []}
 
         total_qty = float(df["TotalQuantity"].sum())
         total_rev = float(df["revenue"].sum())
@@ -318,17 +355,10 @@ class EdaService:
         )
         daily["date"] = daily["date"].astype(str)
 
-        top_items = (
-            df.groupby(["ItemCode", "ItemName"], as_index=False)
-            .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
-            .sort_values("quantity", ascending=False)
-            .head(10)
-        )
-
         top_routes = (
             df.groupby("RouteCode", as_index=False)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"), items=("ItemCode", "nunique"))
-            .sort_values("quantity", ascending=False)
+            .sort_values("revenue", ascending=False)
             .head(10)
         )
         top_routes["RouteCode"] = top_routes["RouteCode"].astype(str)
@@ -336,7 +366,7 @@ class EdaService:
         categories = (
             df.groupby("CategoryName", as_index=False)
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
-            .sort_values("quantity", ascending=False)
+            .sort_values("revenue", ascending=False)
             .head(10)
         )
         categories["CategoryName"] = categories["CategoryName"].fillna("Uncategorized")
@@ -357,7 +387,6 @@ class EdaService:
                 "working_days": int(df["TrxDate"].dt.normalize().nunique()),
             },
             "daily_trend": daily.to_dict("records"),
-            "top_items": top_items.to_dict("records"),
             "top_routes": top_routes.to_dict("records"),
             "categories": categories.to_dict("records"),
         }
@@ -499,15 +528,36 @@ class EdaService:
         scope_items = set(sales["ItemCode"].unique())
         forecast = self._load_forecast_df()
         if not forecast.empty:
-            # "Forecast" split = the predictions that actually drove van
-            # loads in production (future_forecast.csv). "Test" is the
-            # held-out evaluation slice and is irrelevant for impact.
-            forecast = forecast[forecast["DataSplit"] == "Forecast"]
-            # Predicted == 0 means "skip this item" -- not coverage.
+            # Past-window comparison surfaces a real predicted-vs-actual
+            # for each historical date. Both splits qualify, both are
+            # real model predictions:
+            #   * Test          -- the model's clean held-out backtest
+            #                      slice from the most recent training
+            #                      run (predictions on rows the model
+            #                      never saw during fitting).
+            #   * Forecast      -- production forward-horizon rows that
+            #                      data_import has accumulated locally
+            #                      across past inference runs; for any
+            #                      date now in the past, that row was
+            #                      a real ahead-of-time prediction made
+            #                      before the day arrived.
+            # The forward horizon (today + forecast_horizon days) is
+            # naturally excluded: ``active_set`` only contains dates that
+            # have actual sales, so future-dated Forecast rows can never
+            # match. When the same (date, route, item) appears in both
+            # splits, Test wins -- cleaner provenance for the metric.
             forecast = forecast[forecast["Predicted"] > 0]
             forecast = forecast[forecast["TrxDate"].dt.normalize().isin(active_set)]
             forecast = forecast[forecast["RouteCode"].isin(scope_routes)]
             forecast = forecast[forecast["ItemCode"].isin(scope_items)]
+            forecast["_split_priority"] = (
+                forecast["DataSplit"].map({"Test": 0, "Forecast": 1}).fillna(2)
+            )
+            forecast = (
+                forecast.sort_values("_split_priority")
+                .drop_duplicates(["TrxDate", "RouteCode", "ItemCode"], keep="first")
+                .drop(columns="_split_priority")
+            )
 
         if not forecast.empty:
             forecast["TrxDate"] = forecast["TrxDate"].dt.normalize()

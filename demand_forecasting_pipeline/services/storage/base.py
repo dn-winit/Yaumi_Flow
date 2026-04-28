@@ -20,6 +20,7 @@ ARTIFACT_KEYS = (
     "pair_model_lookup",
     "pair_classes",
     "pair_explainability",
+    "data_quality",
 )
 
 

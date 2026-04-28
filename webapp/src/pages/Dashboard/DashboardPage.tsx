@@ -42,14 +42,12 @@ export default function DashboardPage() {
     toast("Data refreshed", "success");
   };
 
-  // Top routes by revenue: most directly answers "which routes carry the
-  // business?" -- the only customer/route question executives ask. Capped
-  // at DASHBOARD_TOP_N so the leaderboard stays scannable.
+  // Top routes / categories arrive already sorted by revenue desc from
+  // the backend (single source of truth). We just take the leaderboard
+  // cap so the cards stay scannable -- no re-sort here.
   const topRouteRevenueBars = useMemo<HBarDatum[]>(
     () =>
       (salesData?.top_routes ?? [])
-        .slice()
-        .sort((a, b) => Number(b.revenue) - Number(a.revenue))
         .slice(0, DASHBOARD_TOP_N)
         .map((r) => ({
           label: `Route ${r.RouteCode}`,
@@ -59,13 +57,9 @@ export default function DashboardPage() {
     [salesData?.top_routes]
   );
 
-  // Categories rendered as a horizontal bar (more legible than a pie when
-  // there are >5 slices, and consistent with the route leaderboard beside it).
   const categoryBars = useMemo<HBarDatum[]>(
     () =>
       (salesData?.categories ?? [])
-        .slice()
-        .sort((a, b) => Number(b.revenue) - Number(a.revenue))
         .slice(0, DASHBOARD_TOP_N)
         .map((c) => ({
           label: c.CategoryName?.trim() || "Uncategorized",
@@ -125,9 +119,9 @@ export default function DashboardPage() {
         <Card
           title="Revenue by category"
           actions={
-            salesData?.categories?.length ? (
+            salesData?.totals?.unique_categories ? (
               <span className="text-caption text-text-tertiary">
-                top {Math.min(salesData.categories.length, DASHBOARD_TOP_N)} of {salesData.categories.length}
+                top {Math.min(salesData.totals.unique_categories, DASHBOARD_TOP_N)} of {salesData.totals.unique_categories}
               </span>
             ) : undefined
           }

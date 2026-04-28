@@ -64,8 +64,8 @@ class Settings(BaseSettings):
     # Pipeline config (YAML path)
     pipeline_config: str = Field(default=str(_PIPELINE_ROOT / "config" / "config.yaml"))
 
-    # Paths
-    raw_data_path: str = Field(default=str(_PROJECT_ROOT / "data" / "sales_recent.csv"))
+    # Filesystem paths -- artifacts live next to the service.
+    raw_data_path: str = Field(default=str(_PROJECT_ROOT / "data" / "demand_data_merged.csv"))
     artifacts_dir: str = Field(default=str(_PIPELINE_ROOT / "artifacts"))
     models_dir: str = Field(default=str(_PIPELINE_ROOT / "artifacts" / "models"))
     predictions_dir: str = Field(default=str(_PIPELINE_ROOT / "artifacts" / "predictions"))
@@ -81,6 +81,7 @@ class Settings(BaseSettings):
     pair_model_lookup_file: str = Field(default="pair_model_lookup.csv")
     pair_classes_file: str = Field(default="pair_classes.csv")
     pair_explainability_file: str = Field(default="pair_explainability.csv")
+    data_quality_file: str = Field(default="data_quality.json")
 
     # Cache
     cache_ttl_seconds: int = Field(default=300, ge=0)
@@ -94,6 +95,12 @@ class Settings(BaseSettings):
     # DB push (target table for demand predictions)
     db: DbSettings = Field(default_factory=DbSettings)
     demand_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_demand_forecast]")
+
+    # After a successful inference push, optionally call the data_import
+    # service so it refreshes ``data/demand_forecast.csv`` from the table
+    # we just wrote. Empty -> cascade is skipped (production deployments
+    # that orchestrate data_import separately leave this unset).
+    data_import_url: str = Field(default="", description="Base URL of the data_import service, e.g. http://localhost:8005")
 
     # YaumiLive (read-only) -- for live actual sales lookup
     live_db_host: str = Field(default="")

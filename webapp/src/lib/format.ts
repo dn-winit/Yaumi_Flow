@@ -96,9 +96,10 @@ export const LAST_30_DAYS = 30;
 export const LOOKBACK_OPTIONS = [
   { key: "last_working_day", label: "Last working day", days: 1 },
   { key: "last_7_working_days", label: "Last 7 working days", days: 7 },
+  { key: "last_30_working_days", label: "Last 30 working days", days: 30 },
 ] as const;
 export type Lookback = (typeof LOOKBACK_OPTIONS)[number]["key"];
-export const DEFAULT_LOOKBACK: Lookback = "last_7_working_days";
+export const DEFAULT_LOOKBACK: Lookback = "last_30_working_days";
 
 export function lookbackLabel(key: Lookback): string {
   return LOOKBACK_OPTIONS.find((o) => o.key === key)?.label ?? key;
@@ -114,6 +115,14 @@ export function lookbackDays(key: Lookback): number {
  * still returns top 10 so this is a presentation cap, not a data limit.
  */
 export const DASHBOARD_TOP_N = 5;
+
+/**
+ * Per-route per-day recommendation cap pulled into the Visit step. A real
+ * route holds ~50-150 customers x ~20 SKUs each, so a few thousand rows
+ * covers the largest routes with headroom and lets us render in one pass
+ * without paging the live session.
+ */
+export const VISIT_REC_LIMIT = 5000;
 
 /** Pull the date out of any row that uses TrxDate / trx_date / ds / date. */
 export function pickDate(row: Record<string, unknown>): string {

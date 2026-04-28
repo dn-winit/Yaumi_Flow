@@ -1,3 +1,14 @@
+"""
+LightGBM forecasters.
+
+``LightGBMForecaster`` — point-estimate regressor used per (class, pair).
+``LightGBMQuantileForecaster`` — fits one model per quantile, used for
+prediction intervals. Both read every hyperparameter from ``self.params``
+so Optuna and config overrides flow through uniformly.
+"""
+
+from __future__ import annotations
+
 import numpy as np
 
 from .base import BaseForecaster
@@ -5,43 +16,55 @@ from .base import BaseForecaster
 try:
     import lightgbm as lgb
     _HAS_LGB = True
-except Exception:
+except ImportError:
     _HAS_LGB = False
+
+
+def _require_lgb() -> None:
+    if not _HAS_LGB:
+        raise RuntimeError("lightgbm not available — install to use this model")
+
+
+def _base_params(params: dict, overrides: dict | None = None) -> dict:
+    """Assemble the kwargs passed to ``lgb.LGBMRegressor``. Overrides win
+    against defaults; user params win against both."""
+    defaults = {
+        "n_estimators": 400,
+        "learning_rate": 0.05,
+        "num_leaves": 31,
+        "min_data_in_leaf": 10,
+        "feature_fraction": 0.9,
+        "bagging_fraction": 0.9,
+        "bagging_freq": 1,
+        "objective": "regression",
+        "verbose": -1,
+        "random_state": 42,
+    }
+    resolved = {**defaults, **(overrides or {})}
+    for key in list(resolved):
+        if key in params:
+            resolved[key] = params[key]
+    return resolved
 
 
 class LightGBMForecaster(BaseForecaster):
     name = "lightgbm"
 
     def fit(self, train_df, group_keys, date_col, target_col, feature_cols):
-        if not _HAS_LGB:
-            raise RuntimeError("lightgbm not available")
+        _require_lgb()
         df = train_df.dropna(subset=[target_col]).copy()
         X = df[feature_cols]
         y = df[target_col].values
-        params = {
-            "n_estimators": int(self.params.get("n_estimators", 400)),
-            "learning_rate": float(self.params.get("learning_rate", 0.05)),
-            "num_leaves": int(self.params.get("num_leaves", 31)),
-            "min_data_in_leaf": int(self.params.get("min_data_in_leaf", 10)),
-            "feature_fraction": float(self.params.get("feature_fraction", 0.9)),
-            "bagging_fraction": float(self.params.get("bagging_fraction", 0.9)),
-            "bagging_freq": 1,
-            "objective": self.params.get("objective", "regression"),
-            "verbose": -1,
-            "random_state": int(self.params.get("random_state", 42)),
-        }
-        self.model_ = lgb.LGBMRegressor(**params)
+        self.model_ = lgb.LGBMRegressor(**_base_params(self.params))
         self.model_.fit(X, y)
-        self.feature_cols_ = list(feature_cols)
         self.fitted_ = True
         return self
 
     def predict(self, test_df, group_keys, date_col, target_col, feature_cols):
-        df = test_df.copy()
-        X = df[feature_cols]
+        X = test_df[feature_cols]
         preds = self.model_.predict(X)
-        out = df[group_keys + [date_col]].copy()
-        out["prediction"] = np.clip(preds, a_min=0.0, a_max=None)
+        out = test_df[group_keys + [date_col]].copy()
+        out["prediction"] = np.clip(preds, 0.0, None)
         return out
 
 
@@ -49,28 +72,25 @@ class LightGBMQuantileForecaster(BaseForecaster):
     name = "lightgbm_quantile"
 
     def fit(self, train_df, group_keys, date_col, target_col, feature_cols):
-        if not _HAS_LGB:
-            raise RuntimeError("lightgbm not available")
+        _require_lgb()
         df = train_df.dropna(subset=[target_col]).copy()
         X = df[feature_cols]
         y = df[target_col].values
         quantiles = self.params.get("quantiles", [0.1, 0.9])
-        self.quantile_models_ = {}
+        # Same params dispatch as the point forecaster — quantile models
+        # honour n_estimators / learning_rate / num_leaves / random_state.
+        base = _base_params(self.params, overrides={"n_estimators": 200})
+        self.quantile_models_: dict = {}
         for q in quantiles:
-            mdl = lgb.LGBMRegressor(
-                n_estimators=200, learning_rate=0.05, num_leaves=31,
-                objective="quantile", alpha=q, verbose=-1, random_state=42,
-            )
+            mdl = lgb.LGBMRegressor(**{**base, "objective": "quantile", "alpha": float(q)})
             mdl.fit(X, y)
             self.quantile_models_[q] = mdl
         self.fitted_ = True
         return self
 
     def predict(self, test_df, group_keys, date_col, target_col, feature_cols):
-        df = test_df.copy()
-        X = df[feature_cols]
-        out = df[group_keys + [date_col]].copy()
+        X = test_df[feature_cols]
+        out = test_df[group_keys + [date_col]].copy()
         for q, mdl in self.quantile_models_.items():
-            col = "q_{:.0f}".format(q * 100)
-            out[col] = np.clip(mdl.predict(X), a_min=0.0, a_max=None)
+            out[f"q_{int(q * 100)}"] = np.clip(mdl.predict(X), 0.0, None)
         return out

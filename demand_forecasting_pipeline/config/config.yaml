@@ -4,6 +4,9 @@ project:
   log_level: INFO
 
 paths:
+  # Sales feed produced daily by the data_import service. This is the
+  # single shared CSV every backend reads from -- keep the path in sync
+  # with data_import.config.settings.sales_recent_file.
   raw_data: data/sales_recent.csv
   artifacts_dir: demand_forecasting_pipeline/artifacts
   models_dir: demand_forecasting_pipeline/artifacts/models
@@ -22,12 +25,47 @@ data:
   fill_missing_periods: true
   zero_fill_value: 0.0
   activity_flag: true
+  # Explicit dtype hints forwarded to ``pd.read_csv``. RouteCode values in
+  # demand_data_merged.csv look like integers (e.g. 9105) — without this
+  # override pandas would silently cast them to int64 and strip any leading
+  # zeros that might appear in future data, breaking joins with classes_df
+  # (loaded from CSV where numeric-looking codes get inferred back to int).
+  # Pin both forecast-level columns to string for a safe contract.
+  dtypes:
+    RouteCode: string
+    ItemCode: string
   causal_cols:
+    # vwap = volume-weighted average price (weighted by target_col). Preferred
+    # for price signals. Fall back to mean/sum/etc. for other reductions.
     - col: AvgUnitPrice
-      agg: mean
+      agg: vwap
 
 validation:
   enabled: true
+  # false  -> duplicates on (forecast_level, date_col) get summed by the
+  #           aggregator and counted in the data-quality report.
+  # true   -> the pipeline fails early so ETL bugs surface immediately.
+  fail_on_duplicates: false
+
+lifecycle:
+  enabled: true
+  # First N panel rows after a pair's first non-zero sale are flagged
+  # is_new_launch. Downstream uses this to avoid clipping launch-phase noise.
+  new_launch_periods: 30
+  # If the silent tail (rows after the last non-zero sale) is at least this
+  # long, the tail rows are flagged is_likely_eol.
+  eol_silent_periods: 90
+
+anomaly:
+  suspicious_zeros:
+    enabled: true
+    # Pairs with less than this many panel rows are not scored.
+    min_history_periods: 60
+    # Need at least this many distinct zero-runs in history to fit a gap
+    # distribution; below this, the detector abstains.
+    min_zero_runs: 3
+    # Flag zero runs longer than mean + z * std of the pair's gap lengths.
+    z_threshold: 3.0
 
 cleaning:
   clip_negative_to_zero: true
@@ -36,61 +74,196 @@ cleaning:
     method: iqr
     iqr_multiplier: 3.0
     skip_if_intermittent: true
+    # Skip IQR entirely when the source window has fewer than this many
+    # non-zero values (bounds would be pathological).
+    min_nonzero_count: 8
+    # Rows carrying any of these flags are preserved as-is, never clipped.
+    skip_if_flagged:
+      - is_new_launch
+      - is_likely_eol
+      - suspicious_zero
 
 split:
+  # Horizons are expressed in *periods* at the configured ``data.granularity``.
+  # test_horizon drives the leakage guarantees: bounds for outlier clipping,
+  # target encoding, and classification are all derived from strictly BEFORE
+  # this window. Make it >= inference.forecast_horizon so the test-scoring
+  # window represents the same horizon the model will face in production.
   test_horizon: 30
   validation_horizon: 30
+
+explainability:
+  # Per-pair "recent window" stats — last N PERIODS of each pair's training
+  # history (sorted by date) feed ``recent_min_qty`` / ``recent_max_qty`` /
+  # ``recent_range_qty`` in pair_explainability.csv. Use these to ground
+  # band-width conversations in recent reality (instead of multi-year
+  # extremes that dominate ``range_qty``).
+  #
+  # Periods, not days, so the window adapts to ``data.granularity``:
+  #   * 180 at daily   → ~6 months
+  #   * 26  at weekly  → ~6 months
+  #   * 6   at monthly → ~6 months
+  recent_window_periods: 180
+
+training:
+  # Standard ML practice: train/val/test stay held-out for unbiased
+  # selection and scoring (test_predictions.csv reflects a model that
+  # never saw the test slice — the honest number we report to clients).
+  # Once the chosen model is settled, refit it on train + val + test
+  # before pickling so the production model that inference loads has
+  # seen ALL available history up to the moment of training. This
+  # closes the 60-day "blindspot" the production model would otherwise
+  # have (val_horizon + test_horizon worth of recent patterns).
+  #
+  # Setting this to false keeps the legacy behaviour (production model
+  # fit on train+val only). Useful for strict apples-to-apples
+  # comparison runs; otherwise leave true.
+  refit_on_full_data: true
+
+split_audit:
+  # Thresholds for the per-pair balance audit. A pair with < min_train_rows
+  # rows in the training split is flagged as thin_train; routing rules can
+  # then restrict it to feature-blind baselines. A pair with < min_test_rows
+  # rows can't be reliably scored, so per-pair selection falls back to the
+  # class-winner.
+  min_train_rows: 30
+  min_test_rows: 3
+  min_train_nonzero: 2
 
 holidays:
   enabled: true
   country_code: AE
   subdivision: null
+  # Proximity features fire at daily grain only; pre_/post_window_days = 0
+  # disables the corresponding "is_pre_..."/"is_post_..." columns while
+  # still emitting days_to_next_holiday / days_since_last_holiday.
+  proximity:
+    enabled: true
+    pre_window_days: 7
+    post_window_days: 3
+  # Optional group aggregation. Maps a group name to a list of holiday
+  # slugs produced by the library (inspect artifacts/data_quality.json or
+  # pair_explainability after one run to see what slugs your country emits).
+  # Empty by default — the module never assumes what is religious/national.
+  groups: {}
+  # Phased events let you split a long period into sub-regimes; the flat
+  # {name, start, end} form is still supported for one-shot events.
   custom_events:
-    - name: covid_lockdown
-      start: "2020-03-01"
-      end: "2021-12-31"
+    - name: covid
+      phases:
+        - {name: panic,    start: "2020-03-01", end: "2020-04-30"}
+        - {name: lockdown, start: "2020-05-01", end: "2020-12-31"}
+        - {name: recovery, start: "2021-01-01", end: "2021-12-31"}
+
+# Islamic calendar features. Ramadan dates are computed from the Hijri
+# calendar via the ``hijridate`` library; no hardcoded dates.
+hijri:
+  enabled: true
+  features:
+    is_ramadan: true
+    ramadan_day: true                # 1..30 within Ramadan, 0 elsewhere
+    is_last_10_days_ramadan: true
+  proximity:
+    enabled: true
+    pre_window_days: 7
+    post_window_days: 3
+
+# Salary cycle — region-specific and business-specific, so default is off.
+# When enabling, document the pay cycle for the region/segment you're
+# modelling. Empty pay_rules keeps the feature surface clean.
+salary_cycle:
+  enabled: false
+  pay_rules: []
+  # Example:
+  # pay_rules:
+  #   - {day_of_month: 1,  window_days: 5}
+  #   - {day_of_month: 27, window_days: 3}
+  features:
+    days_since_last_payday: true
+    days_to_next_payday: true
+    in_payday_window: true
 
 classification:
   adi_intermittent_threshold: 1.32
   cv2_erratic_threshold: 0.49
+  # Pairs with fewer non-zero observations than this are forced into the
+  # ``intermittent`` bucket regardless of their computed ADI / CV² — a
+  # single-point series trivially has CV²=0 and would otherwise be labelled
+  # "smooth" incorrectly. Raw ADI / CV² are still exported for auditing.
+  min_observations_for_classification: 3
 
 feature_engineering:
   adaptive_depth: true
+  # NaN policy for target-derived feature families (lags, rolling stats,
+  # intermittent-specific). A leading NaN represents "no prior observation";
+  # we fill with 0.0 by default so every trained/served model — including
+  # ones that aren't natively NaN-tolerant — receives a clean matrix. Set to
+  # ``null`` (YAML null) to keep NaN and let NaN-tolerant backends handle it.
+  nan_fill: 0.0
+  # Proximity features (``days_to_next_<event>`` / ``days_since_last_<event>``)
+  # are NaN when no event is known before / after a row. The fill value is a
+  # "far-future" sentinel so models can distinguish "no event" from
+  # "event today".
+  proximity_nan_fill: 9999
+  # Multi-step leakage guard. When true and ``inference.forecast_horizon > 1``,
+  # only lags ``>= forecast_horizon`` are retained: at inference we can only
+  # compute lags that reference values before the forecast origin, so using
+  # shorter lags produces training metrics that inference can't reproduce
+  # (direct-forecast bias). Rolling features have the same concern but
+  # filtering them to horizon-safe typically empties the list; for now we
+  # only gate lags and leave rolling to the modeller's awareness.
+  horizon_safe_lags: false
   target_encoding:
     enabled: true
     smoothing: 10
   temporal:
     enabled: true
-    weekend_days: [4]
+    # Date-aware weekend regime — UAE moved weekend from Fri-Sat to Sat-Sun
+    # on 2022-01-01. Each rule applies to rows whose date falls in its
+    # [from, until) window; later rules overwrite earlier ones on overlap.
+    # Legacy flat list (e.g. [4, 5]) is still accepted.
+    weekend_days:
+      - {until: "2022-01-01", days: [4, 5]}
+      - {from:  "2022-01-01", days: [5, 6]}
     components:
       - day_of_week
       - day_of_week_sin
       - day_of_week_cos
       - day_of_month
+      - days_to_month_end
       - week_of_year
       - month
       - month_sin
       - month_cos
       - is_weekend
-      - days_since_start
+      - periods_since_start
   lags:
     smooth: [1, 7, 14, 21, 28]
     intermittent: [7, 14, 28]
     erratic: [1, 7, 14, 21, 28]
     lumpy: [7, 14, 28]
   rolling:
+    # Per-class: windows, stats, and optional min_periods_fraction.
+    # min_periods_fraction defaults to 0.5 — so roll_mean_28 needs at least 14
+    # observations before it emits a value. Tighten (e.g. 1.0) to require a
+    # full window; loosen (e.g. 0.1) only if your models truly need early
+    # rows filled and tolerate weakly-supported stats.
     smooth:
       windows: [7, 14, 28]
       stats: [mean, std, min, max, median]
+      min_periods_fraction: 0.5
     intermittent:
       windows: [7, 14, 28]
       stats: [mean, sum, nonzero_ratio]
+      min_periods_fraction: 0.5
     erratic:
       windows: [7, 14, 28]
       stats: [mean, std, max]
+      min_periods_fraction: 0.5
     lumpy:
       windows: [7, 14, 28]
       stats: [mean, std, nonzero_ratio]
+      min_periods_fraction: 0.5
   intermittent_specific:
     inter_demand_interval: true
     last_nonzero_gap: true
@@ -98,6 +271,91 @@ feature_engineering:
 
 model_selection:
   strategy: per_pair
+
+# Per-pair model routing. Rules are evaluated in priority order (highest
+# first); the first rule with ``allow`` sets the base pool; ``exclude`` and
+# ``prefer`` accumulate across matching rules. Pairs that match no rule
+# default to the class's full ``models.enabled`` menu.
+#
+# Supported operators in ``when``:
+#   lt / lte / gt / gte / eq / ne
+#   in / not_in
+#   abs_gte / abs_lte
+#   between: [low, high]
+#   is_true / is_false
+#
+# Signals available (all optional — rules referencing absent signals simply
+# never fire):
+#   class, adi, cv2
+#   n_periods, n_nonzero_periods, nonzero_ratio
+#   mean_qty, max_qty, std_qty, sum_qty
+#   nonzero_mean, nonzero_median, nonzero_min, nonzero_std, avg_gap_days
+#   is_new_launch, is_likely_eol, suspicious_zero_rows
+routing:
+  rules:
+    - name: tiny_history
+      priority: 100
+      when: {n_periods: {lt: 10}}
+      allow: [naive]
+
+    - name: too_sparse_for_ml
+      priority: 95
+      when: {n_nonzero_periods: {lt: 3}}
+      allow: [naive, moving_average]
+
+    # Split-audit driven rules. They fire on signals produced *after* the
+    # train/val/test split, so they respect per-pair distribution across
+    # windows rather than just overall pair stats.
+    - name: no_test_rows
+      priority: 94
+      when: {n_test_rows: {eq: 0}}
+      allow: [moving_average, naive]
+
+    - name: insufficient_train_rows
+      priority: 93
+      when: {n_train_rows: {lt: 30}}
+      allow: [moving_average, naive]
+
+    - name: sparse_train_nonzero
+      priority: 92
+      when: {n_train_nonzero: {lt: 2}}
+      allow: [naive, moving_average]
+
+    - name: cold_start
+      priority: 90
+      when: {is_new_launch: {is_true: true}}
+      allow: [moving_average, naive]
+
+    - name: likely_eol
+      priority: 85
+      when: {is_likely_eol: {is_true: true}}
+      allow: [moving_average, naive]
+
+    - name: thin_history_skip_tuning
+      priority: 50
+      when: {n_periods: {lt: 90}}
+      skip_hp_tuning: true
+
+    - name: rich_history_deeper_tuning
+      priority: 45
+      when: {n_periods: {gte: 365}}
+      # Pairs with ≥1 year of clean history are where ML pays off most —
+      # spend 50% more trials searching their hyperparameter neighbourhood.
+      hp_trials_multiplier: 1.5
+
+    - name: very_sparse_intermittent
+      priority: 80
+      when:
+        class: intermittent
+        nonzero_ratio: {lt: 0.05}
+      prefer: [croston_sba, croston]
+
+    - name: heavy_tail_erratic
+      priority: 75
+      when:
+        class: erratic
+        cv2: {gte: 2.0}
+      prefer: [lightgbm, ensemble]
 
 models:
   enabled:
@@ -107,31 +365,110 @@ models:
     lumpy: [croston, croston_sba, two_stage, moving_average]
   fallback_order: [moving_average, naive]
   selection_metric: rmse
+  # Each model gets a flat default block. Any key can be overridden per
+  # demand class via ``per_class:`` — the pipeline merges class-specific
+  # values over the flat ones.
   model_defaults:
     moving_average:
       window: 7
+      per_class:
+        intermittent: {window: 28}   # sparse → longer window to smooth gaps
+        lumpy:        {window: 28}
     croston:
       alpha: 0.4
+    croston_sba:
+      alpha: 0.4
     ets:
-      seasonal_periods: 7
-
-two_stage:
-  threshold: 0.5
+      # ``seasonal_periods`` is left unset so the pipeline picks it from
+      # data.granularity: 7 at daily, 52 at weekly, 12 at monthly, 4 at
+      # quarterly. Override here only if you know your data has a different
+      # dominant cycle (e.g. fiscal periods).
+      trend: null
+      seasonal: null
+    linear:
+      alpha: 1.0
+    two_stage:
+      regressor: lightgbm
+      threshold: 0.5
+      per_class:
+        # Intermittent demand → favour recall on the "demand-occurred"
+        # classifier. A 0.5 threshold misses too many small-but-real demand
+        # days; 0.4 trades a few false positives for catching the day a
+        # sale actually happens, which is the operational priority.
+        intermittent: {threshold: 0.4}
+        lumpy:        {threshold: 0.4}
 
 hyperparameter_tuning:
   enabled: true
-  n_trials: 15
-  timeout_seconds: 60
+  # Production-grade tuning depth. Optuna's TPE sampler needs ~20 trials
+  # before it can meaningfully exploit promising regions; below that it's
+  # quasi-random search. ``timeout_seconds`` caps the worst-case study
+  # duration per (class, model) — long enough for boosted-tree fits on
+  # full-class data with 3 CV folds.
+  n_trials: 25
+  timeout_seconds: 600
+  # Optuna direction. ``auto`` derives it from ``models.selection_metric``:
+  # error metrics (rmse/mae/mape/…) → minimize; score metrics (r2/accuracy_pct/…) → maximize.
+  # Set explicitly to ``minimize`` or ``maximize`` to override.
+  direction: auto
   temporal_cv:
     enabled: true
     n_splits: 3
-  models_to_tune: [lightgbm, xgboost, random_forest]
+    # val_size is the number of distinct dates each fold's validation WINDOW
+    # spans. ``null`` lets the tuner pick (~ n_dates / (n_splits + 1)) so
+    # folds tile the tail of the data without overlap. Set explicitly (e.g.
+    # val_size: 30) to match your forecast_horizon and score each trial on
+    # a realistic production window instead of a single snapshot.
+    val_size: null
+  # Models opted in for Optuna tuning. Classical models (moving_average,
+  # croston, croston_sba, ets) have built-in search spaces in the tuner and
+  # can be added here once validation data is available. They converge fast
+  # because their search spaces are tiny (1-2 params each).
+  models_to_tune: [lightgbm, xgboost, random_forest, linear]
+  # Optional search-space override. Any entry supplied here replaces the
+  # in-code default for the matching model. Missing entries keep their
+  # defaults. Accepted types: int / float (optionally log: true) / categorical.
+  # Example:
+  #   search_spaces:
+  #     lightgbm:
+  #       n_estimators: {type: int, low: 200, high: 1500}
+  #       learning_rate: {type: float, low: 0.005, high: 0.1, log: true}
+  search_spaces: {}
 
 evaluation:
   metrics: [mae, rmse, mape, smape, bias, wape]
   prediction_intervals:
     enabled: true
     quantiles: [0.1, 0.9]
+    # Per-pair Conformalized Quantile Regression. Adjusts the class quantile
+    # band on a per-pair basis so stable pairs see tighter intervals while
+    # volatile pairs stay honest. When ``enabled``, the quantile model is
+    # fit on the train slice only (val held out for calibration), and a
+    # ``conformal_offsets.csv`` artifact is produced.
+    conformal:
+      enabled: true
+      # Marginal coverage to target on the calibration set. 0.80 means we
+      # aim for 80% of validation actuals to fall within [q_low, q_high]
+      # AFTER per-pair offsets are applied. Drop to 0.50 for tight 50% IQR
+      # bands; raise toward 0.95 for very conservative bands.
+      target_coverage: 0.80
+      # Pairs with fewer than this many calibration rows fall back to the
+      # class-wide offset (and classes with no rows fall back to global).
+      # Keep this above ~5 so the per-pair empirical quantile is stable.
+      min_samples_per_pair: 8
 
 inference:
   forecast_horizon: 30
+  # Recursive multi-step refinement. For each iteration, the inference
+  # pipeline folds the current predictions back into the panel target
+  # column (only for future rows — history is never touched), rebuilds
+  # lag/rolling features, and re-predicts. This is the standard recursive
+  # multi-step forecasting approach.
+  #   0 → legacy direct-forecast (lag features beyond t+1 reference
+  #       placeholder zeros — biased toward under-forecasting at horizon > 1)
+  #   1 → single fold-back, captures most short-lag dependencies (recommended)
+  #   2+ → diminishing returns; mainly useful for very long horizons or
+  #       feature sets with many compound lag/rolling windows
+  # Each iteration roughly doubles inference time (one extra build_features
+  # + one extra prediction pass).
+  recursive_iterations: 1

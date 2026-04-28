@@ -153,12 +153,12 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
               />
               <MetricCard
                 label="Total van load"
-                value={fmtNum(summary.total, 1)}
+                value={fmtNum(summary.total)}
                 subtitle="Units across the window"
               />
               <MetricCard
                 label="Avg per day"
-                value={summary.horizon > 0 ? fmtNum(summary.total / summary.horizon, 1) : "-"}
+                value={summary.horizon > 0 ? fmtNum(summary.total / summary.horizon) : "-"}
                 subtitle="Units / day"
               />
             </div>
@@ -170,9 +170,9 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
               series={
                 showBand
                   ? [
-                      { key: "q90", label: "High estimate", color: CHART_COLOR.brandBand },
+                      { key: "q90", label: "Best case", color: CHART_COLOR.brandBand },
                       { key: "predicted", label: "Van load", color: CHART_COLOR.brandPrimary },
-                      { key: "q10", label: "Low estimate", color: CHART_COLOR.brandBand },
+                      { key: "q10", label: "Worst case", color: CHART_COLOR.brandBand },
                     ]
                   : [{ key: "predicted", label: "Van load" }]
               }

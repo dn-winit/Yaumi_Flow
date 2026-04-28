@@ -7,6 +7,7 @@ import EmptyState from "@/components/ui/EmptyState";
 import { ROUTES } from "@/config/routes";
 import { useRecommendations, useGenerate } from "@/hooks/useRecommendedOrder";
 import { useToast } from "@/hooks/useToast";
+import { VISIT_REC_LIMIT } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 import { useWorkflow } from "@/pages/Workflow/workflowContext";
 import LiveSessionTab from "@/pages/Supervision/LiveSession/LiveSessionTab";
@@ -69,7 +70,7 @@ function VisitSession({
 
   // Pull the per-customer recs for the route + date.
   const recsParams = useMemo(
-    () => ({ date, route_code: routeCode, limit: 5000, offset: 0 }),
+    () => ({ date, route_code: routeCode, limit: VISIT_REC_LIMIT, offset: 0 }),
     [date, routeCode],
   );
   const recs = useRecommendations(recsParams);
@@ -112,7 +113,7 @@ function VisitSession({
     try {
       await generate(date, [routeCode], true);
       recs.refetch();
-      toast("Recommendations generated", "success");
+      toast("Suggestions built", "success");
     } catch (err) {
       toast(err instanceof Error ? err.message : "Generation failed", "danger");
     }
@@ -159,10 +160,10 @@ function VisitSession({
       <Card>
         <EmptyState
           icon={diag ? "🔔" : "📦"}
-          title={diag?.headline ?? "No recommendations yet"}
+          title={diag?.headline ?? "No suggestions yet"}
           message={
             diag?.detail ??
-            `No recommendations for route ${routeCode} on ${fmtDate(date)}. Auto-generation runs nightly — or trigger it manually now.`
+            `No suggestions ready for route ${routeCode} on ${fmtDate(date)}. They run automatically each night — or build them now.`
           }
           action={
             <Button
@@ -171,7 +172,7 @@ function VisitSession({
               loading={generating}
               onClick={handleGenerate}
             >
-              {diag ? "Re-run generation" : `Generate for route ${routeCode}`}
+              {diag ? "Try again" : `Build now for route ${routeCode}`}
             </Button>
           }
         />

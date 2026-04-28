@@ -37,9 +37,13 @@ class SessionStore:
         date = session_data.get("date", "")
         path = self._session_path(route, date)
 
-        path.write_text(json.dumps(session_data, default=str, indent=2), encoding="utf-8")
-        logger.info("Session saved: %s", path.name)
+        try:
+            path.write_text(json.dumps(session_data, default=str, indent=2), encoding="utf-8")
+        except Exception as exc:
+            logger.error("Session file save failed: %s -- %s", path.name, exc)
+            return {"success": False, "error": str(exc), "path": str(path)}
 
+        logger.info("Session saved: %s", path.name)
         return {"success": True, "path": str(path), "sessionId": session_data.get("sessionId", "")}
 
     # ------------------------------------------------------------------

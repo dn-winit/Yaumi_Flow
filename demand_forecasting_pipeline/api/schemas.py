@@ -118,8 +118,10 @@ class PipelineStatusResponse(BaseModel):
     started_at: Optional[str] = None
     finished_at: Optional[str] = None
     duration_seconds: float = 0.0
+    last_success_duration_seconds: Optional[float] = None
     error: Optional[str] = None
     result: Dict[str, Any] = {}
+    steps: Dict[str, str] = {}
 
 
 # ------------------------------------------------------------------

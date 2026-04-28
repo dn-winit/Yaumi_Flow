@@ -139,13 +139,6 @@ export interface DailyTrendPoint {
   revenue: number;
 }
 
-export interface TopItem {
-  ItemCode: string;
-  ItemName: string;
-  quantity: number;
-  revenue: number;
-}
-
 export interface TopRoute {
   RouteCode: string;
   quantity: number;
@@ -165,7 +158,8 @@ export interface SalesOverviewResponse {
   lookback?: string;
   totals?: SalesTotals;
   daily_trend?: DailyTrendPoint[];
-  top_items?: TopItem[];
+  // Backend returns these already sorted by revenue desc, capped at 10.
+  // Frontend should NOT re-sort -- the response order is the contract.
   top_routes?: TopRoute[];
   categories?: CategoryBreakdown[];
 }
@@ -225,3 +219,15 @@ export const EMPTY_FILTERS: DashboardFilters = {
   category_codes: [],
   item_codes: [],
 };
+
+// Backend resolution of a reporting-period enum to the actual trailing
+// N working-day window over sales_recent.csv. Drawers in other services
+// call this before querying their own data so the window is identical
+// to what the dashboard shows for the same lookback.
+export interface LookbackWindowResponse {
+  available: boolean;
+  lookback: string;
+  working_days: number;
+  start_date: string | null;
+  end_date: string | null;
+}

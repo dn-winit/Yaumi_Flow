@@ -11,13 +11,13 @@ import { CHART_COLOR } from "@/components/charts/theme";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
 import { useAdoption } from "@/hooks/useRecommendedOrder";
-import { fmtDate, fmtDateRange, trailingWindow } from "@/lib/date";
+import { useLookbackWindow } from "@/hooks/useDataImport";
+import { fmtDate, fmtDateRange } from "@/lib/date";
 import {
   fmtNum,
   fmtCurrency,
   DELIVERY_GOOD,
   DEFAULT_LOOKBACK,
-  lookbackDays,
   type Lookback,
 } from "@/lib/format";
 import type { DashboardFilters } from "@/types/data-import";
@@ -59,25 +59,32 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode]);
 
-  // Translate the lookback enum into (start_date, end_date) for the
-  // adoption endpoint. Day count is sourced from the shared
-  // LOOKBACK_OPTIONS (lib/format.ts) so this drawer never re-encodes
-  // numbers that already live there.
+  // The reporting period maps to a *working-day* window served by
+  // data_import (same dates the dashboard slices to for the same
+  // lookback). One source of truth for "what counts as 30 working
+  // days" -- this drawer never recomputes it from calendar deltas.
+  const window = useLookbackWindow(open ? lookback : undefined);
+  const w = window.data;
   const { params, windowLabel } = useMemo(() => {
-    const { start_date, end_date } = trailingWindow(lookbackDays(lookback));
+    if (!w?.available || !w.start_date || !w.end_date) {
+      return { params: null, windowLabel: "—" };
+    }
     return {
       params: {
-        start_date,
-        end_date,
+        start_date: w.start_date,
+        end_date: w.end_date,
         ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
         ...(filters.category_codes.length > 0 ? { category_codes: filters.category_codes } : {}),
         ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
       },
-      windowLabel: fmtDateRange(start_date, end_date),
+      windowLabel: fmtDateRange(w.start_date, w.end_date),
     };
-  }, [lookback, filters]);
+  }, [w, filters]);
 
-  const { data, loading } = useAdoption(params, open);
+  const { data, loading } = useAdoption(
+    params ?? { start_date: "", end_date: "" },
+    open && params != null,
+  );
   const s = data?.summary ?? null;
 
   // All four tiles derive from the same backend summary snapshot.
@@ -166,7 +173,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           <>
             <KpiRow>
               <MetricCard
-                label="Revenue driven by our list"
+                label="Revenue from our suggestions"
                 value={
                   s?.driven_revenue != null && s.driven_revenue > 0
                     ? fmtCurrency(s.driven_revenue)
@@ -176,13 +183,13 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   !s || s.recommended_volume <= 0
-                    ? "No recommendations converted yet"
-                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} recommended units sold · ${fmtNum(s.skus_adopted)} items`
+                    ? "No recommendations bought yet"
+                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units sold · ${fmtNum(s.skus_adopted)} items`
                 }
                 trend={revenueArrow}
               />
               <MetricCard
-                label="Pick accuracy"
+                label="Items the customer took"
                 value={
                   derived?.pickAccuracyPct != null
                     ? `${derived.pickAccuracyPct.toFixed(1)}%`
@@ -190,13 +197,13 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   s && s.skus_recommended > 0
-                    ? `${fmtNum(s.skus_adopted)} of ${fmtNum(s.skus_recommended)} recommended items sold`
+                    ? `${fmtNum(s.skus_adopted)} of ${fmtNum(s.skus_recommended)} suggested items were bought`
                     : "No recommendations to score"
                 }
                 trend={accuracyArrow}
               />
               <MetricCard
-                label="Perfect picks"
+                label="Right quantity, right item"
                 value={
                   derived?.perfectPickPct != null
                     ? `${derived.perfectPickPct.toFixed(1)}%`
@@ -204,13 +211,13 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   s && s.skus_adopted > 0
-                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} adopted items within ±${Math.round(s.perfect_pick_tolerance * 100)}% of actual`
+                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within ±${Math.round(s.perfect_pick_tolerance * 100)}% of suggested`
                     : "No adopted items to score"
                 }
                 trend={perfectPickArrow}
               />
               <MetricCard
-                label="Lost sales"
+                label="Suggested but didn't sell"
                 value={
                   s?.unsold_revenue != null && s.unsold_revenue > 0
                     ? fmtCurrency(s.unsold_revenue)
@@ -221,7 +228,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 subtitle={
                   !s || s.unsold_volume === 0
                     ? "Every recommended unit sold"
-                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items we recommended that didn't sell`
+                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items the customer didn't take`
                 }
               />
             </KpiRow>
@@ -231,10 +238,10 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
             <div className="space-y-6">
               {data.daily.length > 0 && (
                 <LineChart
-                  title="Daily hit rate"
+                  title="Daily share of suggestions that sold"
                   data={data.daily as unknown as Record<string, unknown>[]}
                   xKey="date"
-                  series={[{ key: "adoption_pct", label: "Hit rate %", color: CHART_COLOR.success }]}
+                  series={[{ key: "adoption_pct", label: "% sold", color: CHART_COLOR.success }]}
                   height={260}
                 />
               )}
@@ -242,7 +249,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
               <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 {data.top_over_recommended.length > 0 && (
                   <BarChart
-                    title="Items to right-size (van space we can reallocate)"
+                    title="Suggesting too much (free up van space)"
                     data={data.top_over_recommended as unknown as Record<string, unknown>[]}
                     xKey="item_code"
                     yKey="rows"
@@ -252,7 +259,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 )}
                 {data.top_missed.length > 0 && (
                   <BarChart
-                    title="New demand spotted (items customers are buying)"
+                    title="Customers buying without us suggesting"
                     data={data.top_missed as unknown as Record<string, unknown>[]}
                     xKey="item_code"
                     yKey="rows"

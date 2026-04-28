@@ -16,6 +16,7 @@ import {
   fmtNum,
   fmtCurrency,
   toNum,
+  pickDate,
   GOOD_SCORE_THRESHOLD,
   TOLERANCE_PCT,
   LEAKAGE_SHARE_WARN,
@@ -115,7 +116,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
         }
       }
 
-      const d = String(r.trx_date ?? "").slice(0, 10);
+      const d = pickDate(r as unknown as Record<string, unknown>);
       if (d) {
         const cur = byDay.get(d) ?? { p: 0, a: 0 };
         cur.p += p;
@@ -186,7 +187,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
   const dailyChart = useMemo(() => {
     const map = new Map<string, { predicted: number; actual: number }>();
     rows.forEach((r) => {
-      const d = String(r.trx_date ?? "").slice(0, 10);
+      const d = pickDate(r as unknown as Record<string, unknown>);
       if (!d) return;
       const predicted = toNum(r.predicted) ?? 0;
       const actual = toNum(r.actual_qty) ?? 0;
@@ -336,13 +337,13 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
                 trend={accuracyArrow}
               />
               <MetricCard
-                label="On-target days"
+                label="Days we got it right"
                 value={stats.daysScored > 0 ? `${stats.daysOnTarget} / ${stats.daysScored}` : "-"}
-                subtitle={`Days within ${Math.round(TOLERANCE_PCT * 100)}% of actual`}
+                subtitle={`Within ${Math.round(TOLERANCE_PCT * 100)}% of what actually sold`}
                 trend={onTargetArrow}
               />
               <MetricCard
-                label="Lost sales"
+                label="Forecast that didn't sell"
                 value={
                   stats.unsoldRevenue != null && stats.unsoldRevenue > 0
                     ? fmtCurrency(stats.unsoldRevenue)
@@ -353,7 +354,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
                 subtitle={
                   stats.unsoldForecast === 0
                     ? "Every forecasted unit sold"
-                    : `${fmtNum(stats.unsoldForecast)} units · ${fmtNum(stats.unsoldSkuCount)} items we forecast that didn't sell`
+                    : `${fmtNum(stats.unsoldForecast)} units · ${fmtNum(stats.unsoldSkuCount)} items overstocked on the van`
                 }
               />
             </KpiRow>
@@ -361,11 +362,11 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
             <HighlightsStrip items={highlights} />
 
             <LineChart
-              title="Recommended vs actual (daily)"
+              title="What we forecast vs what actually sold"
               data={dailyChart}
               xKey="date"
               series={[
-                { key: "predicted", label: "Recommended" },
+                { key: "predicted", label: "Forecast" },
                 { key: "actual", label: "Actual" },
               ]}
               height={300}
@@ -373,7 +374,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
 
             {itemVarianceChart.length > 0 && (
               <BarChart
-                title="Items to fine-tune (largest forecast gap)"
+                title="Items where forecast missed the mark"
                 data={itemVarianceChart}
                 xKey="item_code"
                 yKey="variance"

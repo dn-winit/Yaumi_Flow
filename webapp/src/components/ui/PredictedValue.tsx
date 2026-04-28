@@ -19,7 +19,7 @@ export default function PredictedValue({ row, value, decimals = 1 }: Props) {
         type="button"
         onClick={() => setOpen(true)}
         className="font-medium text-brand-700 hover:text-brand-700 hover:underline focus:outline-none focus:ring-2 focus:ring-brand-100 rounded px-1 -mx-1"
-        title="Click to see why this forecast"
+        title="Click to see why we forecast this"
       >
         {value.toFixed(decimals)}
       </button>

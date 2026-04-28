@@ -1,3 +1,7 @@
+"""XGBoost forecaster. All hyperparameters flow through ``self.params``."""
+
+from __future__ import annotations
+
 import numpy as np
 
 from .base import BaseForecaster
@@ -5,20 +9,24 @@ from .base import BaseForecaster
 try:
     import xgboost as xgb
     _HAS_XGB = True
-except Exception:
+except ImportError:
     _HAS_XGB = False
+
+
+def _require_xgb() -> None:
+    if not _HAS_XGB:
+        raise RuntimeError("xgboost not available — install to use this model")
 
 
 class XGBoostForecaster(BaseForecaster):
     name = "xgboost"
 
     def fit(self, train_df, group_keys, date_col, target_col, feature_cols):
-        if not _HAS_XGB:
-            raise RuntimeError("xgboost not available")
+        _require_xgb()
         df = train_df.dropna(subset=[target_col]).copy()
         X = df[feature_cols]
         y = df[target_col].values
-        params = {
+        resolved = {
             "n_estimators": int(self.params.get("n_estimators", 400)),
             "learning_rate": float(self.params.get("learning_rate", 0.05)),
             "max_depth": int(self.params.get("max_depth", 6)),
@@ -29,16 +37,14 @@ class XGBoostForecaster(BaseForecaster):
             "verbosity": 0,
             "n_jobs": -1,
         }
-        self.model_ = xgb.XGBRegressor(**params)
+        self.model_ = xgb.XGBRegressor(**resolved)
         self.model_.fit(X, y)
-        self.feature_cols_ = list(feature_cols)
         self.fitted_ = True
         return self
 
     def predict(self, test_df, group_keys, date_col, target_col, feature_cols):
-        df = test_df.copy()
-        X = df[feature_cols]
+        X = test_df[feature_cols]
         preds = self.model_.predict(X)
-        out = df[group_keys + [date_col]].copy()
-        out["prediction"] = np.clip(preds, a_min=0.0, a_max=None)
+        out = test_df[group_keys + [date_col]].copy()
+        out["prediction"] = np.clip(preds, 0.0, None)
         return out

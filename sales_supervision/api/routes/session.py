@@ -89,7 +89,14 @@ def save_active_session(
     db_saver: DbSaver = Depends(get_db_saver),
 ):
     """Persist the active in-memory session to disk + DB (when configured)
-    and free its slot in the in-memory registry."""
+    and free its slot in the in-memory registry.
+
+    File save is required; DB save is best-effort when configured. The
+    session stays in the in-memory registry on file-save failure so the
+    supervisor can retry. On DB-only failure we still drop the in-memory
+    slot (the JSON on disk is the source of truth) and flag the warning
+    in the response so the UI can surface it.
+    """
     session = _sessions.get(session_id)
     if session is None:
         return {"success": False, "error": f"Session {session_id} not found"}
@@ -98,10 +105,28 @@ def save_active_session(
     data = session.to_dict()
 
     file_result = store.save(data)
+    if not file_result.get("success"):
+        return {
+            "success": False,
+            "error": file_result.get("error", "File save failed"),
+            "file": file_result,
+            "db": None,
+        }
+
     db_result = db_saver.save_session(data) if db_saver.available else None
+    db_ok = db_result is None or db_result.get("success", False)
 
     _sessions.pop(session_id, None)
-    return {"success": True, "file": file_result, "db": db_result}
+    return {
+        "success": True,
+        "db_ok": db_ok,
+        "warning": (
+            None if db_ok
+            else f"Session saved to disk but DB write failed: {db_result.get('error', 'unknown')}"
+        ),
+        "file": file_result,
+        "db": db_result,
+    }
 
 
 @router.get("/unplanned/{session_id}")

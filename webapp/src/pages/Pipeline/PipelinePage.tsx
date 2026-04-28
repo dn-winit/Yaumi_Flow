@@ -1,4 +1,4 @@
-import { useMemo, useState, useCallback } from "react";
+import { useEffect, useMemo, useState, useCallback, type ReactNode } from "react";
 import PageHeader from "@/components/layout/PageHeader";
 import Card from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
@@ -15,9 +15,9 @@ import {
 import { useToast } from "@/hooks/useToast";
 import AutoRetrainSection from "./AutoRetrainSection";
 import { fmtNum, GOOD_SCORE_THRESHOLD } from "@/lib/format";
-import { fmtDateTime } from "@/lib/date";
+import { fmtDate, fmtDateTime } from "@/lib/date";
 import type { Tone } from "@/lib/colorize";
-import type { PipelineStatusResponse } from "@/types/forecast";
+import type { PipelineStatusResponse, PipelineCascade } from "@/types/forecast";
 
 /* ------------------------------------------------------------------ */
 /*  Step metadata + helpers                                            */
@@ -26,24 +26,26 @@ import type { PipelineStatusResponse } from "@/types/forecast";
 interface StepDef {
   key: string;
   name: string;
-  /** Pipeline names from the API that map to this logical step. */
+  /** Pipeline step keys (from on_step callbacks) that map to this logical step. */
   pipelineKeys: string[];
 }
 
+// One row per phase the supervisor cares about. The publishing row
+// rolls up the cascade we wired in pipeline_service (db_push +
+// data_import_refresh) so the user can see whether downstream apps
+// got the new numbers.
 const STEPS: StepDef[] = [
-  { key: "collection",     name: "Data collection",       pipelineKeys: ["data_collection", "collection"] },
-  { key: "processing",     name: "Data processing",       pipelineKeys: ["data_processing", "processing"] },
-  { key: "features",       name: "Feature engineering",   pipelineKeys: ["feature_engineering", "features"] },
-  { key: "classification", name: "Demand classification", pipelineKeys: ["classification", "demand_classification"] },
-  { key: "training",       name: "Model training",        pipelineKeys: ["training", "train"] },
-  { key: "forecast",       name: "Forecast generation",   pipelineKeys: ["inference", "forecast"] },
+  { key: "collection",     name: "Data collection",        pipelineKeys: ["data_collection", "collection"] },
+  { key: "processing",     name: "Data processing",        pipelineKeys: ["data_processing", "processing"] },
+  { key: "classification", name: "Demand classification",  pipelineKeys: ["classification", "demand_classification"] },
+  { key: "features",       name: "Feature engineering",    pipelineKeys: ["feature_engineering", "features"] },
+  { key: "training",       name: "Model training",         pipelineKeys: ["training", "train"] },
+  { key: "forecast",       name: "Forecast generation",    pipelineKeys: ["inference", "forecast"] },
+  { key: "publish",        name: "Publishing results",     pipelineKeys: ["db_push", "data_import_refresh"] },
 ];
 
-type StepStatus = "completed" | "running" | "idle" | "failed";
+type StepStatus = "completed" | "running" | "idle" | "failed" | "skipped";
 
-// Single mapping from raw API status strings to our internal step state.
-// Defined once so both branches of resolveStatus share it -- no duplicated
-// "completed/success", "running/pending", "failed/error" handling.
 const STATUS_MAP: Record<string, StepStatus> = {
   completed: "completed",
   success: "completed",
@@ -51,6 +53,7 @@ const STATUS_MAP: Record<string, StepStatus> = {
   pending: "running",
   failed: "failed",
   error: "failed",
+  skipped: "skipped",
 };
 
 function mapStatus(raw: string | null | undefined): StepStatus | null {
@@ -58,18 +61,19 @@ function mapStatus(raw: string | null | undefined): StepStatus | null {
   return STATUS_MAP[raw.toLowerCase()] ?? null;
 }
 
+/**
+ * For a regular step, walk the pipelines and return the first matching
+ * step status. The publishing step uses ``resolvePublishStatus`` instead
+ * because it has to combine two sub-step states (worst wins).
+ */
 function resolveStatus(
   step: StepDef,
   statuses: Record<string, PipelineStatusResponse> | undefined,
 ): { status: StepStatus; info: PipelineStatusResponse | null } {
   if (!statuses) return { status: "idle", info: null };
 
-  // Per-step statuses from the live pipeline run take priority -- they give
-  // granular "X: completed, Y: running" updates while a pipeline is in flight.
   for (const pipeline of ["train", "inference"]) {
-    const run = statuses[pipeline] as
-      | (PipelineStatusResponse & { steps?: Record<string, string> })
-      | undefined;
+    const run = statuses[pipeline];
     if (!run?.steps) continue;
     for (const k of step.pipelineKeys) {
       const mapped = mapStatus(run.steps[k]);
@@ -77,13 +81,54 @@ function resolveStatus(
     }
   }
 
-  // Fallback: top-level pipeline status (idle pipelines or older API).
+  // Fallback: top-level pipeline status (idle pipelines).
   for (const k of step.pipelineKeys) {
     const match = statuses[k];
     if (!match) continue;
     return { status: mapStatus(match.status) ?? "idle", info: match };
   }
   return { status: "idle", info: null };
+}
+
+// Aggregate priority for the publishing step's two sub-steps.
+const PUBLISH_PRIORITY: Record<StepStatus, number> = {
+  failed: 4,
+  running: 3,
+  completed: 2,
+  skipped: 1,
+  idle: 0,
+};
+
+function resolvePublishStatus(
+  statuses: Record<string, PipelineStatusResponse> | undefined,
+): { status: StepStatus; info: PipelineStatusResponse | null; cascade: PipelineCascade | null } {
+  if (!statuses) return { status: "idle", info: null, cascade: null };
+
+  // The most recent run (by started_at) owns the publishing display so
+  // the page reflects the latest activity even when both pipelines have
+  // history.
+  const candidates = (["train", "inference"] as const)
+    .map((p) => statuses[p])
+    .filter((r): r is PipelineStatusResponse => Boolean(r?.started_at))
+    .sort(
+      (a, b) =>
+        new Date(b.started_at ?? 0).getTime() - new Date(a.started_at ?? 0).getTime(),
+    );
+
+  if (candidates.length === 0) return { status: "idle", info: null, cascade: null };
+  const latest = candidates[0];
+  const subKeys = ["db_push", "data_import_refresh"] as const;
+  const subStatuses = subKeys.map((k) => mapStatus(latest.steps?.[k]) ?? "idle");
+
+  const status = subStatuses.reduce<StepStatus>((worst, s) => {
+    return PUBLISH_PRIORITY[s] > PUBLISH_PRIORITY[worst] ? s : worst;
+  }, "idle");
+
+  return {
+    status,
+    info: latest,
+    cascade: (latest.result?.cascade as PipelineCascade | undefined) ?? null,
+  };
 }
 
 function statusTone(s: StepStatus): Tone {
@@ -97,12 +142,20 @@ function statusLabel(s: StepStatus): string {
   if (s === "completed") return "Done";
   if (s === "running") return "Running";
   if (s === "failed") return "Failed";
+  if (s === "skipped") return "Skipped";
   return "Idle";
 }
 
-// Timestamp formatter delegates to the shared fmtDateTime so every
-// "last finished/started at" label across the app reads the same way.
 const fmtTimestamp = (ts: string | null): string => (ts ? fmtDateTime(ts) : "");
+
+/** "1m 14s" / "8m 42s" / "47s". Single source of truth for duration text. */
+function fmtDuration(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "0s";
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  const m = Math.floor(seconds / 60);
+  const s = Math.round(seconds % 60);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
 
 function daysSince(ts: string | null): number | null {
   if (!ts) return null;
@@ -122,30 +175,24 @@ interface ResolvedStep {
   step: StepDef;
   status: StepStatus;
   info: PipelineStatusResponse | null;
-  /** Pre-computed React node so both desktop and mobile layouts render the
-   *  same memoised JSX -- avoids paying for the metric tree twice per render. */
-  metric: React.ReactNode;
+  /** Plain-language metric line shown under the status badge. */
+  metric: ReactNode;
+  /** Plain-language detail line (timestamp / live duration / error / cascade summary). */
+  detail: ReactNode;
 }
 
 /**
- * The connector between step `i` and `i+1` lights up brand-coloured as soon
- * as step `i+1` has started (running OR completed). This makes the flow
- * "fill in" as the pipeline progresses, exactly like a wizard stepper.
+ * Connector between step `i` and `i+1` lights up brand-coloured as soon
+ * as step `i+1` has progressed past idle.
  */
 function connectorActive(next: StepStatus): boolean {
-  return next === "completed" || next === "running";
+  return next === "completed" || next === "running" || next === "failed";
 }
 
-function StepCircle({
-  index,
-  status,
-}: {
-  index: number;
-  status: StepStatus;
-}) {
+function StepCircle({ index, status }: { index: number; status: StepStatus }) {
   const isDone = status === "completed";
   const isRunning = status === "running";
-  const isActive = isDone || isRunning; // both share the brand fill
+  const isActive = isDone || isRunning;
   const isFailed = status === "failed";
   return (
     <div
@@ -199,14 +246,13 @@ function Connector({ active, vertical }: { active: boolean; vertical?: boolean }
 }
 
 function StepLabel({ resolved }: { resolved: ResolvedStep }) {
-  const { step, status, info, metric } = resolved;
-  const ts = info?.finished_at ?? info?.started_at;
+  const { step, status, metric, detail } = resolved;
   return (
     <div className="space-y-1">
       <h4 className="text-body font-semibold text-text-primary leading-snug">{step.name}</h4>
       <Badge tone={statusTone(status)}>{statusLabel(status)}</Badge>
       {metric && <div className="text-caption text-text-secondary">{metric}</div>}
-      {ts && <div className="text-caption text-text-tertiary">{fmtTimestamp(ts)}</div>}
+      {detail && <div className="text-caption text-text-tertiary">{detail}</div>}
     </div>
   );
 }
@@ -214,7 +260,7 @@ function StepLabel({ resolved }: { resolved: ResolvedStep }) {
 function PipelineFlow({ resolved }: { resolved: ResolvedStep[] }) {
   return (
     <>
-      {/* Desktop: horizontal stepper with right-pointing connectors */}
+      {/* Desktop: horizontal stepper */}
       <div className="hidden lg:flex items-start">
         {resolved.map((r, i) => {
           const next = resolved[i + 1];
@@ -232,7 +278,7 @@ function PipelineFlow({ resolved }: { resolved: ResolvedStep[] }) {
         })}
       </div>
 
-      {/* Tablet/mobile: vertical stepper with downward connectors */}
+      {/* Tablet/mobile: vertical stepper */}
       <div className="lg:hidden flex flex-col">
         {resolved.map((r, i) => {
           const next = resolved[i + 1];
@@ -253,38 +299,166 @@ function PipelineFlow({ resolved }: { resolved: ResolvedStep[] }) {
   );
 }
 
-function StepMetric({
-  step,
-  summaryData,
-  classData,
-}: {
+/* ------------------------------------------------------------------ */
+/*  Per-step metric + detail builders                                  */
+/* ------------------------------------------------------------------ */
+
+interface StepCtx {
   step: StepDef;
-  summaryData: ReturnType<typeof useForecastSummary>["data"];
+  status: StepStatus;
+  info: PipelineStatusResponse | null;
+  publishCascade: PipelineCascade | null;
+  summary: ReturnType<typeof useForecastSummary>["data"];
   classData: ReturnType<typeof useClassSummary>["data"];
-}) {
+  /** Tick that increments every second while a pipeline is running. Used as a render trigger. */
+  liveTick: number;
+}
+
+/**
+ * Plain-language metric for each phase. Returns null when we have no
+ * confident data to surface -- never a guess, never a hardcoded number.
+ */
+function stepMetric(ctx: StepCtx): ReactNode {
+  const { step, summary, classData, publishCascade, status } = ctx;
+  const ov = (summary as Record<string, unknown> | undefined)?.training_overview as
+    | Record<string, unknown>
+    | undefined;
+
   switch (step.key) {
     case "collection": {
-      const rows = summaryData?.total_pairs;
-      return rows != null ? <>{fmtNum(rows)} item-route pairs</> : null;
+      const pairs = summary?.total_pairs;
+      const routes = ov?.test_routes as number | undefined;
+      if (pairs == null && routes == null) return null;
+      const parts: string[] = [];
+      if (pairs != null) parts.push(`${fmtNum(pairs)} item-route pairs`);
+      if (routes != null) parts.push(`${fmtNum(routes)} routes`);
+      return parts.join(" · ");
     }
-    case "processing":
-      return <>Outliers handled, gaps filled</>;
-    case "features":
-      return <>47 contextual signals</>;
+    case "processing": {
+      const start = ov?.test_date_start ? fmtDate(ov.test_date_start) : null;
+      const end = ov?.test_date_end ? fmtDate(ov.test_date_end) : null;
+      if (!start || !end) return null;
+      return `Reviewed ${start} – ${end}`;
+    }
     case "classification": {
-      if (!classData?.classes) return null;
-      const total = Object.values(classData.classes).reduce((n, v) => n + v, 0);
-      return <>{fmtNum(total)} items grouped</>;
+      const classes = classData?.classes ?? summary?.classes;
+      if (!classes) return null;
+      const total = Object.values(classes).reduce<number>((n, v) => n + Number(v ?? 0), 0);
+      if (total === 0) return null;
+      return `${fmtNum(total)} items grouped by buying pattern`;
     }
-    case "training":
-      return <>Best model wins per group</>;
+    case "features": {
+      const feats = ov?.feature_count as number | undefined;
+      if (feats == null || feats === 0) return null;
+      return `${fmtNum(feats)} predictive signals built`;
+    }
+    case "training": {
+      const total = ov?.total_models_trained as number | undefined;
+      const winners = ov?.class_winners as
+        | Array<{ demand_class?: string; best_model?: string }>
+        | undefined;
+      if (total == null || total === 0) return null;
+      const picks = Array.isArray(winners) ? winners.length : 0;
+      // Plain language: avoid "WAPE" (unknown to non-technical readers)
+      // and the single-class "best" number that was misleadingly rosy
+      // (smooth class WAPE != lumpy class WAPE). The Overall accuracy
+      // KPI above already gives the headline number.
+      return picks > 0
+        ? `${fmtNum(total)} models compared · best picked for each of ${picks} patterns`
+        : `${fmtNum(total)} models compared`;
+    }
     case "forecast": {
-      const count = summaryData?.future_forecast_count;
-      return count != null ? <>{fmtNum(count)} predictions</> : null;
+      const count = summary?.future_forecast_count;
+      const last = summary?.last_forecast_date ? fmtDate(summary.last_forecast_date) : null;
+      if (count == null) return null;
+      return last ? `${fmtNum(count)} predictions through ${last}` : `${fmtNum(count)} predictions`;
+    }
+    case "publish": {
+      // Publishing has its own combined summary -- don't echo step state
+      // here; that goes into the detail line below.
+      return cascadeSummaryLine(publishCascade, status);
     }
     default:
       return null;
   }
+}
+
+/**
+ * Human-readable detail under the metric. Priorities:
+ *   1. Failed step -> show the error (truncated, full on hover).
+ *   2. Running step -> live elapsed + previous-run duration as ETA hint.
+ *   3. Completed/skipped step -> finished-at timestamp.
+ */
+function stepDetail(ctx: StepCtx): ReactNode {
+  const { status, info } = ctx;
+
+  if (status === "failed") {
+    const msg = info?.error?.trim();
+    if (!msg) return null;
+    const short = msg.length > 80 ? `${msg.slice(0, 80)}…` : msg;
+    return (
+      <span className="text-danger-600" title={msg}>
+        {short}
+      </span>
+    );
+  }
+
+  if (status === "running") {
+    if (!info?.started_at) return "Running…";
+    // ``ctx.liveTick`` deliberately read so this re-evaluates each second.
+    void ctx.liveTick;
+    const elapsed = Math.max(0, (Date.now() - new Date(info.started_at).getTime()) / 1000);
+    const eta = info.last_success_duration_seconds;
+    return eta && eta > 0
+      ? `Running for ${fmtDuration(elapsed)} · last run ${fmtDuration(eta)}`
+      : `Running for ${fmtDuration(elapsed)}`;
+  }
+
+  if (status === "skipped") {
+    return null;
+  }
+
+  // completed / idle
+  const ts = info?.finished_at ?? info?.started_at;
+  return ts ? fmtTimestamp(ts) : null;
+}
+
+/**
+ * One-line plain-language summary of the cascade for the publish step's
+ * metric slot. Uses status priority + the structured cascade payload.
+ */
+function cascadeSummaryLine(
+  cascade: PipelineCascade | null,
+  status: StepStatus,
+): ReactNode {
+  if (status === "idle" || !cascade) {
+    return "Pending — runs after a forecast";
+  }
+  const db = cascade.db_push;
+  const refresh = cascade.data_import_refresh;
+
+  if (status === "running") {
+    const dbRunning = !db || (!db.success && !db.skipped && !db.error);
+    return dbRunning ? "Saving forecast to database…" : "Refreshing downstream apps…";
+  }
+
+  if (status === "failed") {
+    return db?.error ? "Database save failed" : refresh?.error ? "App refresh failed" : "Publishing failed";
+  }
+
+  // completed / skipped
+  const dbOk = Boolean(db?.success);
+  const refreshOk = Boolean(refresh?.success);
+  if (dbOk && refreshOk) return "Database synced · downstream apps refreshed";
+  if (dbOk) {
+    return refresh?.skipped
+      ? "Database synced · downstream refresh not configured"
+      : "Database synced";
+  }
+  if (refreshOk) return "Downstream apps refreshed";
+  // Both skipped or both empty.
+  if (db?.reason === "db_not_configured") return "Database not configured — skipped";
+  return "Nothing to publish";
 }
 
 /* ------------------------------------------------------------------ */
@@ -311,7 +485,7 @@ function HeaderActions({ refetchStatus }: { refetchStatus: () => void }) {
       setTimeout(() => setTrainState("idle"), 3000);
     } catch {
       setTrainState("error");
-      toast("Training failed", "danger");
+      toast("Training failed to start", "danger");
       setTimeout(() => setTrainState("idle"), 4000);
     }
   }, [triggerTrain, refetchStatus, toast]);
@@ -326,7 +500,7 @@ function HeaderActions({ refetchStatus }: { refetchStatus: () => void }) {
       setTimeout(() => setInferState("idle"), 3000);
     } catch {
       setInferState("error");
-      toast("Forecast generation failed", "danger");
+      toast("Forecast generation failed to start", "danger");
       setTimeout(() => setInferState("idle"), 4000);
     }
   }, [triggerInference, refetchStatus, toast]);
@@ -365,17 +539,48 @@ export default function PipelinePage() {
   const { data: summaryData, loading: summaryLoading } = useForecastSummary();
   const { data: classData } = useClassSummary();
 
-  // Resolve once per render so both desktop and mobile flow layouts share the
-  // same memoised metric JSX -- fixes the "build the metric tree twice" hot path.
-  const resolvedSteps = useMemo<ResolvedStep[]>(
-    () =>
-      STEPS.map((step) => ({
-        step,
-        ...resolveStatus(step, statuses),
-        metric: <StepMetric step={step} summaryData={summaryData} classData={classData} />,
-      })),
-    [statuses, summaryData, classData]
+  // While any pipeline is running, tick once per second so the live
+  // elapsed-time line stays current. Stops automatically when nothing is
+  // running so the page is idle-quiet.
+  const [liveTick, setLiveTick] = useState(0);
+  const anyRunning = useMemo(
+    () => Object.values(statuses ?? {}).some((s) => s?.status === "running"),
+    [statuses],
   );
+  useEffect(() => {
+    if (!anyRunning) return;
+    const id = window.setInterval(() => setLiveTick((t) => t + 1), 1000);
+    return () => window.clearInterval(id);
+  }, [anyRunning]);
+
+  // Resolve every step once per render. Publishing has its own resolver
+  // (worst-of-two-substeps); the rest go through resolveStatus.
+  const publish = useMemo(() => resolvePublishStatus(statuses), [statuses]);
+
+  const resolvedSteps = useMemo<ResolvedStep[]>(() => {
+    return STEPS.map((step) => {
+      const resolution =
+        step.key === "publish"
+          ? { status: publish.status, info: publish.info }
+          : resolveStatus(step, statuses);
+      const ctx: StepCtx = {
+        step,
+        status: resolution.status,
+        info: resolution.info,
+        publishCascade: publish.cascade,
+        summary: summaryData,
+        classData,
+        liveTick,
+      };
+      return {
+        step,
+        status: resolution.status,
+        info: resolution.info,
+        metric: stepMetric(ctx),
+        detail: stepDetail(ctx),
+      };
+    });
+  }, [statuses, summaryData, classData, publish, liveTick]);
 
   if (statusLoading && summaryLoading) {
     return <Loading message="Loading pipeline..." />;
@@ -387,10 +592,21 @@ export default function PipelinePage() {
     | undefined;
   const trainedAt = ov?.trained_at ? String(ov.trained_at) : null;
   const trainedDays = daysSince(trainedAt);
-  const testStart = ov?.test_date_start ? String(ov.test_date_start).slice(0, 10) : null;
-  const testEnd = ov?.test_date_end ? String(ov.test_date_end).slice(0, 10) : null;
+  const trainedAgo =
+    trainedDays == null
+      ? "Not yet trained"
+      : trainedDays === 0
+        ? "Trained today"
+        : trainedDays === 1
+          ? "Trained yesterday"
+          : `Trained ${trainedDays} days ago`;
+  const testStart = ov?.test_date_start ? fmtDate(ov.test_date_start) : null;
+  const testEnd = ov?.test_date_end ? fmtDate(ov.test_date_end) : null;
   const testRoutes = ov?.test_routes as number | undefined;
   const testItems = ov?.test_items as number | undefined;
+  const lastForecastDate = summaryData?.last_forecast_date
+    ? fmtDate(summaryData.last_forecast_date)
+    : null;
 
   return (
     <div className="space-y-6">
@@ -400,13 +616,12 @@ export default function PipelinePage() {
         actions={<HeaderActions refetchStatus={refetchStatus} />}
       />
 
-      {/* Top KPI strip — replaces the old stand-alone Model Status card. */}
       <KpiRow columns={3}>
         <MetricCard
-          label="Overall accuracy"
+          label="Baseline accuracy"
           value={accuracy != null ? `${accuracy.toFixed(1)}%` : "\u2014"}
           trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
-          subtitle={trainedDays != null ? `Trained ${trainedDays} day${trainedDays === 1 ? "" : "s"} ago` : "Not yet trained"}
+          subtitle={`Set at training · ${trainedAgo.replace(/^Trained /, "").replace(/^Not yet trained$/, "not yet trained")}`}
           loading={summaryLoading}
         />
         <MetricCard
@@ -422,14 +637,11 @@ export default function PipelinePage() {
               ? `${testRoutes} routes · ${testItems} items`
               : "\u2014"
           }
-          subtitle={summaryData?.last_forecast_date ? `Forecasts through ${summaryData.last_forecast_date}` : undefined}
+          subtitle={lastForecastDate ? `Predicting through ${lastForecastDate}` : undefined}
           loading={summaryLoading}
         />
       </KpiRow>
 
-      {/* Pipeline flow -- proper stepper visualisation with connectors that
-          fill in as the run advances. Horizontal on desktop, vertical on
-          tablet/mobile. Active step pulses; failed steps go red. */}
       <Card title="Pipeline flow">
         <PipelineFlow resolved={resolvedSteps} />
       </Card>

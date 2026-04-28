@@ -110,9 +110,12 @@ class AccuracyService:
             0.0,
         )
 
+        # JSON-safe conversion: NaN / ±Inf become None so the FastAPI
+        # response survives strict JSON consumers.
+        json_safe = merged.replace([np.nan, np.inf, -np.inf], None)
         return {
             "success": True,
-            "rows": merged.to_dict("records"),
+            "rows": json_safe.to_dict("records"),
             "summary": self._compute_summary(merged),
         }
 

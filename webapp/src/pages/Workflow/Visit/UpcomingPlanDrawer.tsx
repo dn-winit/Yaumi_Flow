@@ -37,7 +37,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
     },
     {
       key: "predicted_qty",
-      label: "Predicted qty",
+      label: "Predicted units",
       render: (r: Record<string, unknown>) => fmtNum(r.predicted_qty as number, 1),
     },
     {
@@ -81,7 +81,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
               />
               <MetricCard
                 label="Predicted quantity"
-                value={fmtNum(data.summary.total_qty, 1)}
+                value={fmtNum(data.summary.total_qty)}
                 subtitle="Units to load"
               />
               <MetricCard
@@ -91,13 +91,13 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
                     ? fmtCurrency(data.summary.total_revenue)
                     : "--"
                 }
-                subtitle={data.summary.total_revenue != null ? "Qty x avg price" : "No price data"}
+                subtitle={data.summary.total_revenue != null ? "Units x avg price" : "No price data"}
               />
               <MetricCard
                 label="Peak day"
                 value={
                   data.summary.peak_day
-                    ? fmtNum(data.summary.peak_day.predicted_qty, 1)
+                    ? fmtNum(data.summary.peak_day.predicted_qty)
                     : "--"
                 }
                 subtitle={data.summary.peak_day ? fmtDate(data.summary.peak_day.date) : ""}
@@ -105,10 +105,10 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
             </KpiRow>
 
             <LineChart
-              title="Predicted demand by day"
+              title="Expected demand by day"
               data={data.daily as unknown as Record<string, unknown>[]}
               xKey="date"
-              series={[{ key: "predicted_qty", label: "Predicted qty" }]}
+              series={[{ key: "predicted_qty", label: "Units" }]}
               height={280}
             />
 

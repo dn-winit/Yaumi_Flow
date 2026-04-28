@@ -14,7 +14,7 @@ import CustomerAnalysisModal, { type CustomerAnalysisContext } from "./CustomerA
 import RouteAnalysisModal, { type RouteAnalysisContext } from "./RouteAnalysisModal";
 import UnplannedVisits from "./UnplannedVisits";
 
-import { GOOD_SCORE_THRESHOLD } from "@/lib/format";
+import { GOOD_SCORE_THRESHOLD, fmtNum } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 import { useToast } from "@/hooks/useToast";
 
@@ -178,9 +178,23 @@ export default function LiveSessionTab({
     setSaving(true);
     setSaveErr(null);
     try {
-      await supervisionApi.saveActiveSession(sessionId);
+      const res = await supervisionApi.saveActiveSession(sessionId);
+      if (!res?.success) {
+        const msg = String(res?.error ?? "Save failed");
+        setSaveErr(msg);
+        toast(msg, "danger");
+        return;
+      }
       setSaved(true);
-      toast("Session saved", "success");
+      // File save always succeeds when we reach here. DB save is
+      // best-effort: surface any warning so the supervisor knows the
+      // session is safe on disk but the DB push needs a follow-up.
+      if (res.warning) {
+        setSaveErr(res.warning);
+        toast(res.warning, "danger");
+      } else {
+        toast("Session saved", "success");
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : "Save failed";
       setSaveErr(msg);
@@ -262,8 +276,8 @@ export default function LiveSessionTab({
 
       {/* Metric row */}
       <KpiRow>
-        <MetricCard label="Unique items" value={String(totals.itemsCount)} subtitle={`${totals.totalUnits.toLocaleString()} total units to push`} />
-        <MetricCard label="Customers planned" value={String(totals.custCount)} subtitle="On today's route" />
+        <MetricCard label="Unique items" value={fmtNum(totals.itemsCount)} subtitle={`${fmtNum(totals.totalUnits)} units to deliver`} />
+        <MetricCard label="Customers planned" value={fmtNum(totals.custCount)} subtitle="On today's route" />
         <MetricCard
           label="Visited"
           value={`${totals.visitedCount} / ${totals.custCount}`}

@@ -86,6 +86,23 @@ export function useItemStats(itemCode: string | undefined, routeCode?: string) {
   return { data, loading: isLoading, error: error ? String(error) : null };
 }
 
+/**
+ * Resolve a reporting-period enum (``last_7_working_days`` etc.) to the
+ * actual ``(start_date, end_date)`` over sales_recent.csv. Used by drawers
+ * in other services that need to slice their own data on the same window
+ * the dashboard uses, with real working-day semantics.
+ */
+export function useLookbackWindow(lookback: string | undefined) {
+  const enabled = Boolean(lookback);
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["eda-lookback-window", lookback ?? ""],
+    queryFn: () => dataImportApi.getLookbackWindow(lookback as string),
+    enabled,
+    ...tier("dashboard"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null };
+}
+
 export function useDataStatus() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["data-status"],

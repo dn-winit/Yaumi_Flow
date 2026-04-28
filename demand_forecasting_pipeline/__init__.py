@@ -1,15 +1,9 @@
 """
-Demand Forecasting Pipeline -- production-grade ML forecasting with API.
+Demand Forecasting Pipeline -- production ML forecasting service.
 
-Usage:
-    # As a standalone API service
-    python -m demand_forecasting_pipeline
-
-    # Run training (original entry point still works)
-    python demand_forecasting_pipeline/run_train.py
-
-    # Run inference (original entry point still works)
-    python demand_forecasting_pipeline/run_inference.py
+Single boot path: ``python -m demand_forecasting_pipeline`` starts the
+FastAPI service. All training and inference is triggered through the
+service's ``/pipeline/train`` and ``/pipeline/inference`` endpoints.
 """
 
 __version__ = "1.0.0"
