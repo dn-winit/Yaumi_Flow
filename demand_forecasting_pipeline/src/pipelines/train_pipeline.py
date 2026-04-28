@@ -27,7 +27,7 @@ from ..feature_engineering.builder import build_features
 from ..models.registry import build_model, is_available
 from ..models.ensemble import weighted_average_ensemble, weights_from_metric
 from ..tuning.optuna_tuner import tune_model
-from ..evaluation.metrics import compute_all
+from ..evaluation.metrics import compute_all, composite_summary
 from ..routing import Route, Router, build_pair_signals
 
 
@@ -946,6 +946,16 @@ def run_training(config_path, on_step=None):
                     final_test_pred["q_10"] = pd.concat([raw_q10, raw_q90, pred], axis=1).min(axis=1)
                     final_test_pred["q_90"] = pd.concat([raw_q10, raw_q90, pred], axis=1).max(axis=1)
     save_dataframe(final_test_pred, os.path.join(cfg["paths"]["predictions_dir"], "test_predictions.csv"))
+
+    # Audit snapshot of training-time composite accuracy. UI tiles still
+    # recompute from the CSV so this is a self-describing artifact only.
+    if not final_test_pred.empty and target_col in final_test_pred.columns and "prediction" in final_test_pred.columns:
+        cls_arr = final_test_pred["class"].astype(str).to_numpy() if "class" in final_test_pred.columns else None
+        artifacts["composite_accuracy_pct"] = composite_summary(
+            final_test_pred[target_col].to_numpy(),
+            final_test_pred["prediction"].to_numpy(),
+            cls_arr,
+        )["accuracy_pct"]
 
     metrics_df = pd.DataFrame(metrics_records)
     save_dataframe(metrics_df, os.path.join(cfg["paths"]["metrics_dir"], "model_metrics.csv"))

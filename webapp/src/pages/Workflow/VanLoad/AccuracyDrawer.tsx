@@ -17,6 +17,7 @@ import {
   fmtCurrency,
   toNum,
   pickDate,
+  compositeAccuracy,
   GOOD_SCORE_THRESHOLD,
   TOLERANCE_PCT,
   LEAKAGE_SHARE_WARN,
@@ -26,6 +27,8 @@ import {
   type Lookback,
 } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
+import InfoBubble from "@/components/ui/InfoBubble";
+import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
 import type { DashboardFilters, ForecastRow } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
 import type { Row } from "@/types/common";
@@ -79,22 +82,16 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
   );
   const rows = (data?.rows ?? []) as ForecastRow[];
 
-  // Canonical working-day list for the lookback. Daily chart uses it as
-  // the X-axis so the same N-working-day window always shows N ticks --
-  // scope filters can no longer leave gaps in the trend.
+  // Working-day axis for the daily chart -- pads gaps when scope filters
+  // strip a day from the merge.
   const windowQ = useLookbackWindow(open ? lookback : undefined);
   const activeDates = windowQ.data?.active_dates ?? [];
 
-  // ----- Single-pass client-side stats (forecast-dimension identity:
-  // demandServed + unsoldForecast = totalPredicted). -----
-  const wapeAccuracy = (absErr: number, actual: number) =>
-    actual > 0 ? Math.max(0, 100 - (absErr / actual) * 100) : null;
-
+  // Single-pass aggregation. Headline accuracyPct uses the canonical
+  // composite helper so it reconciles with the Pipeline tiles.
   const stats = useMemo(() => {
     const byDay = new Map<string, { p: number; a: number }>();
     const byItem = new Map<string, { predicted: number; actual: number }>();
-    let scoredAbsErr = 0;
-    let scoredActual = 0;
     let totalActual = 0;
     let totalPredicted = 0;
     let demandServed = 0;
@@ -107,10 +104,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
       const a = toNum(r.actual_qty) ?? 0;
       totalActual += a;
       totalPredicted += p;
-      if (a > 0 && p > 0) {
-        scoredAbsErr += Math.abs(a - p);
-        scoredActual += a;
-      }
       demandServed += Math.min(p, a);
       const excess = Math.max(0, p - a);
       if (excess > 0) {
@@ -137,6 +130,14 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
         byItem.set(code, agg);
       }
     });
+
+    const accuracyPct = compositeAccuracy(
+      rows.map((r) => ({
+        predicted: toNum(r.predicted) ?? 0,
+        actual: toNum(r.actual_qty) ?? 0,
+        demandClass: r.demand_class,
+      })),
+    );
 
     let forecastedSkuCount = 0;
     let servedSkuCount = 0;
@@ -165,7 +166,8 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
       } else {
         currentStreak = 0;
       }
-      const acc = wapeAccuracy(Math.abs(p - a), a);
+      // Plain day-level WAPE for the "best day" highlight.
+      const acc = a > 0 ? Math.max(0, 100 - (Math.abs(p - a) / a) * 100) : null;
       if (acc != null && acc > bestDayAcc) {
         bestDayAcc = acc;
         bestDayDate = date;
@@ -174,7 +176,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
     const bestDay = bestDayAcc >= 0 ? { date: bestDayDate, accuracy: bestDayAcc } : null;
 
     return {
-      accuracyPct: wapeAccuracy(scoredAbsErr, scoredActual),
+      accuracyPct,
       demandServed,
       totalActual,
       totalPredicted,
@@ -348,6 +350,12 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
                     : `No records in ${windowLabel}`
                 }
                 trend={accuracyArrow}
+                info={
+                  <InfoBubble
+                    title="How forecast accuracy is calculated"
+                    body={<ForecastAccuracyExplanation />}
+                  />
+                }
               />
               <MetricCard
                 label="Days we got it right"

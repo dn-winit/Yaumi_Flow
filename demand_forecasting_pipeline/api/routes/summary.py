@@ -10,24 +10,18 @@ from fastapi import APIRouter, Depends
 from demand_forecasting_pipeline.api.dependencies import get_artifact_service
 from demand_forecasting_pipeline.api.schemas import ForecastSummaryResponse
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
-from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
+from demand_forecasting_pipeline.src.evaluation.metrics import composite_summary
 
 router = APIRouter(prefix="/summary", tags=["summary"])
 
 
 @router.get("", response_model=ForecastSummaryResponse)
 def forecast_summary(svc: ArtifactService = Depends(get_artifact_service)):
-    """Small aggregated payload for KPI dashboards.
-
-    Accuracy uses WAPE on test-set rows where both actual > 0 AND predicted > 0,
-    consistent with every other accuracy display in the system (drift, drawer,
-    dashboard card). Zero-actual rows have undefined % error; zero-predicted
-    rows represent items we didn't recommend and so aren't part of the score.
-    """
+    """KPI payload for the Pipeline page. Accuracy is the canonical
+    class-aware composite, shared with drift + Past-performance drawer."""
     test_df, test_total = svc.get_test_predictions(limit=50_000, offset=0)
 
-    # Test predictions use TotalQuantity as actual and prediction as forecast.
-    # Fallback to actual_qty/predicted for forward-compatibility.
+    # New artifacts use TotalQuantity / prediction; fall back for older snapshots.
     actual_col = "TotalQuantity" if "TotalQuantity" in test_df.columns else "actual_qty"
     pred_col = "prediction" if "prediction" in test_df.columns else "predicted"
 
@@ -35,7 +29,8 @@ def forecast_summary(svc: ArtifactService = Depends(get_artifact_service)):
     if not test_df.empty and actual_col in test_df.columns and pred_col in test_df.columns:
         actual = pd.to_numeric(test_df[actual_col], errors="coerce").fillna(0)
         predicted = pd.to_numeric(test_df[pred_col], errors="coerce").fillna(0)
-        accuracy_pct = wape_summary(actual, predicted)["accuracy_pct"]
+        cls = test_df["class"].astype(str).to_numpy() if "class" in test_df.columns else None
+        accuracy_pct = composite_summary(actual.to_numpy(), predicted.to_numpy(), cls)["accuracy_pct"]
 
     class_summary = svc.get_class_summary()
     total_pairs = int(class_summary.get("total_pairs", 0))

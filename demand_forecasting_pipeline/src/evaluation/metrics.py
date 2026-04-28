@@ -1,19 +1,28 @@
 """
-Forecast error metrics.
-
-Every function returns a plain float (or ``None`` when the input has no
-scorable rows), so callers can store results in JSON/CSV without further
-conversion. ``compute_all`` is the single dispatch point used by the
-training and evaluation code paths.
+Forecast error metrics. ``compute_all`` dispatches per-model errors
+(MAE/RMSE/MAPE/...) for training. ``composite_summary`` is the single
+class-aware headline accuracy every UI tile reads.
 """
 
 from __future__ import annotations
 
-from typing import Iterable
+from typing import Iterable, Optional, Sequence
 
 import numpy as np
 
 _EPS = 1e-9
+
+
+# Per-class miss tolerance for composite accuracy. SBC (Syntetos-Boylan-
+# Croston) buckets get progressively wider tolerances as items become
+# inherently harder to predict. Mirrored in webapp/src/lib/format.ts.
+TOLERANCE_BY_CLASS: dict[str, float] = {
+    "smooth":       0.10,
+    "intermittent": 0.20,
+    "erratic":      0.30,
+    "lumpy":        0.40,
+}
+DEFAULT_TOLERANCE = 0.20  # unknown / missing class
 
 
 def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -73,19 +82,30 @@ def wape(y_true: np.ndarray, y_pred: np.ndarray, eps: float = _EPS) -> float | N
     return float(np.sum(np.abs(y_true[mask] - y_pred[mask])) / scored * 100.0)
 
 
-def wape_summary(actual: np.ndarray, predicted: np.ndarray) -> dict:
-    """WAPE-based accuracy plus the underlying sums, so callers can build
-    richer response objects without re-deriving the math.
+def composite_summary(
+    actual: np.ndarray,
+    predicted: np.ndarray,
+    demand_class: Optional[Sequence[str]] = None,
+) -> dict:
+    """Class-aware accuracy -- the headline business metric.
+
+    Each row's miss is forgiven up to ``TOLERANCE_BY_CLASS[class]``;
+    only the overshoot beyond tolerance feeds the WAPE numerator. When
+    ``demand_class`` is missing or unrecognised for a row the
+    :data:`DEFAULT_TOLERANCE` is applied so a sparse upstream classifier
+    can never crash the metric.
 
     Returns::
         {
-          "wape":            float,  # percent
-          "accuracy_pct":    float,  # max(0, 100 - wape)
-          "rows_compared":   int,    # scored-subset size
-          "total_predicted": float,  # sum over ALL rows (business total)
-          "total_actual":    float,  # sum over ALL rows (business total)
-          "scored_actual":   float,  # sum over scored subset (WAPE denom)
-          "scored_abs_err":  float,  # sum |actual - pred| over scored subset
+          "wape":             float,  # tolerance-adjusted WAPE %
+          "accuracy_pct":     float,  # max(0, 100 - wape)
+          "rows_compared":    int,    # cells where actual > 0 AND pred > 0
+          "total_predicted":  float,  # sum over ALL rows (business total)
+          "total_actual":     float,  # sum over ALL rows (business total)
+          "scored_actual":    float,  # WAPE denominator
+          "scored_abs_err":   float,  # raw |actual - pred| pre-tolerance
+          "method":           "composite",
+          "tolerance_by_class": dict[str, float],
         }
     """
     actual = np.asarray(actual, dtype=float)
@@ -93,6 +113,7 @@ def wape_summary(actual: np.ndarray, predicted: np.ndarray) -> dict:
     total_actual = float(np.nansum(actual))
     total_predicted = float(np.nansum(predicted))
     mask = (actual > 0) & (predicted > 0)
+
     if not mask.any():
         return {
             "wape": 0.0,
@@ -102,10 +123,29 @@ def wape_summary(actual: np.ndarray, predicted: np.ndarray) -> dict:
             "total_actual": total_actual,
             "scored_actual": 0.0,
             "scored_abs_err": 0.0,
+            "method": "composite",
+            "tolerance_by_class": dict(TOLERANCE_BY_CLASS),
         }
-    scored_actual = float(actual[mask].sum())
-    scored_abs_err = float(np.abs(actual[mask] - predicted[mask]).sum())
-    wape_pct = scored_abs_err / scored_actual * 100.0 if scored_actual > 0 else 0.0
+
+    a = actual[mask]
+    p = predicted[mask]
+
+    if demand_class is None:
+        tol = np.full(a.shape, DEFAULT_TOLERANCE, dtype=float)
+    else:
+        cls_arr = np.asarray(demand_class, dtype=object)
+        cls_arr = cls_arr[mask]
+        tol = np.array(
+            [TOLERANCE_BY_CLASS.get(str(c).strip().lower(), DEFAULT_TOLERANCE) for c in cls_arr],
+            dtype=float,
+        )
+
+    abs_err = np.abs(a - p)
+    real_miss = np.maximum(0.0, abs_err - tol * a)
+    scored_actual = float(a.sum())
+    real_miss_sum = float(real_miss.sum())
+    abs_err_sum = float(abs_err.sum())
+    wape_pct = real_miss_sum / scored_actual * 100.0 if scored_actual > 0 else 0.0
     return {
         "wape": round(wape_pct, 2),
         "accuracy_pct": round(max(0.0, 100.0 - wape_pct), 2),
@@ -113,7 +153,9 @@ def wape_summary(actual: np.ndarray, predicted: np.ndarray) -> dict:
         "total_predicted": total_predicted,
         "total_actual": total_actual,
         "scored_actual": scored_actual,
-        "scored_abs_err": scored_abs_err,
+        "scored_abs_err": abs_err_sum,  # raw, pre-tolerance
+        "method": "composite",
+        "tolerance_by_class": dict(TOLERANCE_BY_CLASS),
     }
 
 

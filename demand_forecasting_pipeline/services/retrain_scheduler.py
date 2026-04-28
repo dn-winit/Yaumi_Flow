@@ -25,7 +25,7 @@ import httpx
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
+from demand_forecasting_pipeline.src.evaluation.metrics import composite_summary
 
 logger = logging.getLogger(__name__)
 
@@ -298,20 +298,20 @@ def _recent_window(settings: Settings) -> tuple[str, str]:
     )
 
 
-def _wape_accuracy(actual: pd.Series, pred: pd.Series) -> Optional[float]:
-    """Shared WAPE helper: coerces to float, runs the canonical summary,
-    returns ``accuracy_pct`` or ``None`` if nothing was scorable."""
+def _composite_accuracy(
+    actual: pd.Series, pred: pd.Series, demand_class: Optional[pd.Series] = None,
+) -> Optional[float]:
+    """Coerce to float, run :func:`composite_summary`, return accuracy_pct
+    or None when nothing scored."""
     a = pd.to_numeric(actual, errors="coerce").fillna(0).to_numpy()
     p = pd.to_numeric(pred, errors="coerce").fillna(0).to_numpy()
-    stats = wape_summary(a, p)
+    cls = demand_class.astype(str).to_numpy() if demand_class is not None else None
+    stats = composite_summary(a, p, cls)
     return stats["accuracy_pct"] if stats["rows_compared"] > 0 else None
 
 
 def _training_baseline_accuracy(svc: Any) -> Optional[float]:
-    """Full-test-set WAPE — the same number ``/summary`` surfaces as the
-    training-time accuracy. Column names come from ``svc.target_col`` so we
-    stay in lockstep with the pipeline config.
-    """
+    """Composite accuracy over the full held-out test set."""
     try:
         test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
     except Exception as exc:
@@ -322,12 +322,13 @@ def _training_baseline_accuracy(svc: Any) -> Optional[float]:
     actual_col = getattr(svc, "target_col", "") or ""
     if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
         return None
-    return _wape_accuracy(test_df[actual_col], test_df["prediction"])
+    cls = test_df["class"] if "class" in test_df.columns else None
+    return _composite_accuracy(test_df[actual_col], test_df["prediction"], cls)
 
 
 def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
-    """WAPE on the last 7 days of the static test-predictions CSV — fallback
-    when the live DB is unreachable. Column names are config-driven."""
+    """Composite accuracy on the last 7 days of test_predictions.csv --
+    fallback when the live DB is unreachable."""
     try:
         test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
     except Exception:
@@ -339,18 +340,14 @@ def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
     if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
         return None
 
-    actual = test_df[actual_col]
-    pred = test_df["prediction"]
-
     if "TrxDate" in test_df.columns:
         dates = pd.to_datetime(test_df["TrxDate"], errors="coerce")
         max_date = dates.max()
         if pd.notna(max_date):
-            mask = dates >= (max_date - pd.Timedelta(days=7))
-            actual = actual[mask]
-            pred = pred[mask]
+            test_df = test_df[dates >= (max_date - pd.Timedelta(days=7))]
 
-    return _wape_accuracy(actual, pred)
+    cls = test_df["class"] if "class" in test_df.columns else None
+    return _composite_accuracy(test_df[actual_col], test_df["prediction"], cls)
 # ---------------------------------------------------------------------------
 #  Scheduler job: check_and_retrain
 # ---------------------------------------------------------------------------

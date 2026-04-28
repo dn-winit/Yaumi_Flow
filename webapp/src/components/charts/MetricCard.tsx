@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef, type ReactNode } from "react";
 import { Skeleton } from "@/components/ui/Skeleton";
 
 type Trend = "up" | "down" | "neutral";
@@ -10,6 +10,8 @@ interface MetricCardProps {
   subtitle?: string;
   className?: string;
   loading?: boolean;
+  /** Optional element rendered next to the label (intended for InfoBubble). */
+  info?: ReactNode;
 }
 
 const trendConfig: Record<Trend, { icon: string; color: string }> = {
@@ -77,6 +79,7 @@ export default function MetricCard({
   subtitle,
   className = "",
   loading = false,
+  info,
 }: MetricCardProps) {
   const animatedValue = useAnimatedValue(String(value));
 
@@ -89,8 +92,9 @@ export default function MetricCard({
         .filter(Boolean)
         .join(" ")}
     >
-      <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">
-        {label}
+      <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1 flex items-center gap-1.5">
+        <span>{label}</span>
+        {info}
       </p>
       {loading ? (
         <>

@@ -56,6 +56,37 @@ export const AT_RISK_CONFIDENCE = 0.7;
 export const TOLERANCE_PCT = 0.2;
 export const LEAKAGE_SHARE_WARN = 0.05;
 
+// Per-class miss tolerance for composite accuracy. Mirrors
+// TOLERANCE_BY_CLASS in demand_forecasting_pipeline/src/evaluation/metrics.py
+// (kept in lockstep manually).
+export const TOLERANCE_BY_CLASS: Readonly<Record<string, number>> = {
+  smooth:       0.10,
+  intermittent: 0.20,
+  erratic:      0.30,
+  lumpy:        0.40,
+};
+export const DEFAULT_CLASS_TOLERANCE = 0.20;
+
+/** Composite accuracy on the client -- mirror of Python composite_summary. */
+export function compositeAccuracy(
+  rows: { predicted: number; actual: number; demandClass?: string | null }[],
+): number | null {
+  let scoredActual = 0;
+  let realMiss = 0;
+  for (const r of rows) {
+    if (!(r.predicted > 0) || !(r.actual > 0)) continue;
+    const tol =
+      TOLERANCE_BY_CLASS[String(r.demandClass ?? "").trim().toLowerCase()] ??
+      DEFAULT_CLASS_TOLERANCE;
+    const absErr = Math.abs(r.predicted - r.actual);
+    const allowed = tol * r.actual;
+    realMiss += Math.max(0, absErr - allowed);
+    scoredActual += r.actual;
+  }
+  if (scoredActual <= 0) return null;
+  return Math.max(0, 100 - (realMiss / scoredActual) * 100);
+}
+
 /**
  * Recommendation-adoption thresholds.
  *  - DELIVERY_GOOD: green when volume/revenue delivered >= this % of recommended.

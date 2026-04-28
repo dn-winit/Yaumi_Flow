@@ -175,6 +175,8 @@ export interface ForecastRow {
   predicted: number;
   actual_qty: number;
   price: number;
+  // SBC bucket (smooth | intermittent | erratic | lumpy). Empty for sale-only rows.
+  demand_class: string;
 }
 
 export interface ForecastRowsResponse {

@@ -469,17 +469,30 @@ class EdaService:
     # join against customer_data for fresher actuals + per-period prices.
     # ------------------------------------------------------------------
 
-    _FORECAST_COLUMNS = ["TrxDate", "RouteCode", "ItemCode", "DataSplit", "Predicted"]
+    # DemandClass flows through so /eda/forecast-rows can ship it per row
+    # for client-side composite accuracy in the Past-performance drawer.
+    _FORECAST_COLUMNS = [
+        "TrxDate", "RouteCode", "ItemCode", "DataSplit", "Predicted", "DemandClass",
+    ]
 
     def _load_forecast_df(self) -> pd.DataFrame:
         path = self._s.data_path(self._s.demand_forecast_file)
         if not path.exists():
             logger.warning("Demand-forecast file not found: %s", path)
             return pd.DataFrame()
-        df = pd.read_csv(path, low_memory=False, usecols=self._FORECAST_COLUMNS)
+        # Pad missing columns so older snapshots without DemandClass still load.
+        try:
+            df = pd.read_csv(path, low_memory=False, usecols=self._FORECAST_COLUMNS)
+        except ValueError:
+            df = pd.read_csv(path, low_memory=False)
+            for col in self._FORECAST_COLUMNS:
+                if col not in df.columns:
+                    df[col] = "" if col == "DemandClass" else 0
+            df = df[self._FORECAST_COLUMNS]
         df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce")
         df["RouteCode"] = df["RouteCode"].astype(str).str.strip()
         df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
+        df["DemandClass"] = df["DemandClass"].fillna("").astype(str).str.strip().str.lower()
         df["Predicted"] = pd.to_numeric(df["Predicted"], errors="coerce").fillna(0)
         return df.dropna(subset=["TrxDate"])
 
@@ -578,13 +591,16 @@ class EdaService:
             forecast["TrxDate"] = forecast["TrxDate"].dt.normalize()
             forecast = (
                 forecast.groupby(["TrxDate", "RouteCode", "ItemCode"], as_index=False)
-                .agg(predicted=("Predicted", "sum"))
+                .agg(predicted=("Predicted", "sum"),
+                     demand_class=("DemandClass", "first"))
             )
             covered_cells = forecast[["RouteCode", "TrxDate"]].drop_duplicates()
             covered_routes = int(covered_cells["RouteCode"].nunique())
             covered_days = int(covered_cells["TrxDate"].nunique())
         else:
-            forecast = pd.DataFrame(columns=["TrxDate", "RouteCode", "ItemCode", "predicted"])
+            forecast = pd.DataFrame(
+                columns=["TrxDate", "RouteCode", "ItemCode", "predicted", "demand_class"]
+            )
             covered_routes = 0
             covered_days = 0
 
@@ -596,6 +612,10 @@ class EdaService:
         )
         for col in ("predicted", "actual_qty", "price"):
             merged[col] = merged[col].fillna(0.0)
+        if "demand_class" in merged.columns:
+            merged["demand_class"] = merged["demand_class"].fillna("").astype(str).str.lower()
+        else:
+            merged["demand_class"] = ""
 
         # Price fallback for forecast-only rows that had no matching sale.
         zero_price = merged["price"] <= 0
@@ -811,6 +831,7 @@ class EdaService:
                 "predicted": round(float(r.predicted), 2),
                 "actual_qty": round(float(r.actual_qty), 2),
                 "price": round(float(r.price), 4),
+                "demand_class": str(getattr(r, "demand_class", "") or ""),
             }
             for r in merged.itertuples(index=False)
         ]

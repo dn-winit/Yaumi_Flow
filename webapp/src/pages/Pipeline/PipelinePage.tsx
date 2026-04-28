@@ -16,6 +16,8 @@ import { useToast } from "@/hooks/useToast";
 import AutoRetrainSection from "./AutoRetrainSection";
 import { fmtNum, GOOD_SCORE_THRESHOLD } from "@/lib/format";
 import { fmtDate, fmtDateTime } from "@/lib/date";
+import InfoBubble from "@/components/ui/InfoBubble";
+import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
 import type { Tone } from "@/lib/colorize";
 import type { PipelineStatusResponse, PipelineCascade } from "@/types/forecast";
 
@@ -623,6 +625,12 @@ export default function PipelinePage() {
           trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
           subtitle={`Set at training · ${trainedAgo.replace(/^Trained /, "").replace(/^Not yet trained$/, "not yet trained")}`}
           loading={summaryLoading}
+          info={
+            <InfoBubble
+              title="How forecast accuracy is calculated"
+              body={<ForecastAccuracyExplanation />}
+            />
+          }
         />
         <MetricCard
           label="Last trained"

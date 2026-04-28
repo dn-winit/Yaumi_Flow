@@ -8,6 +8,8 @@ import {
   useUpdateRetrainConfig,
 } from "@/hooks/useForecast";
 import { fmtDate } from "@/lib/date";
+import InfoBubble from "@/components/ui/InfoBubble";
+import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
 import type { Tone } from "@/lib/colorize";
 
 /* ------------------------------------------------------------------ */
@@ -143,14 +145,12 @@ export default function AutoRetrainSection() {
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Drift status */}
           <div>
-            <span className="text-caption text-text-tertiary flex items-center gap-1 mb-1">
+            <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
               Drift status
-              <span
-                className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-default text-[9px] font-semibold text-text-tertiary cursor-help"
-                title="Monitors how well predictions match real sales over the last 7 days. If performance drops, you'll see a warning here."
-              >
-                i
-              </span>
+              <InfoBubble
+                title="How drift is measured"
+                text="Drift compares the last 7 working days' accuracy (live sales vs forecast) against the model's training-time baseline. When recent accuracy drops well below baseline, the world has shifted since training and a retrain is warranted. Status is 'stable' inside the warn band, 'drifting' between warn and alert thresholds, and 'significant' beyond alert."
+              />
             </span>
             {drift ? (
               <Badge tone={driftTone(drift.status)}>{driftLabel(drift.status)}</Badge>
@@ -163,14 +163,12 @@ export default function AutoRetrainSection() {
 
           {/* Recent vs baseline accuracy */}
           <div>
-            <span className="text-caption text-text-tertiary flex items-center gap-1 mb-1">
+            <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
               Recent accuracy
-              <span
-                className="inline-flex items-center justify-center w-3.5 h-3.5 rounded-full border border-default text-[9px] font-semibold text-text-tertiary cursor-help"
-                title="How closely our predictions matched what customers actually bought in the last 7 days, compared to the accuracy when the model was trained."
-              >
-                i
-              </span>
+              <InfoBubble
+                title="How forecast accuracy is calculated"
+                body={<ForecastAccuracyExplanation />}
+              />
             </span>
             <span className="text-body font-semibold text-text-primary">
               {fmtPct(drift?.recent_accuracy ?? null)}

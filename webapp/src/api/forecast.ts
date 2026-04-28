@@ -65,5 +65,7 @@ export const forecastApi = {
     c().post<RetrainConfig>("/retrain/config", updates).then((r) => r.data),
 
   getRetrainHistory: () =>
-    c().get<RetrainHistoryEntry[]>("/retrain/history").then((r) => r.data),
+    c()
+      .get<{ history: RetrainHistoryEntry[] }>("/retrain/history")
+      .then((r) => r.data?.history ?? []),
 };

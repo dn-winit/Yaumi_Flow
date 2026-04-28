@@ -16,7 +16,7 @@ import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.src.evaluation.metrics import wape_summary
+from demand_forecasting_pipeline.src.evaluation.metrics import composite_summary
 
 logger = logging.getLogger(__name__)
 
@@ -213,12 +213,14 @@ class AccuracyService:
         if df.empty:
             return _EMPTY_SUMMARY
 
-        # WAPE uses the canonical helper: scores rows where actual > 0 AND
-        # predicted > 0, ensuring every accuracy display reads the same number.
-        stats = wape_summary(df["actual_qty"].to_numpy(), df["predicted"].to_numpy())
+        cls = df["demand_class"] if "demand_class" in df.columns else None
+        stats = composite_summary(
+            df["actual_qty"].to_numpy(),
+            df["predicted"].to_numpy(),
+            cls.astype(str).to_numpy() if cls is not None else None,
+        )
 
-        # MAE / RMSE are informational side-metrics — compute over the same
-        # scored subset so they're interpretable alongside WAPE.
+        # Side metrics over the same both-positive subset.
         scored = df[(df["actual_qty"] > 0) & (df["predicted"] > 0)]
         if scored.empty:
             return {
