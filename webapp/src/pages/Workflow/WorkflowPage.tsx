@@ -1,9 +1,9 @@
 import { useEffect } from "react";
-import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom";
+import { Navigate, Route, Routes, useLocation } from "react-router-dom";
 import { ROUTES, WORKFLOW_TABS } from "@/config/routes";
 import PageHeader from "@/components/layout/PageHeader";
 
-import { WorkflowProvider, useWorkflow } from "./workflowContext";
+import { WorkflowProvider, useWorkflow, useWorkflowNavigate } from "./workflowContext";
 import VanLoadTab from "./VanLoad/VanLoadTab";
 import VisitTab from "./Visit/VisitTab";
 
@@ -15,7 +15,9 @@ import VisitTab from "./Visit/VisitTab";
  * so a pick made in Plan carries straight into Visit.
  */
 function WorkflowStepper() {
-  const navigate = useNavigate();
+  // Workflow-aware navigate keeps ?route=…&date=… across step jumps so a
+  // refresh on Visit doesn't bounce back to Plan's route picker.
+  const navigate = useWorkflowNavigate();
   const location = useLocation();
   const { routeCode } = useWorkflow();
 

@@ -33,7 +33,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -43,7 +43,6 @@ from recommended_order.config.settings import get_settings
 from recommended_order.core.calibration import (
     RouteCalibration,
     calibrate,
-    cache_size as calibration_cache_size,
     classify_tier,
 )
 from recommended_order.core.constraints import apply_van_load_constraints
@@ -143,6 +142,18 @@ class RecommendationEngine:
         t0 = time.time()
         target_dt = pd.to_datetime(target_date).normalize()
 
+        # As-of cutoff: when planning the visit for ``target_date``, the
+        # only history we may use is what was known BEFORE that day. Sales
+        # already booked on the target date itself are the *answer*, not
+        # the input -- counting them as "just-bought" history collapses the
+        # purchase cycle and starves the customer of recommendations
+        # (DaysSinceLastPurchase=0, cycle=0 -> only peer/basket items
+        # survive). Strictly less-than the target date keeps the engine
+        # forecasting forward instead of describing the past.
+        if "TrxDate" in customer_df.columns and not customer_df.empty:
+            cdf_dates = pd.to_datetime(customer_df["TrxDate"], errors="coerce")
+            customer_df = customer_df[cdf_dates < target_dt].copy()
+
         # 1. Calibrate thresholds for this route (with window + corpus sanity clamp)
         calibration = calibrate(
             customer_df=customer_df,
@@ -154,11 +165,23 @@ class RecommendationEngine:
             corpus_field_values=self._corpus_field_values,
             source_weight_adjustments=self._feedback_adjustments.get(route_code),
             feedback_confidence=self._feedback_confidence.get(route_code),
+            as_of=target_dt,
         )
         cycle_calc = CycleCalculator(calibration.recency_half_life_days)
 
         # 2. Route-level pre-compute (done ONCE per route)
-        histories = self._precompute(customer_df, journey_customers)
+        # Basket-size tier thresholds are computed over the FULL filtered
+        # frame, not just today's planned customers, so a customer's tier
+        # reflects intrinsic behaviour rather than today's group composition.
+        basket_p25, basket_p75 = self._basket_thresholds(customer_df)
+        histories = self._precompute(
+            customer_df,
+            journey_customers,
+            basket_p25=basket_p25,
+            basket_p75=basket_p75,
+            fallback_gate=calibration.completion_gate,
+            fallback_half_life=calibration.recency_half_life_days,
+        )
         top_van_items = self._top_van_items(van_items, self._c.clamps.seed_top_k)
 
         # Edge case (Sprint-3, Theme C.4): micro-route / degenerate peer input.
@@ -224,6 +247,7 @@ class RecommendationEngine:
 
             cust_history = cust_data["history"]
             item_dict = cust_data["items"]
+            profile = cust_data["profile"]
 
             all_cands: List[Candidate] = []
 
@@ -238,6 +262,7 @@ class RecommendationEngine:
                     priority_calc=self._priority,
                     quantity_calc=self._quantity,
                     trend_calc=self._trend,
+                    profile=profile,
                 ),
             )
             gen_stats["history"]["candidates"] += len(history_cands)
@@ -251,6 +276,8 @@ class RecommendationEngine:
                         lookalike_ctx=lookalike_ctx,
                         calibration=calibration,
                         clamps=self._c.clamps,
+                        target_dt=target_dt,
+                        cycle_calc=cycle_calc,
                     ),
                 )
                 gen_stats["peer"]["candidates"] += len(peer_cands)
@@ -415,9 +442,15 @@ class RecommendationEngine:
         calibration: RouteCalibration,
     ) -> Dict[str, Any]:
         c = self._c.clamps
-        # Key by (route, csv_mtime, window_days) -- same invalidation as calibration.
+        # Key by (route, csv_mtime, window_days, target_dt). target_dt is
+        # part of the key because the engine filters customer_df to
+        # ``TrxDate < target_dt`` upstream — different target dates produce
+        # different filtered frames even when the source CSV hasn't changed.
+        # Without target_dt in the key we'd serve tomorrow's similarity
+        # matrix for today's request (or vice versa) as long as
+        # customer_data.csv didn't get re-imported between the two.
         from recommended_order.core.calibration import _csv_mtime as _mt
-        key = (route_code, _mt(), c.calibration_window_days)
+        key = (route_code, _mt(), c.calibration_window_days, target_dt.date().isoformat())
         now = time.time()
         with self._cache_lock:
             entry = self._lookalike_cache.get(key)
@@ -499,9 +532,99 @@ class RecommendationEngine:
         return [(code, int(qty)) for code, qty in ranked[:k] if int(qty or 0) > 0]
 
     @staticmethod
+    def _basket_thresholds(customer_df: pd.DataFrame) -> Tuple[float, float]:
+        """Route-wide P25/P75 of per-customer avg basket size (units per visit).
+
+        Used to bucket customers into HEAVY / MEDIUM / LIGHT tiers so the
+        priority blend leans appropriately: a hypermarket buying 80 units a
+        visit cares about quantity depth; a corner store buying 6 units cares
+        about timing. Computed over the *full* route history (not just today's
+        journey customers) so a customer's tier is intrinsic to their
+        behaviour, not relative to whoever happens to be on today's plan.
+        """
+        if customer_df.empty or "TotalQuantity" not in customer_df.columns:
+            return 0.0, 0.0
+        per_visit = (
+            customer_df.groupby(["CustomerCode", "TrxDate"])["TotalQuantity"].sum()
+        )
+        per_cust = per_visit.groupby(level=0).mean()
+        if per_cust.empty:
+            return 0.0, 0.0
+        return float(np.percentile(per_cust, 25)), float(np.percentile(per_cust, 75))
+
+    @staticmethod
+    def _customer_profile(
+        cust_history: pd.DataFrame,
+        basket_p25: float,
+        basket_p75: float,
+        fallback_gate: float,
+        fallback_half_life: float,
+    ) -> Dict[str, Any]:
+        """Per-customer behavioural profile.
+
+        Three signals derived from this customer's own history (with documented
+        fallbacks to route calibration when sample is too thin):
+
+        * ``tier`` -- HEAVY / MEDIUM / LIGHT band by avg basket size. Drives
+          the timing-vs-quantity weight blend in PriorityCalculator.
+        * ``completion_gate`` -- ``1 - 1/median_overall_cycle``, clamped.
+          A fast-cycling customer (median 2d) gates at ~0.5 (recommend at 50%
+          due); a patient customer (median 14d) gates at ~0.93. Replaces the
+          one-size-fits-all route gate.
+        * ``half_life_days`` -- recency decay tuned to *this customer's*
+          visit cadence (3 x median customer-cycle). Frequent visitors get a
+          tighter half-life so last-week purchases dominate qty calc.
+        """
+        # --- Tier (via avg basket size) ---
+        if cust_history.empty or "TotalQuantity" not in cust_history.columns:
+            tier = "MEDIUM"
+            avg_basket = 0.0
+        else:
+            avg_basket = float(
+                cust_history.groupby("TrxDate")["TotalQuantity"].sum().mean()
+            )
+            if basket_p75 > 0 and avg_basket >= basket_p75:
+                tier = "HEAVY"
+            elif basket_p25 > 0 and avg_basket <= basket_p25:
+                tier = "LIGHT"
+            else:
+                tier = "MEDIUM"
+
+        # --- Personal completion gate + half-life from overall cycle ---
+        completion_gate = fallback_gate
+        half_life_days = fallback_half_life
+        median_cycle: Optional[float] = None
+        if not cust_history.empty:
+            dates = pd.to_datetime(cust_history["TrxDate"]).sort_values().unique()
+            if len(dates) >= 3:
+                gaps = np.diff(dates).astype("timedelta64[D]").astype(float)
+                median_cycle = float(np.median(gaps))
+                if median_cycle > 1.0:
+                    raw_gate = 1.0 - (1.0 / median_cycle)
+                    # Bound to the same envelope the route gate respects so
+                    # a freak super-frequent customer can't be gated at 0.99
+                    # (which starves them of recs) and a sparse one can't
+                    # collapse to 0 (which floods).
+                    completion_gate = max(0.4, min(0.95, raw_gate))
+                    half_life_days = max(1.0, 3.0 * median_cycle)
+
+        return {
+            "tier": tier,
+            "avg_basket": round(avg_basket, 2),
+            "median_cycle_days": median_cycle,
+            "completion_gate": completion_gate,
+            "half_life_days": half_life_days,
+        }
+
+    @staticmethod
     def _precompute(
         customer_df: pd.DataFrame,
         journey_customers: List[str],
+        *,
+        basket_p25: float = 0.0,
+        basket_p75: float = 0.0,
+        fallback_gate: float = 0.6,
+        fallback_half_life: float = 14.0,
     ) -> Dict[str, Dict]:
         journey_set = set(journey_customers)
         relevant = customer_df[customer_df["CustomerCode"].isin(journey_set)]
@@ -514,6 +637,13 @@ class RecommendationEngine:
                 "items": {
                     str(ic): grp for ic, grp in cust_group.groupby("ItemCode", sort=False)
                 },
+                "profile": RecommendationEngine._customer_profile(
+                    cust_group,
+                    basket_p25=basket_p25,
+                    basket_p75=basket_p75,
+                    fallback_gate=fallback_gate,
+                    fallback_half_life=fallback_half_life,
+                ),
             }
         return out
 

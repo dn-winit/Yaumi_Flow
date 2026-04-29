@@ -142,10 +142,16 @@ def filter_options(
     route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
 
     if date:
-        for rc in routes:
-            custs = dm.get_journey_customers(rc, date)
-            if custs:
-                journey_counts[rc] = len(custs)
+        # Single-pass groupby instead of one ``get_journey_customers`` call
+        # per route -- the picker grid would otherwise issue N filter
+        # operations on the same DataFrame for the 12-route fleet.
+        jp = dm.get_journey_plan(date=date)
+        if not jp.empty and "RouteCode" in jp.columns and "CustomerCode" in jp.columns:
+            grouped = jp.groupby("RouteCode")["CustomerCode"]
+            for rc, custs in grouped:
+                n = int(custs.dropna().astype(str).nunique())
+                if n > 0:
+                    journey_counts[str(rc)] = n
 
         # For routes that ARE planned but have no stored recommendations,
         # surface the diagnosis on the picker grid so the supervisor sees

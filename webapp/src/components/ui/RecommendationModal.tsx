@@ -19,33 +19,15 @@ interface Props {
   row: Row | null;
 }
 
-interface SignalDict {
-  kind: string;
-  detail: string;
-  weight: number;
-  evidence?: Record<string, unknown>;
-}
-
 function cycleHint(cycle: number | null, daysSince: number | null): string {
-  if (cycle == null || daysSince == null) return "";
+  // Skip when there's no real cycle to compare against -- otherwise an
+  // unknown cycle (0) compared with any days_since trips the "Due (past
+  // cycle by Nd)" branch and prints nonsense.
+  if (cycle == null || cycle <= 0 || daysSince == null) return "";
   const overdue = daysSince - cycle;
   if (overdue > cycle * 0.25) return `Overdue by ${Math.round(overdue)}d`;
   if (overdue > 0) return `Due (past cycle by ${Math.round(overdue)}d)`;
   return `${Math.round(Math.abs(overdue))}d until next expected purchase`;
-}
-
-function parseSignals(raw: unknown): SignalDict[] {
-  if (!raw) return [];
-  if (Array.isArray(raw)) return raw as SignalDict[];
-  if (typeof raw === "string") {
-    try {
-      const parsed = JSON.parse(raw);
-      return Array.isArray(parsed) ? (parsed as SignalDict[]) : [];
-    } catch {
-      return [];
-    }
-  }
-  return [];
 }
 
 export default function RecommendationModal({ open, onClose, row }: Props) {
@@ -65,17 +47,27 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
   const cycleDays = num(row.PurchaseCycleDays);
   const daysSince = num(row.DaysSinceLastPurchase);
 
-  const signals = parseSignals((row as Record<string, unknown>).Signals);
   const whyItem = str((row as Record<string, unknown>).WhyItem);
   const whyQuantity = str((row as Record<string, unknown>).WhyQuantity);
   const confidence = num((row as Record<string, unknown>).Confidence);
-  const source = str((row as Record<string, unknown>).Source);
 
-  const hasExplain = signals.length > 0 || whyItem || whyQuantity;
+  // ``PurchaseCount == 0`` is the load-bearing contract from the engine:
+  // the customer has never bought this item before. The customer-context
+  // section's avg-qty / cycle / days-since fields are then placeholder
+  // zeros (peer / basket / seed candidates fill them only when the
+  // customer DOES have history). Surface that fact instead of rendering
+  // misleading "0 days ago" / "Every 0 days".
+  const purchaseCount = num((row as Record<string, unknown>).PurchaseCount);
+  const isFirstTime = purchaseCount == null || purchaseCount === 0;
 
-  // Legacy fallback: reason fields from pre-Sprint-1 recs still in the DB
+  const hasNarrative = !!(whyItem || whyQuantity);
+
+  // Legacy fallback: reason fields from pre-explainability recs still in
+  // the DB. The new pipeline always emits whyItem + whyQuantity, but old
+  // rows might only carry ReasonExplanation. Render the same way.
   const legacyReason = str((row as Record<string, unknown>).ReasonExplanation);
-  const legacyConf = num((row as Record<string, unknown>).ReasonConfidence);
+  const reasonText = whyItem || legacyReason;
+  const sizingText = whyQuantity;
 
   const tierTone = (() => {
     const t = tier.toUpperCase();
@@ -97,19 +89,34 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           }}
         />
 
-        {/* Section 1: The recommendation itself */}
+        {/* Section 1: Recommendation -- mirrors the forecast modal's
+            "Forecast" section. Tier badge sits inline beside the title
+            (same pattern as the demand-class badge over there). 3 KPIs
+            in the same GRID_3 the forecast modal uses. */}
         <div>
-          <SectionTitle>Recommendation</SectionTitle>
+          <SectionTitle>
+            Recommendation
+            {tier && (
+              <Badge tone={tierTone} className="ml-2 text-caption">
+                {tier.replace(/_/g, " ")}
+              </Badge>
+            )}
+          </SectionTitle>
           <div className={GRID_3}>
             <Stat
               label="Recommended quantity"
               value={recommended != null ? recommended.toLocaleString() : "-"}
               hint="Units to load for this customer"
+              highlight
             />
             <Stat
-              label="Band"
-              value={tier ? <Badge tone={tierTone}>{tier.replace(/_/g, " ")}</Badge> : "-"}
-              hint="Ranked priority across the route"
+              label="Confidence"
+              value={
+                confidence != null && confidence > 0
+                  ? `${(confidence * 100).toFixed(0)}%`
+                  : "-"
+              }
+              hint="Strength of the signals behind this suggestion"
             />
             <Stat
               label="Van carrying"
@@ -119,94 +126,69 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           </div>
         </div>
 
-        {/* Section 2: AI explanation (Sprint-1+ recs) */}
-        {hasExplain && (
-          <div>
-            <SectionTitle>Why this was recommended</SectionTitle>
-            <div className="bg-brand-50 border border-brand-100 rounded-lg px-4 py-3 space-y-3">
-              {whyItem && (
-                <div>
-                  <p className="text-body font-semibold text-brand-700">{whyItem}</p>
-                  <p className="text-caption text-brand-600 mt-0.5">
-                    {source && <span className="mr-2">Source: {source}</span>}
-                    {confidence != null && confidence > 0 && (
-                      <span>Confidence {(confidence * 100).toFixed(0)}%</span>
-                    )}
-                  </p>
-                </div>
-              )}
-
-              {signals.length > 0 && (
-                <div className="space-y-2">
-                  {signals.map((s, i) => (
-                    <div key={`${s.kind}-${i}`}>
-                      <div className="flex items-center justify-between text-caption mb-0.5">
-                        <span className="text-brand-700 leading-snug">{s.detail}</span>
-                        <span className="text-brand-600 tabular-nums shrink-0 ml-2">
-                          {Math.round((s.weight || 0) * 100)}%
-                        </span>
-                      </div>
-                      <div className="h-1.5 rounded-full bg-brand-100 overflow-hidden">
-                        <div
-                          className="h-full rounded-full bg-brand-500"
-                          style={{ width: `${Math.round((s.weight || 0) * 100)}%` }}
-                        />
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-
-              {whyQuantity && (
-                <div className="pt-1 border-t border-brand-100">
-                  <p className="text-caption uppercase tracking-wide text-brand-700 font-semibold">
-                    How we sized this
-                  </p>
-                  <p className="text-caption text-brand-700 mt-0.5 leading-relaxed">
-                    {whyQuantity}
-                  </p>
-                </div>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Legacy fallback: pre-Sprint-1 recs only have ReasonExplanation */}
-        {!hasExplain && legacyReason && (
-          <div>
-            <SectionTitle>Reason</SectionTitle>
-            <div className="bg-brand-50 border border-brand-100 rounded-lg px-4 py-3">
-              <p className="text-body text-brand-700">{legacyReason}</p>
-              {legacyConf != null && (
-                <p className="text-caption text-brand-600 mt-1">
-                  Confidence {legacyConf}%
-                </p>
-              )}
-            </div>
-          </div>
-        )}
-
-        {/* Section 3: Customer context (only the 3 actionable stats) */}
+        {/* Section 2: Customer pattern -- mirrors the forecast modal's
+            "How we got there" section. 3 anchoring stats from the
+            customer's own history. First-time recommendations replace the
+            grid with a single line so we never render "0 days ago" /
+            "Every 0 days" as if they were facts. */}
         <div>
-          <SectionTitle>Customer context</SectionTitle>
-          <div className={GRID_3}>
-            <Stat
-              label="Avg qty per visit"
-              value={avgQty != null ? avgQty.toLocaleString() : "-"}
-              hint="Historical average when this customer buys this item"
-            />
-            <Stat
-              label="Buying cycle"
-              value={cycleDays != null ? `Every ${cycleDays.toFixed(0)} days` : "-"}
-              hint="Typical gap between purchases of this item"
-            />
-            <Stat
-              label="Last purchased"
-              value={daysSince != null ? `${daysSince} days ago` : "-"}
-              hint={cycleHint(cycleDays, daysSince)}
-            />
-          </div>
+          <SectionTitle>Customer pattern</SectionTitle>
+          {isFirstTime ? (
+            <div className={GRID_3}>
+              <Stat
+                label="Avg qty per visit"
+                value="—"
+                hint="First-time suggestion (no past purchase)"
+              />
+              <Stat
+                label="Buying cycle"
+                value="—"
+                hint="No personal cycle established yet"
+              />
+              <Stat
+                label="Last purchased"
+                value="Never"
+                hint="See ‘Why we suggested it’ below"
+              />
+            </div>
+          ) : (
+            <div className={GRID_3}>
+              <Stat
+                label="Avg qty per visit"
+                value={avgQty != null ? avgQty.toLocaleString() : "-"}
+                hint="Historical average when this customer buys this item"
+              />
+              <Stat
+                label="Buying cycle"
+                value={cycleDays != null && cycleDays > 0 ? `Every ${cycleDays.toFixed(0)} days` : "-"}
+                hint="Typical gap between purchases of this item"
+              />
+              <Stat
+                label="Last purchased"
+                value={daysSince != null ? `${daysSince} days ago` : "-"}
+                hint={cycleHint(cycleDays, daysSince)}
+              />
+            </div>
+          )}
         </div>
+
+        {/* Section 3: Reason narrative -- mirrors the forecast modal's
+            "How we got there" section structurally (3-col Stat grid).
+            Uses the prose variant of Stat so WhyItem / WhyQuantity wrap
+            inside the same outer card the numeric stats use, keeping the
+            visual rhythm identical and avoiding any scrollable prose
+            block. */}
+        {hasNarrative && (
+          <div>
+            <SectionTitle>Why we suggested it</SectionTitle>
+            <div className={GRID_3}>
+              <Stat label="Why this item" value={reasonText || "—"} prose />
+              {sizingText && (
+                <Stat label="How we sized it" value={sizingText} prose />
+              )}
+            </div>
+          </div>
+        )}
       </div>
     </Modal>
   );

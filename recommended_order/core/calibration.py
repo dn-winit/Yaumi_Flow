@@ -175,6 +175,7 @@ def calibrate(
     corpus_field_values: Optional[Dict[str, Iterable[float]]] = None,
     source_weight_adjustments: Optional[Dict[str, float]] = None,
     feedback_confidence: Optional[Dict[str, float]] = None,
+    as_of: Optional[pd.Timestamp] = None,
 ) -> RouteCalibration:
     """Return a cached ``RouteCalibration`` for ``route_code``.
 
@@ -193,15 +194,20 @@ def calibrate(
             Passed through to ``RouteCalibration``; multiplicative down-weighting
             is applied at merge time in the engine.
 
-    Cache key: (route, csv_mtime, window_days). LRU + TTL bounded by
-    ``SafetyClamps``.
+    Cache key: (route, csv_mtime, window_days, as_of). LRU + TTL bounded by
+    ``SafetyClamps``. ``as_of`` (the target visit date) is part of the key
+    because callers filter ``customer_df`` to ``TrxDate < as_of`` upstream
+    -- different target dates produce different per-route thresholds even
+    when the source CSV is unchanged. Without it the cache would serve
+    yesterday's calibration for tomorrow's request.
     """
     c = clamps or SafetyClamps()
     w = int(window_days if window_days is not None else c.calibration_window_days)
     # Honour the named bounds
     w = max(c.calibration_window_min_days, min(c.calibration_window_max_days, w))
 
-    key = (route_code, _csv_mtime(settings), w)
+    as_of_key = as_of.date().isoformat() if as_of is not None else ""
+    key = (route_code, _csv_mtime(settings), w, as_of_key)
     cached = _cache_get(key, c.cache_ttl_seconds)
     # If feedback adjustments/confidence were provided, we must refresh --
     # cache hits return unmodified entries so re-cache with the new multipliers.

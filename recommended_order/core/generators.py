@@ -15,7 +15,7 @@ no mutation of its inputs. The engine de-dupes and ranks across lanes.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -74,11 +74,24 @@ def gen_history(
     priority_calc: PriorityCalculator,
     quantity_calc: QuantityCalculator,
     trend_calc: TrendCalculator,
+    profile: Optional[Dict[str, Any]] = None,
 ) -> List[Candidate]:
     out: List[Candidate] = []
     total_visits = int(cust_history["TrxDate"].nunique()) if not cust_history.empty else 0
     if total_visits == 0:
         return out
+
+    # Customer-personalised gate / half-life / tier (with route-level fallback
+    # baked in upstream). Resolved once outside the loop so per-item iterations
+    # don't re-look-up the same scalars.
+    if profile:
+        completion_gate = float(profile.get("completion_gate") or calibration.completion_gate)
+        half_life = float(profile.get("half_life_days") or calibration.recency_half_life_days)
+        tier = str(profile.get("tier") or "MEDIUM")
+    else:
+        completion_gate = calibration.completion_gate
+        half_life = calibration.recency_half_life_days
+        tier = "MEDIUM"
 
     for item, van_qty in van_items.items():
         if van_qty <= 0 or item not in item_dict:
@@ -87,12 +100,16 @@ def gen_history(
         if hist.empty:
             continue
 
-        last_purchase = pd.to_datetime(hist["TrxDate"]).max()
+        # TrxDate is already datetime64 (normalised at load) -- no re-parse.
+        # Compute item_visits once and reuse for both the freq gate and the
+        # downstream PriorityCalculator (avoids a second nunique() pass).
+        item_dates = hist["TrxDate"]
+        last_purchase = item_dates.max()
         days_since = (target_dt - last_purchase).days
         if days_since <= universal.min_days_since_purchase:
             continue
 
-        item_visits = int(hist["TrxDate"].nunique())
+        item_visits = int(item_dates.nunique())
         frequency = item_visits / total_visits if total_visits > 0 else 0.0
         if frequency < calibration.frequency_floor:
             continue
@@ -101,7 +118,7 @@ def gen_history(
         cycle_info = cycle_calc.calculate(hist, target_dt)
         cycle_days = max(1, cycle_info.cycle_days)
         completion = days_since / cycle_days
-        if completion < calibration.completion_gate:
+        if completion < completion_gate:
             continue
 
         expl = Explanation()
@@ -110,10 +127,18 @@ def gen_history(
             cycle_days=cycle_days, days_since=days_since,
             item_frequency=frequency, calibration=calibration,
             explanation=expl,
+            tier=tier,
+            total_visits=total_visits,
+            item_visits=item_visits,
         )
 
         trend = trend_calc.calculate(hist, target_dt)
-        if trend.trend_type in ("ACCELERATING_FAST", "ACCELERATING"):
+        # Match LOW_CONF variants too -- they're real trend signals, just
+        # damped at the factor level. The signal/explanation strength is
+        # taken from the factor (above/below 1.0), so the LOW_CONF cases
+        # naturally produce milder explanations.
+        ttype = trend.trend_type
+        if ttype.startswith("ACCELERATING"):
             meta = trend.metadata or {}
             expl.add_item_signal(Signal(
                 kind=KIND_TRENDING_UP,
@@ -124,7 +149,7 @@ def gen_history(
                 weight=0.4,
                 evidence=meta,
             ))
-        elif trend.trend_type in ("DECLINING", "DECLINING_FAST"):
+        elif ttype.startswith("DECLINING"):
             meta = trend.metadata or {}
             expl.add_item_signal(Signal(
                 kind=KIND_TRENDING_DOWN,
@@ -143,6 +168,7 @@ def gen_history(
 
         qty = quantity_calc.calculate(
             hist, target_dt, int(van_qty), float(trend.factor), calibration, expl,
+            half_life_override=half_life,
         )
         if qty <= 0:
             continue
@@ -195,6 +221,8 @@ def gen_peer_cross_sell(
     lookalike_ctx: Dict[str, Any],
     calibration: RouteCalibration,
     clamps: SafetyClamps,
+    target_dt: Optional[pd.Timestamp] = None,
+    cycle_calc: Optional[CycleCalculator] = None,
 ) -> List[Candidate]:
     cust_idx_map: Dict[str, int] = lookalike_ctx.get("cust_idx", {})
     item_idx_map: Dict[str, int] = lookalike_ctx.get("item_idx", {})
@@ -318,6 +346,29 @@ def gen_peer_cross_sell(
         pscore = calibration.tier_cuts["consider"] + min(1.0, score_val) * (
             calibration.tier_cuts["should_stock"] - calibration.tier_cuts["consider"]
         )
+        # When the customer HAS bought this item before, populate the
+        # per-customer history fields directly so the saved row carries
+        # truthful values (peer becomes a "second opinion on a known
+        # item"). When they have NOT, leave them at 0 -- ``purchase_count
+        # == 0`` is the load-bearing contract that downstream consumers
+        # use to mean "no personal history; days_since / cycle / freq are
+        # not applicable for this customer-item pair".
+        own_hist = item_dict.get(item)
+        if own_hist is not None and not own_hist.empty:
+            own_purchase_count = int(len(own_hist))
+            own_dates = own_hist["TrxDate"]  # already datetime64
+            if target_dt is not None:
+                own_days_since = int((target_dt - own_dates.max()).days)
+            else:
+                own_days_since = 0
+            if cycle_calc is not None and target_dt is not None:
+                own_cycle = float(cycle_calc.calculate(own_hist, target_dt).cycle_days)
+            else:
+                own_cycle = 0.0
+        else:
+            own_purchase_count = 0
+            own_days_since = 0
+            own_cycle = 0.0
         cand = Candidate(
             item_code=item,
             recommended_qty=qty,
@@ -325,11 +376,11 @@ def gen_peer_cross_sell(
             source="peer",
             van_qty=van_qty,
             avg_qty=median_qty,
-            days_since=0,
-            cycle_days=0.0,
+            days_since=own_days_since,
+            cycle_days=own_cycle,
             frequency_pct=round(score_val * 100, 1),
             pattern_quality=0.5,
-            purchase_count=0,
+            purchase_count=own_purchase_count,
             trend_factor=1.0,
         )
         out.append(_finalize(cand, expl))
@@ -376,7 +427,6 @@ def gen_basket_complement(
     best: Dict[str, Tuple[str, float]] = {}
     for anchor in history_picks:
         lookup = co_occurrence.get(anchor.item_code, {})
-        qty_lookup = co_median_qty.get(anchor.item_code, {})
         for item, conf in lookup.items():
             if conf < min_conf:
                 continue
@@ -387,8 +437,6 @@ def gen_basket_complement(
             prev = best.get(item)
             if prev is None or conf > prev[1]:
                 best[item] = (anchor.item_code, conf)
-        # Touch qty_lookup to keep the reference active; actually used below.
-        del qty_lookup
 
     # Keep top-K by confidence
     ranked = sorted(best.items(), key=lambda kv: -kv[1][1])[: clamps.basket_complement_top_k]
@@ -456,7 +504,7 @@ def gen_reactivation(
 ) -> List[Candidate]:
     if cust_history is None or cust_history.empty:
         return []
-    last = pd.to_datetime(cust_history["TrxDate"]).max()
+    last = cust_history["TrxDate"].max()
     if pd.isna(last):
         return []
     days_since_any = (target_dt - last).days
@@ -566,26 +614,51 @@ def gen_seed(
 # ===========================================================================
 
 def merge_and_rank(candidates: List[Candidate]) -> List[Candidate]:
-    """De-dupe by item_code (keep highest priority, merge signal lists),
-    then sort by priority desc."""
+    """De-dupe by item_code (keep highest priority, merge signal lists +
+    promote real metric values from the loser when the winner has only
+    placeholder zeros), then sort by priority desc."""
     by_item: Dict[str, Candidate] = {}
     for cand in candidates:
         prev = by_item.get(cand.item_code)
         if prev is None or cand.priority_score > prev.priority_score:
             if prev is not None:
-                # Merge the loser's item_signals into the winner's signals list
-                cand = _merge_signals(cand, prev)
+                cand = _merge(cand, prev)
             by_item[cand.item_code] = cand
         else:
-            by_item[cand.item_code] = _merge_signals(prev, cand)
+            by_item[cand.item_code] = _merge(prev, cand)
     return sorted(by_item.values(), key=lambda c: -c.priority_score)
 
 
-def _merge_signals(winner: Candidate, loser: Candidate) -> Candidate:
-    """Append the loser's signals (de-duped by kind) to the winner."""
+# Per-customer-history fields a peer/basket/seed/reactivation candidate
+# emits as 0/0.0 placeholders (they're not in scope for those generators).
+# When merging, prefer the loser's value if it's non-zero -- a HISTORY-source
+# loser carries real days_since/cycle/freq/etc. for the same item.
+_HISTORY_METRIC_FIELDS: Tuple[str, ...] = (
+    "days_since", "cycle_days", "frequency_pct", "pattern_quality",
+    "purchase_count", "trend_factor", "avg_qty", "churn_probability",
+)
+
+
+def _merge(winner: Candidate, loser: Candidate) -> Candidate:
+    """Merge loser into winner: signals (de-duped by kind) plus any real
+    history-derived metric the winner lacks. Keeps the winner's score,
+    source and qty -- those are load-bearing for ranking and allocation."""
+    # Signals
     seen = {s["kind"] for s in winner.signals}
     extra = [s for s in loser.signals if s["kind"] not in seen]
-    if not extra:
-        return winner
-    winner.signals = winner.signals + extra
+    if extra:
+        winner.signals = winner.signals + extra
+    # Metric backfill: if the winner has the field at its default (0 / 0.0
+    # / 1.0 for trend_factor) and the loser has a real value, take the
+    # loser's. This keeps peer-wins-over-history rows from saving zeros for
+    # fields the customer's history actually answers.
+    for name in _HISTORY_METRIC_FIELDS:
+        wv = getattr(winner, name)
+        lv = getattr(loser, name)
+        # Treat trend_factor==1.0 as "neutral / no signal" -- a history
+        # loser may carry an informative non-1 factor.
+        winner_default = (wv == 0 or wv == 0.0) or (name == "trend_factor" and wv == 1.0)
+        loser_informative = (lv != 0 and lv != 0.0) and not (name == "trend_factor" and lv == 1.0)
+        if winner_default and loser_informative:
+            setattr(winner, name, lv)
     return winner

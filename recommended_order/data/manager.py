@@ -191,25 +191,31 @@ class DataManager:
         return df
 
     def get_van_items(self, route_code: str, target_date: str) -> Dict[str, int]:
-        """Return {ItemCode: predicted_quantity} for a route on a date."""
+        """Return {ItemCode: predicted_quantity} for a route on a date.
+
+        For the date the supervisor is planning, include predictions from
+        BOTH the Forecast split (forward-horizon model output) and the Test
+        split (training holdout that happens to cover the same date with
+        a *different* set of items — the model emits one or the other per
+        (route, date, item) pair, never both, so the union is non-overlapping).
+        Picking only the Forecast split here arbitrarily drops the test-split
+        items, including the daily staples that drive most of the basket;
+        the result is recommendations for ~half the items the route actually
+        carries. Union, then take the per-item max predicted qty so a pair
+        present in both splits doesn't get double-counted.
+        """
         demand = self.get_demand_data(route_code)
         if demand.empty:
             return {}
 
         target_dt = pd.to_datetime(target_date).normalize()
-
-        # Prefer forecast-split data for future dates
-        date_mask = demand["TrxDate"].dt.normalize() == target_dt
-        forecast = demand[date_mask & (demand["DataSplit"] == "Forecast")]
-        if forecast.empty:
-            forecast = demand[date_mask]
-
-        if forecast.empty:
+        same_day = demand[demand["TrxDate"].dt.normalize() == target_dt]
+        if same_day.empty:
             return {}
 
         van = (
-            forecast.groupby("ItemCode")["Predicted"]
-            .sum()
+            same_day.groupby("ItemCode")["Predicted"]
+            .max()
             .clip(lower=0)
             .round()
             .astype(int)

@@ -46,7 +46,9 @@ class CycleCalculator:
         if item_history is None or item_history.empty:
             return CycleInfo(self._DEFAULT_DAYS_WHEN_UNKNOWN, 0.0, "insufficient")
 
-        dates = pd.to_datetime(item_history["TrxDate"]).sort_values().unique()
+        # ``TrxDate`` is normalised to datetime64 at load time
+        # (data.manager._normalize), so a second to_datetime here is wasted work.
+        dates = item_history["TrxDate"].sort_values().unique()
         if len(dates) < 2:
             return CycleInfo(self._DEFAULT_DAYS_WHEN_UNKNOWN, 0.0, "insufficient")
 
@@ -76,7 +78,7 @@ class CycleCalculator:
         """Return (quality_score 0-1, pattern_type). CV-based."""
         if item_history is None or item_history.empty:
             return 0.0, "unknown"
-        dates = pd.to_datetime(item_history["TrxDate"]).sort_values().unique()
+        dates = item_history["TrxDate"].sort_values().unique()
         if len(dates) < 2:
             return 0.0, "unknown"
         gaps = np.diff(dates).astype("timedelta64[D]").astype(int)

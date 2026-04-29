@@ -46,13 +46,15 @@ Built for **Yaumi** (Rashed Al Rashed & Sons Group) to optimise route-to-market 
 - Auto-retrain config + drift status (predicted vs YaumiLive actuals)
 
 ### Recommended Orders `:8001`
-- 3-generator recommendation engine:
+- 5-generator recommendation engine:
   - **History** — cycle-based analysis of each customer's buying pattern
   - **Peer matching** — lookalike-customer cross-sell via cosine similarity
   - **Basket co-occurrence** — items frequently bought together
-- Per-route data-driven calibration (no hardcoded business numbers)
+  - **Reactivation** — top van items for dormant customers (silent past dormancy_days)
+  - **Seed** — top van items for first-time / unknown customers
+- **Per-route AND per-customer calibration** — no hardcoded business numbers. Each customer carries a profile (HEAVY / MEDIUM / LIGHT basket tier, personal completion gate, personal recency half-life) derived from their own history; engine filters customer history to `TrxDate < target_date` (the "as-of cutoff") so today's already-completed sales never bias today's recommendations.
 - Adaptive feedback loop learning from supervision outcomes
-- Per-row explainability (Signals, WhyItem, WhyQuantity, Confidence)
+- Per-row explainability (Signals, WhyItem, WhyQuantity, Confidence) + class-aware accuracy (smooth 10% / intermittent 20% / erratic 30% / lumpy 40% tolerance)
 
 ### Sales Supervision `:8004`
 - Live session management for route supervisors

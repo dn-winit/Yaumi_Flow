@@ -178,8 +178,15 @@ ANALYTICS_CACHE_TTL_SECONDS = 300
 @dataclass(frozen=True)
 class UniversalFilters:
     """Pre-calibration filters that apply regardless of route calibration."""
-    # Never recommend something a customer bought yesterday.
-    min_days_since_purchase: int = 1
+    # 0 means "let the per-route calibrated completion gate decide". The
+    # engine already filters customer history to ``TrxDate < target_date``
+    # (see engine.generate), so the smallest possible days_since here is 1
+    # (a purchase from the calendar day before the visit). The completion
+    # gate (days_since / cycle >= calibration.completion_gate) is the
+    # right place to make the "is it due?" call -- a hard floor here just
+    # starves daily-cycle customers (e.g. supermarkets that take fresh
+    # bakery every day) of recommendations they actually need.
+    min_days_since_purchase: int = 0
     # "Regular" path needs at least this many purchases of an item.
     min_purchase_count_standard: int = 3
 

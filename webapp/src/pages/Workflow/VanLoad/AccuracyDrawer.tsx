@@ -193,15 +193,23 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
   }, [rows]);
 
   const dailyChart = useMemo(() => {
-    const map = new Map<string, { predicted: number; actual: number }>();
+    // Track whether each date had ANY genuine prediction contribution. The
+    // model only emits predictions for the test horizon (last 30 days from
+    // training cutoff) plus the forward forecast horizon -- dates outside
+    // those windows return 0 predicted from the merge, which is "no model
+    // coverage", not "model said zero". Showing 0 there flat-lines the
+    // forecast series misleadingly. Carry a flag so the renderer can pad
+    // those days with null and let the line break at the gap.
+    const map = new Map<string, { predicted: number; actual: number; hasPrediction: boolean }>();
     rows.forEach((r) => {
       const d = pickDate(r as unknown as Record<string, unknown>);
       if (!d) return;
       const predicted = toNum(r.predicted) ?? 0;
       const actual = toNum(r.actual_qty) ?? 0;
-      const cur = map.get(d) ?? { predicted: 0, actual: 0 };
+      const cur = map.get(d) ?? { predicted: 0, actual: 0, hasPrediction: false };
       cur.predicted += predicted;
       cur.actual += actual;
+      if (predicted > 0) cur.hasPrediction = true;
       map.set(d, cur);
     });
     // Pad against the canonical working-day list so the X-axis always
@@ -211,14 +219,27 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
       ? activeDates
       : Array.from(map.keys()).sort();
     return axis.map((date) => {
-      const v = map.get(date) ?? { predicted: 0, actual: 0 };
+      const v = map.get(date);
+      if (!v) {
+        // Day with neither sale nor forecast -- both are absent.
+        return { date, predicted: null as unknown as number, actual: null as unknown as number };
+      }
       return {
         date,
-        predicted: Number(v.predicted.toFixed(2)),
+        predicted: v.hasPrediction
+          ? Number(v.predicted.toFixed(2))
+          : (null as unknown as number),
         actual: Number(v.actual.toFixed(2)),
       };
     });
   }, [rows, activeDates]);
+
+  // Coverage diagnostic for the chart subtitle: how many of the rendered
+  // days actually carry a model prediction.
+  const daysWithPrediction = useMemo(
+    () => dailyChart.filter((d) => d.predicted != null).length,
+    [dailyChart],
+  );
 
   const itemVarianceChart = useMemo(() => {
     const byItem = new Map<string, { predicted: number; actual: number }>();
@@ -233,6 +254,12 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
       byItem.set(code, cur);
     });
     return Array.from(byItem.entries())
+      // An item with predicted == 0 is "no model coverage" (e.g. a SKU
+      // added after the training cut-off). Counting it as a forecast miss
+      // would surface it as the worst variance even though the model was
+      // never asked. Restrict the chart to items the model actually
+      // forecast so every bar is a genuine miss the team can act on.
+      .filter(([, v]) => v.predicted > 0)
       .map(([item_code, v]) => ({
         item_code,
         predicted: Number(v.predicted.toFixed(1)),
@@ -364,7 +391,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
                 trend={onTargetArrow}
               />
               <MetricCard
-                label="Forecast that didn't sell"
+                label="Sales we could have made"
                 value={
                   stats.unsoldRevenue != null && stats.unsoldRevenue > 0
                     ? fmtCurrency(stats.unsoldRevenue)
@@ -374,8 +401,8 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   stats.unsoldForecast === 0
-                    ? "Every forecasted unit sold"
-                    : `${fmtNum(stats.unsoldForecast)} units · ${fmtNum(stats.unsoldSkuCount)} items overstocked on the van`
+                    ? "We captured every forecasted unit"
+                    : `${fmtNum(stats.unsoldForecast)} units across ${fmtNum(stats.unsoldSkuCount)} items — extra sales the forecast pointed to`
                 }
               />
             </KpiRow>
@@ -384,6 +411,11 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
 
             <LineChart
               title="What we forecast vs what actually sold"
+              subtitle={
+                daysWithPrediction > 0 && daysWithPrediction < dailyChart.length
+                  ? `Model predictions cover ${daysWithPrediction} of ${dailyChart.length} days in this window — gaps in the forecast line mean the date falls outside the model's test horizon, so no prediction was generated for it.`
+                  : undefined
+              }
               data={dailyChart}
               xKey="date"
               series={[

@@ -94,6 +94,22 @@ class ArtifactService:
         total = len(df)
         return df.iloc[offset : offset + limit], total
 
+    def get_future_forecast_meta(self) -> tuple[int, Optional[str]]:
+        """Return ``(total_rows, max_TrxDate_iso)`` from the cached future
+        forecast frame without slicing or copying. Lets summary endpoints
+        derive both the count and the latest forecast date in one pass --
+        replaces a pair of ``get_future_forecast(limit=1)`` +
+        ``get_future_forecast(limit=10_000)`` calls."""
+        df = self._read_df("future_forecast")
+        if df.empty:
+            return 0, None
+        max_date: Optional[str] = None
+        if "TrxDate" in df.columns:
+            mx = df["TrxDate"].max()
+            if pd.notna(mx):
+                max_date = str(mx)
+        return int(len(df)), max_date
+
     def get_future_route_summary(self, date: Optional[str] = None) -> List[Dict[str, Any]]:
         """Per-route aggregates from future_forecast (tiny payload for the grid).
 
@@ -139,6 +155,16 @@ class ArtifactService:
         return self._cache.get_or_load(
             "training_summary",
             lambda: self._storage.read_json("training_summary"),
+        ) or {}
+
+    def get_data_quality(self) -> Dict[str, Any]:
+        # data_quality.json is written by the data_processing step (~2 min
+        # in), long before pair_classes.csv (end of training, ~18 min).
+        # Reading it lets the dashboard surface the real pair count
+        # mid-run instead of a misleading zero.
+        return self._cache.get_or_load(
+            "data_quality",
+            lambda: self._storage.read_json("data_quality"),
         ) or {}
 
     # ------------------------------------------------------------------
@@ -199,10 +225,21 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def get_class_summary(self) -> Dict[str, Any]:
+        # Authoritative path: the persisted per-pair class assignment from
+        # the most recent run.
         df = self.get_pair_classes()
-        if df.empty or "class" not in df.columns:
-            return {}
-        return {"total_pairs": len(df), "classes": df["class"].value_counts().to_dict()}
+        if not df.empty and "class" in df.columns:
+            return {"total_pairs": len(df), "classes": df["class"].value_counts().to_dict()}
+        # Early-visibility fallback: data_quality.json's split_balance has
+        # the surviving pair count once data_processing finishes, even
+        # before classification persists pair_classes.csv. No class breakdown
+        # available here, but the headline number is honest.
+        dq = self.get_data_quality()
+        split = ((dq.get("post_processing") or {}).get("split_balance") or {})
+        total = split.get("total_pairs")
+        if isinstance(total, int) and total > 0:
+            return {"total_pairs": total, "classes": {}}
+        return {}
 
     # ------------------------------------------------------------------
     # Artifact checks

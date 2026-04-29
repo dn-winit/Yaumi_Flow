@@ -20,9 +20,14 @@ const PLACEHOLDER = "—";
  *   2. Total volume        -- units sold + invoice count
  *   3. Unique items sold   -- distinct SKUs sold + how well we
  *                             predicted them per route
- *   4. Stock we forecast that didn't sell
+ *   4. Sales we could have made
  *                          -- AED of over-forecast
  *                             (Σ max(predicted − actual, 0) × price)
+ *                             Past-window framing: the forecast pointed
+ *                             to demand the team didn't fully capture --
+ *                             motivating, no blame on van loading or
+ *                             customers, just measurable upside if the
+ *                             forecast had been followed more closely.
  */
 export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
   const revenue = k?.total_revenue;
@@ -66,14 +71,14 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
         }
       />
       <MetricCard
-        label="Forecast we shipped that didn't sell"
+        label="Sales we could have made"
         value={lost?.amount != null ? fmtCurrency(lost.amount) : PLACEHOLDER}
         subtitle={
           lost?.daily_avg != null && coveredDays > 0
-            ? `${fmtCurrency(lost.daily_avg)} of stock left over a day · ${fmtNum(lost.items_affected)} items affected over ${coveredDays} days`
+            ? `${fmtCurrency(lost.daily_avg)} a day in extra sales · across ${fmtNum(lost.items_affected)} items the forecast pointed to`
             : lost?.items_affected != null && lost.items_affected > 0
-            ? `${fmtNum(lost.units)} units across ${fmtNum(lost.items_affected)} items left unsold`
-            : "Every unit we forecast actually sold"
+            ? `${fmtNum(lost.units)} units across ${fmtNum(lost.items_affected)} items — extra sales the forecast pointed to`
+            : "We captured every forecasted unit"
         }
       />
     </KpiRow>

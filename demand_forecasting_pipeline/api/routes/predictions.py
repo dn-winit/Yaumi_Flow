@@ -8,7 +8,10 @@ from fastapi import APIRouter, Depends, Query
 from typing import Optional
 
 from demand_forecasting_pipeline.api.dependencies import get_artifact_service
-from demand_forecasting_pipeline.api.schemas import PredictionResponse
+from demand_forecasting_pipeline.api.schemas import (
+    FutureRouteSummaryResponse,
+    PredictionResponse,
+)
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService, DEFAULT_PAGE_LIMIT
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
@@ -29,13 +32,15 @@ def get_test_predictions(
     )
 
 
-@router.get("/forecast/route-summary")
+@router.get("/forecast/route-summary", response_model=FutureRouteSummaryResponse)
 def get_future_route_summary(
     date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to full horizon"),
     svc: ArtifactService = Depends(get_artifact_service),
 ):
     """Per-route aggregates from the future forecast (tiny payload for grid views)."""
-    return {"success": True, "date": date, "routes": svc.get_future_route_summary(date)}
+    return FutureRouteSummaryResponse(
+        date=date, routes=svc.get_future_route_summary(date),
+    )
 
 
 @router.get("/forecast", response_model=PredictionResponse)

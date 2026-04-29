@@ -21,14 +21,18 @@ from demand_forecasting_pipeline.src.evaluation.metrics import composite_summary
 logger = logging.getLogger(__name__)
 
 
+# ``accuracy_pct = None`` is the "no honest number" signal -- mirrors the
+# Pipeline summary endpoint's nullable convention so callers (drift,
+# dashboard) never have to disambiguate "0% accurate" from "no data
+# scored". A real 0% is still a real 0%; absence is None.
 _EMPTY_SUMMARY: Dict[str, Any] = {
     "rows_compared": 0,
     "total_predicted": 0.0,
     "total_actual": 0.0,
-    "mae": 0.0,
-    "rmse": 0.0,
-    "wape": 0.0,
-    "accuracy_pct": 0.0,
+    "mae": None,
+    "rmse": None,
+    "wape": None,
+    "accuracy_pct": None,
 }
 
 
@@ -74,9 +78,15 @@ class AccuracyService:
         end_date: Optional[str] = None,
         route_code: Optional[str] = None,
         item_code: Optional[str] = None,
-        limit: int = 5000,
+        limit: Optional[int] = 5000,
     ) -> Dict[str, Any]:
-        """Return per-(date, route, item) rows with predicted + live actual."""
+        """Return per-(date, route, item) rows with predicted + live actual.
+
+        ``limit=None`` returns every prediction in the window (no SQL TOP
+        cap). Drift detection MUST pass ``None`` -- otherwise the summary
+        is computed on a truncated sample and ``recent_accuracy`` drifts
+        from the true number on routes/dates that scroll past the cap.
+        """
         if not self.available:
             return {
                 "success": False,
@@ -129,10 +139,14 @@ class AccuracyService:
         end_date: Optional[str],
         route_code: Optional[str],
         item_code: Optional[str],
-        limit: int,
+        limit: Optional[int],
     ) -> pd.DataFrame:
+        # ``limit is None`` skips the SQL TOP cap entirely -- callers that
+        # need the complete window (drift comparison, audit) pass None;
+        # paged UI calls keep a finite cap.
+        top_clause = f"TOP {int(limit)}" if limit is not None else ""
         sql = f"""
-            SELECT TOP {int(limit)}
+            SELECT {top_clause}
                 CAST(trx_date AS DATE) AS trx_date,
                 route_code, item_code, item_name, demand_class, model_used,
                 predicted, lower_bound, upper_bound
@@ -220,9 +234,14 @@ class AccuracyService:
             cls.astype(str).to_numpy() if cls is not None else None,
         )
 
-        # Side metrics over the same both-positive subset.
+        # Side metrics over the same both-positive subset that fed the
+        # composite. ``rows_compared`` from composite_summary is the same
+        # mask cardinality, so reuse it instead of recomputing.
         scored = df[(df["actual_qty"] > 0) & (df["predicted"] > 0)]
         if scored.empty:
+            # No row contributed to either composite or side metrics --
+            # all numeric outputs become None (the "no data" signal) so
+            # the dashboard renders an em-dash instead of a fake 0%.
             return {
                 **_EMPTY_SUMMARY,
                 "rows_compared": int(len(df)),

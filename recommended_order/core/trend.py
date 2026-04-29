@@ -41,6 +41,12 @@ class TrendCalculator:
     def __init__(self) -> None:
         self._t = _TrendThresholds()
 
+    # Two-gap (3-purchase) trend signal is half-strength: enough to nudge
+    # qty for newly emerging acceleration / decline patterns without
+    # over-committing on noisy data. Once a 4th purchase lands, the
+    # outlier-trimmed-median path takes over at full strength.
+    _LOW_CONFIDENCE_DAMPING: float = 0.5
+
     def calculate(
         self,
         item_history: pd.DataFrame,
@@ -49,20 +55,30 @@ class TrendCalculator:
         if item_history is None or item_history.empty:
             return TrendInfo(1.0, "NO_DATA")
 
-        dates = pd.to_datetime(item_history["TrxDate"]).sort_values().unique()
-        if len(dates) < 4:
+        # TrxDate is already datetime64 (normalised at load); skip re-parsing.
+        dates = item_history["TrxDate"].sort_values().unique()
+        if len(dates) < 3:
             return TrendInfo(1.0, "INSUFFICIENT_DATA", {"purchase_count": len(dates)})
 
         gaps = np.diff(dates).astype("timedelta64[D]").astype(int)
-        if len(gaps) < 3:
+        n_gaps = len(gaps)
+        if n_gaps < 2:
             return TrendInfo(1.0, "INSUFFICIENT_DATA")
 
-        clean = self._remove_outliers(gaps)
-        if len(clean) < 3:
-            return TrendInfo(1.0, "INSUFFICIENT_DATA", {"filtered_out": True})
-
-        historical = float(np.median(clean))
-        recent = float(np.median(clean[-min(3, len(clean)):]))
+        if n_gaps == 2:
+            # Exactly two gaps: compare them directly. Outlier removal is
+            # meaningless on n=2, so we accept both points and damp the
+            # resulting factor below.
+            historical = float(gaps[0])
+            recent = float(gaps[1])
+            damping = self._LOW_CONFIDENCE_DAMPING
+        else:
+            clean = self._remove_outliers(gaps)
+            if len(clean) < 3:
+                return TrendInfo(1.0, "INSUFFICIENT_DATA", {"filtered_out": True})
+            historical = float(np.median(clean))
+            recent = float(np.median(clean[-min(3, len(clean)):]))
+            damping = 1.0
 
         if historical == 0:
             return TrendInfo(1.0, "STABLE")
@@ -80,11 +96,17 @@ class TrendCalculator:
         else:
             factor, ttype = self._t.factor_declining_fast, "DECLINING_FAST"
 
+        if damping < 1.0 and ttype != "STABLE":
+            # Pull factor toward 1.0 (neutral) by ``damping``; tag the type.
+            factor = 1.0 + damping * (factor - 1.0)
+            ttype = f"{ttype}_LOW_CONF"
+
         meta = {
             "historical_cycle": int(historical),
             "recent_cycle": int(recent),
             "ratio": round(ratio, 3),
-            "trend_factor": factor,
+            "trend_factor": round(factor, 3),
+            "n_gaps": n_gaps,
         }
         return TrendInfo(factor, ttype, meta)
 

@@ -18,6 +18,15 @@ import {
   TOOLTIP_PROPS,
 } from "./theme";
 
+// Density thresholds for adaptive dot rendering. Above the upper bound the
+// line stands alone (a dot at every working day in a month makes the trend
+// noisy); below it dots stay because each point carries individual weight.
+// Tuned to ~14 working days = ½ month so a "two weeks" view shows markers
+// while a "30 days" view stays clean.
+const _DOT_DENSITY_HIDE_AT = 14;
+const _DOT_RADIUS = 3;
+const _ACTIVE_DOT_RADIUS = 5;
+
 interface LineSeries {
   key: string;
   label?: string;
@@ -31,6 +40,8 @@ interface LineChartProps {
   series: LineSeries[];
   height?: number;
   title?: string;
+  /** Optional helper text rendered just below the title, inside the card. */
+  subtitle?: string;
   emptyMessage?: string;
   loading?: boolean;
   /**
@@ -49,16 +60,29 @@ export default function LineChart({
   series,
   height = DEFAULT_CHART_HEIGHT,
   title,
+  subtitle,
   emptyMessage = "No data",
   loading = false,
   pxPerPoint = 80,
 }: LineChartProps) {
+  // Title/subtitle pair sits in one stacked block so the spacing rule is
+  // simple: the *bottom* element (subtitle when present, otherwise title)
+  // owns the gap to the chart. Avoids a dangling mb-4 when both are blank.
+  const header = (title || subtitle) ? (
+    <div className="mb-4">
+      {title && (
+        <h3 className="text-title font-semibold text-text-primary">{title}</h3>
+      )}
+      {subtitle && (
+        <p className={`text-xs text-text-muted ${title ? "mt-1" : ""}`}>{subtitle}</p>
+      )}
+    </div>
+  ) : null;
+
   if (loading) {
     return (
       <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
-        {title && (
-          <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
-        )}
+        {header}
         <div className="animate-pulse bg-surface-sunken rounded-lg" style={{ height }} />
       </div>
     );
@@ -66,9 +90,7 @@ export default function LineChart({
 
   return (
     <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
-      {title && (
-        <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
-      )}
+      {header}
       {data.length === 0 ? (
         <EmptyState title={emptyMessage} />
       ) : (
@@ -97,6 +119,16 @@ export default function LineChart({
                 {series.length > 1 && <Legend wrapperStyle={{ fontSize: "0.875rem" }} />}
                 {series.map((s, idx) => {
                   const stroke = s.color ?? CHART_PALETTE[idx % CHART_PALETTE.length];
+                  // Adaptive dot: count this series' actual datapoints (skip
+                  // nulls/undefined that pad gaps in sparse windows). When
+                  // the line is dense, dots add noise; when sparse, they
+                  // anchor the eye on the few real datapoints. Active-dot
+                  // (hover) always renders so tooltips stay discoverable.
+                  const populated = data.reduce(
+                    (n, row) => n + (row[s.key] != null ? 1 : 0),
+                    0,
+                  );
+                  const showDots = populated <= _DOT_DENSITY_HIDE_AT;
                   return (
                     <Line
                       key={s.key}
@@ -105,8 +137,9 @@ export default function LineChart({
                       name={s.label ?? s.key}
                       stroke={stroke}
                       strokeWidth={2}
-                      dot={{ r: 3, fill: stroke }}
-                      activeDot={{ r: 5 }}
+                      dot={showDots ? { r: _DOT_RADIUS, fill: stroke } : false}
+                      activeDot={{ r: _ACTIVE_DOT_RADIUS }}
+                      connectNulls={false}
                     />
                   );
                 })}

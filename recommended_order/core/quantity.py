@@ -49,20 +49,27 @@ class QuantityCalculator:
         trend_factor: float,
         calibration: RouteCalibration,
         explanation: Explanation,
+        *,
+        half_life_override: float | None = None,
     ) -> int:
         if item_history is None or item_history.empty:
             return 0
 
         qtys = pd.to_numeric(item_history["TotalQuantity"], errors="coerce").fillna(0).to_numpy()
-        dates = pd.to_datetime(item_history["TrxDate"]).to_numpy()
+        # TrxDate is already datetime64 from data.manager._normalize.
+        dates = item_history["TrxDate"].to_numpy()
         if qtys.size == 0:
             return 0
 
-        # Recency weights: exp-decay at calibration half-life
+        # Recency weights: exp-decay at the customer's personal half-life
+        # when supplied (engine derives it from this customer's median
+        # inter-visit gap), else the route default. A frequent visitor's
+        # last-week purchase outweighs an occasional visitor's last-week
+        # purchase under the same calibration.
         target = pd.Timestamp(target_date).to_datetime64()
         ages = ((target - dates) / np.timedelta64(1, "D")).astype(float)
         ages = np.clip(ages, 0.0, None)
-        half = max(1.0, calibration.recency_half_life_days)
+        half = max(1.0, float(half_life_override if half_life_override is not None else calibration.recency_half_life_days))
         weights = np.power(2.0, -ages / half)
         wsum = weights.sum()
 
@@ -104,7 +111,10 @@ class QuantityCalculator:
         qty = max(1, int(round(proposed)))
         qty = min(qty, int(van_qty))
 
-        # Emit qty_derivation signal (single source for the sentence)
+        # Emit qty_derivation signal (single source for the sentence). The
+        # ``half_life_days`` field exposes which decay we actually used --
+        # route default vs customer-personalised -- so a downstream auditor
+        # can reconstruct the weighted average byte-for-byte.
         explanation.add_quantity_signal(Signal(
             kind=KIND_QTY_DERIVATION,
             detail=detail_qty_recency(raw_avg, weighted_avg, trend_factor, qty),
@@ -117,6 +127,10 @@ class QuantityCalculator:
                 "perfect_zone": [lo, hi],
                 "van_cap": int(van_qty),
                 "recommended": qty,
+                "half_life_days": round(half, 2),
+                "half_life_source": (
+                    "customer" if half_life_override is not None else "route"
+                ),
             },
         ))
         return qty

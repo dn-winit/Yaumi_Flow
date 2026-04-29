@@ -1,15 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
-import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
+import { Skeleton } from "@/components/ui/Skeleton";
 import { ROUTES } from "@/config/routes";
 import { useRecommendations, useGenerate } from "@/hooks/useRecommendedOrder";
 import { useToast } from "@/hooks/useToast";
 import { VISIT_REC_LIMIT } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
-import { useWorkflow } from "@/pages/Workflow/workflowContext";
+import { useWorkflow, useWorkflowNavigate } from "@/pages/Workflow/workflowContext";
 import LiveSessionTab from "@/pages/Supervision/LiveSession/LiveSessionTab";
 import { supervisionApi } from "@/api/supervision";
 import AdoptionDrawer from "./AdoptionDrawer";
@@ -26,7 +25,7 @@ import UpcomingPlanDrawer from "./UpcomingPlanDrawer";
  * session as soon as they land.
  */
 export default function VisitTab() {
-  const navigate = useNavigate();
+  const navigate = useWorkflowNavigate();
   const { date, routeCode, resetRoute } = useWorkflow();
 
   // Picking a different route means returning to Plan; the workflow
@@ -60,7 +59,7 @@ function VisitSession({
   date: string;
   onPickAnotherRoute: () => void;
 }) {
-  const navigate = useNavigate();
+  const navigate = useWorkflowNavigate();
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sessionData, setSessionData] = useState<Record<string, unknown> | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
@@ -139,7 +138,19 @@ function VisitSession({
   // ----- States before the session is live -----
 
   if (recs.loading) {
-    return <Loading message={`Loading recommendations for route ${routeCode}...`} />;
+    // Layout-shaped skeleton: header strip + customer cards. Matches
+    // the height of the live LiveSessionTab so the page doesn't jump
+    // when recs land. Real content fades in via ``animate-fade-in``.
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-12" />
+        <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+          {[0, 1, 2, 3, 4, 5].map((i) => (
+            <Skeleton key={i} className="h-28" />
+          ))}
+        </div>
+      </div>
+    );
   }
 
   if (recs.error) {
@@ -189,13 +200,20 @@ function VisitSession({
   }
 
   if (!sessionId) {
-    return <Loading message="Starting live session..." />;
+    // Brief gap between recs landing and supervision /initialize completing.
+    // Same shape as the recs-loading skeleton above so the swap is invisible.
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-12" />
+        <Skeleton className="h-48" />
+      </div>
+    );
   }
 
   // ----- Live session -----
 
   return (
-    <>
+    <div className="animate-fade-in">
       <LiveSessionTab
         sessionId={sessionId}
         sessionData={sessionData}
@@ -214,6 +232,6 @@ function VisitSession({
         onClose={() => setUpcomingOpen(false)}
         routeCode={routeCode}
       />
-    </>
+    </div>
   );
 }

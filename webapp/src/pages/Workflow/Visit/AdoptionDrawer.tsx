@@ -90,6 +90,11 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   // Pad daily series to every working day in the lookback window so the
   // X-axis never skips a day -- shared canonical list with the dashboard
   // and the AccuracyDrawer.
+  //
+  // Days WITHOUT stored recommendations get ``adoption_pct: null`` (not 0)
+  // so the line chart breaks at those points instead of dragging the
+  // series to the floor. A real zero (recommended>0 but adopted=0) still
+  // plots as 0%, which is the honest signal the supervisor wants to see.
   const activeDates = w?.active_dates ?? [];
   const dailyPadded = useMemo(() => {
     const rows = data?.daily ?? [];
@@ -98,9 +103,14 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
     for (const row of rows) byDate.set(row.date, row);
     return activeDates.map((date) => {
       const r = byDate.get(date);
-      return r ?? { date, recommended: 0, adopted: 0, adoption_pct: 0 };
+      if (r) return r;
+      return { date, recommended: 0, adopted: 0, adoption_pct: null as unknown as number };
     });
   }, [data?.daily, activeDates]);
+  const daysWithRecs = useMemo(
+    () => (data?.daily ?? []).filter((d) => d.recommended > 0).length,
+    [data?.daily],
+  );
 
   // All four tiles derive from the same backend summary snapshot.
   const derived = useMemo(() => {
@@ -232,7 +242,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 trend={perfectPickArrow}
               />
               <MetricCard
-                label="Suggested but didn't sell"
+                label="Sales we could have made"
                 value={
                   s?.unsold_revenue != null && s.unsold_revenue > 0
                     ? fmtCurrency(s.unsold_revenue)
@@ -242,8 +252,8 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   !s || s.unsold_volume === 0
-                    ? "Every recommended unit sold"
-                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items the customer didn't take`
+                    ? "We captured every recommended unit"
+                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items — extra sales the recommendations pointed to`
                 }
               />
             </KpiRow>
@@ -254,6 +264,11 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
               {dailyPadded.length > 0 && (
                 <LineChart
                   title="Daily share of suggestions that sold"
+                  subtitle={
+                    daysWithRecs > 0 && daysWithRecs < activeDates.length
+                      ? `Recommendations stored for ${daysWithRecs} of ${activeDates.length} days in this window — gaps in the line mean no recommendations were generated that day.`
+                      : undefined
+                  }
                   data={dailyPadded as unknown as Record<string, unknown>[]}
                   xKey="date"
                   series={[{ key: "adoption_pct", label: "% sold", color: CHART_COLOR.success }]}

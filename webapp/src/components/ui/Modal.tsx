@@ -1,4 +1,5 @@
 import React, { useEffect, useCallback, useState } from "react";
+import { OVERLAY_EXIT_MS } from "@/lib/format";
 
 type ModalSize = "sm" | "md" | "lg" | "xl";
 
@@ -30,7 +31,7 @@ export default function Modal({
     if (open) {
       setVisible(true);
     } else {
-      const t = setTimeout(() => setVisible(false), 200);
+      const t = setTimeout(() => setVisible(false), OVERLAY_EXIT_MS);
       return () => clearTimeout(t);
     }
   }, [open]);

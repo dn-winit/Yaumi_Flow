@@ -328,12 +328,18 @@ function stepMetric(ctx: StepCtx): ReactNode {
 
   switch (step.key) {
     case "collection": {
+      // ``total_pairs`` is null until data_processing finishes; routes
+      // come from training_overview which only populates after training.
+      // Treat 0 as "no honest count" so the chip stays empty rather than
+      // claiming "0 item-route pairs" mid-run.
       const pairs = summary?.total_pairs;
       const routes = ov?.test_routes as number | undefined;
-      if (pairs == null && routes == null) return null;
+      const showPairs = pairs != null && pairs > 0;
+      const showRoutes = routes != null && routes > 0;
+      if (!showPairs && !showRoutes) return null;
       const parts: string[] = [];
-      if (pairs != null) parts.push(`${fmtNum(pairs)} item-route pairs`);
-      if (routes != null) parts.push(`${fmtNum(routes)} routes`);
+      if (showPairs) parts.push(`${fmtNum(pairs)} item-route pairs`);
+      if (showRoutes) parts.push(`${fmtNum(routes)} routes`);
       return parts.join(" · ");
     }
     case "processing": {
@@ -370,9 +376,11 @@ function stepMetric(ctx: StepCtx): ReactNode {
         : `${fmtNum(total)} models compared`;
     }
     case "forecast": {
+      // future_forecast_count is 0 until inference writes its CSV; show
+      // nothing rather than "0 predictions" while training is still running.
       const count = summary?.future_forecast_count;
       const last = summary?.last_forecast_date ? fmtDate(summary.last_forecast_date) : null;
-      if (count == null) return null;
+      if (count == null || count <= 0) return null;
       return last ? `${fmtNum(count)} predictions through ${last}` : `${fmtNum(count)} predictions`;
     }
     case "publish": {

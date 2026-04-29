@@ -1,8 +1,7 @@
 import { useMemo, useState } from "react";
-import { useNavigate } from "react-router-dom";
 import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
-import Loading from "@/components/ui/Loading";
+import { Skeleton } from "@/components/ui/Skeleton";
 import EmptyState from "@/components/ui/EmptyState";
 import BarChart from "@/components/charts/BarChart";
 import ContextStrip from "@/components/ui/ContextStrip";
@@ -11,7 +10,7 @@ import RouteGrid, { type RouteStat } from "@/components/ui/RouteGrid";
 import { useFutureForecast, useForecastRouteSummary } from "@/hooks/useForecast";
 import { useItemCatalog, useFilterDimensions } from "@/hooks/useDataImport";
 import { useFilterOptions } from "@/hooks/useRecommendedOrder";
-import { useWorkflow } from "@/pages/Workflow/workflowContext";
+import { useWorkflow, useWorkflowNavigate } from "@/pages/Workflow/workflowContext";
 import VanLoadSummary from "./VanLoadSummary";
 import VanLoadTable from "./VanLoadTable";
 import AccuracyDrawer from "./AccuracyDrawer";
@@ -26,7 +25,8 @@ import type { Row } from "@/types/common";
 import type { FilterDimensionOption } from "@/types/data-import";
 
 export default function VanLoadTab() {
-  const navigate = useNavigate();
+  // Workflow-aware navigate preserves ?route=…&date=… across step jumps.
+  const navigate = useWorkflowNavigate();
   // Route + date live in shared workflow context so picks carry into Visit.
   const { date, setDate, routeCode, setRouteCode } = useWorkflow();
 
@@ -36,9 +36,12 @@ export default function VanLoadTab() {
 
   // Filter dimensions (warehouse + route with parent-warehouse mapping)
   // come from data_import; journey counts come from recommended_order.
-  // Both are cached at the dashboard tier so this is one pair of hits.
-  const dims = useFilterDimensions();
-  const filterOpts = useFilterOptions(date);
+  // Both feed the route-picker grid only -- gate them on ``!routeCode``
+  // so a refresh that already has a route in the URL skips two
+  // network round-trips that would never render anything.
+  const pickerVisible = !routeCode;
+  const dims = useFilterDimensions(undefined, pickerVisible);
+  const filterOpts = useFilterOptions(date, pickerVisible);
 
   const warehouses = dims.data?.warehouses ?? [];
   const routes = dims.data?.routes ?? [];
@@ -147,7 +150,20 @@ export default function VanLoadTab() {
       />
 
       {forecast.loading ? (
-        <Loading message="Loading van load..." />
+        // Layout-shaped skeleton -- matches the height of the real
+        // content (summary row + chart card + table card) so the page
+        // doesn't jump when data arrives. ``animate-pulse`` is the
+        // standard subtle shimmer; the real content fades in via the
+        // ``animate-fade-in`` class on the data branch below.
+        <div className="space-y-6">
+          <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
+            {[0, 1, 2, 3].map((i) => (
+              <Skeleton key={i} className="h-24" />
+            ))}
+          </div>
+          <Skeleton className="h-72" />
+          <Skeleton className="h-64" />
+        </div>
       ) : dateRows.length === 0 ? (
         <Card>
           <EmptyState
@@ -162,7 +178,7 @@ export default function VanLoadTab() {
           />
         </Card>
       ) : (
-        <>
+        <div className="space-y-6 animate-fade-in">
           <VanLoadSummary rows={dateRows} />
 
           <Card
@@ -199,7 +215,7 @@ export default function VanLoadTab() {
               Continue to Visit →
             </Button>
           </div>
-        </>
+        </div>
       )}
 
       <AccuracyDrawer
@@ -288,7 +304,24 @@ function VanLoadRouteGrid({
   }, [routes]);
 
   if (loading || summaryQ.loading) {
-    return <Loading message="Loading routes..." />;
+    // Skeleton-shaped picker -- two warehouse blocks, each with a row
+    // of route tiles. Same primitive the main view uses; no spinner so
+    // refresh stays smooth across both branches.
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-5 w-3/5" />
+        {[0, 1].map((g) => (
+          <div key={g} className="space-y-2">
+            <Skeleton className="h-5 w-1/4" />
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-3">
+              {[0, 1, 2, 3].map((i) => (
+                <Skeleton key={i} className="h-28" />
+              ))}
+            </div>
+          </div>
+        ))}
+      </div>
+    );
   }
 
   if (groups.length === 0) {

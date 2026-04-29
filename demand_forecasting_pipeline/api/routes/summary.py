@@ -25,7 +25,10 @@ def forecast_summary(svc: ArtifactService = Depends(get_artifact_service)):
     actual_col = "TotalQuantity" if "TotalQuantity" in test_df.columns else "actual_qty"
     pred_col = "prediction" if "prediction" in test_df.columns else "predicted"
 
-    accuracy_pct = 0.0
+    # ``None`` signals "no honest number to show" so the UI can render an
+    # em-dash instead of a misleading 0% while a fresh run is still in
+    # flight (test_predictions.csv only lands at the end of training).
+    accuracy_pct: float | None = None
     if not test_df.empty and actual_col in test_df.columns and pred_col in test_df.columns:
         actual = pd.to_numeric(test_df[actual_col], errors="coerce").fillna(0)
         predicted = pd.to_numeric(test_df[pred_col], errors="coerce").fillna(0)
@@ -33,16 +36,15 @@ def forecast_summary(svc: ArtifactService = Depends(get_artifact_service)):
         accuracy_pct = composite_summary(actual.to_numpy(), predicted.to_numpy(), cls)["accuracy_pct"]
 
     class_summary = svc.get_class_summary()
-    total_pairs = int(class_summary.get("total_pairs", 0))
+    raw_total = class_summary.get("total_pairs")
+    total_pairs: int | None = int(raw_total) if isinstance(raw_total, int) and raw_total > 0 else None
     classes = {str(k): int(v) for k, v in class_summary.get("classes", {}).items()}
 
-    future_df, future_total = svc.get_future_forecast(limit=1, offset=0)
-
-    last_forecast_date = None
-    if future_total > 0:
-        full_future_df, _ = svc.get_future_forecast(limit=10_000, offset=0)
-        if not full_future_df.empty and "TrxDate" in full_future_df.columns:
-            last_forecast_date = str(full_future_df["TrxDate"].max())
+    # Single cache read returns both count + max date -- avoids the pair
+    # of get_future_forecast() calls (limit=1 then limit=10_000) the
+    # summary endpoint used to issue, and removes the implicit cap that
+    # silently dropped rows beyond 10k from the max-date computation.
+    future_total, last_forecast_date = svc.get_future_forecast_meta()
 
     # Training overview — extracted from artifacts already in memory, no extra I/O.
     training_overview = _build_training_overview(svc, test_df)
@@ -96,12 +98,16 @@ def _build_training_overview(svc: ArtifactService, test_df: pd.DataFrame) -> dic
     feature_cols = schema.get("feature_cols", [])
     overview["feature_count"] = len(feature_cols)
 
-    # Trained-at from model file modification times
-    model_files = svc.list_model_files()
-    if model_files:
-        latest_mtime = max(f.get("modified", 0) for f in model_files)
-        if latest_mtime > 0:
-            from datetime import datetime
-            overview["trained_at"] = datetime.fromtimestamp(latest_mtime).isoformat()
+    # Trained-at: only emit when training actually finished. Without
+    # ``training_summary.json`` the model directory might hold partial
+    # weights from an interrupted run -- a real mtime there would lie
+    # about a "Last trained" that never completed.
+    if ts:
+        model_files = svc.list_model_files()
+        if model_files:
+            latest_mtime = max(f.get("modified", 0) for f in model_files)
+            if latest_mtime > 0:
+                from datetime import datetime
+                overview["trained_at"] = datetime.fromtimestamp(latest_mtime).isoformat()
 
     return overview

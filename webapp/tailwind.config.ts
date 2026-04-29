@@ -73,6 +73,19 @@ const config: Config = {
         base: motion.base,
         slow: motion.slow,
       },
+      // ``fade-in`` smooths the swap from skeleton placeholders to real
+      // content (refresh on a workflow page, query result lands). One
+      // shared definition keeps the easing and duration consistent
+      // across every page that uses ``animate-fade-in``.
+      keyframes: {
+        "fade-in": {
+          "0%":   { opacity: "0", transform: "translateY(2px)" },
+          "100%": { opacity: "1", transform: "translateY(0)" },
+        },
+      },
+      animation: {
+        "fade-in": `fade-in ${motion.base} ease-out`,
+      },
       zIndex: {
         dropdown: String(z.dropdown),
         sticky:   String(z.sticky),

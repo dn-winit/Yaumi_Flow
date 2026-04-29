@@ -31,6 +31,18 @@ _DB_COLUMNS = [
     "adi", "cv2", "nonzero_ratio", "mean_qty", "avg_gap_days",
 ]
 
+# NVARCHAR character-length limits (matches scripts/create_tables.sql).
+# Defensive truncation prevents an INSERT error when an upstream string
+# (e.g. a verbose model name or a long item label) exceeds the column.
+_STR_LIMITS = {
+    "route_code": 50,
+    "item_code": 50,
+    "item_name": 255,
+    "data_split": 20,
+    "demand_class": 50,
+    "model_used": 100,
+}
+
 
 class DbPusher:
     """Pushes prediction CSVs to yf_demand_forecast."""
@@ -102,6 +114,13 @@ class DbPusher:
         # ``avg_gap_days`` is now produced in genuine day units by the
         # explainability stage (granularity-corrected). Pass straight through.
         out["avg_gap_days"] = raw.get("avg_gap_days", None)
+
+        # Defensive NVARCHAR truncation against the schema limits. Anything
+        # longer would cause a "String or binary data would be truncated"
+        # error mid-batch and roll back the whole transaction.
+        for col, limit in _STR_LIMITS.items():
+            if col in out.columns:
+                out[col] = out[col].astype(str).str.slice(0, limit)
         return out
 
     def _insert(self, df: pd.DataFrame, datasplit: str) -> Dict[str, Any]:
@@ -123,9 +142,9 @@ class DbPusher:
             conn: Optional[pyodbc.Connection] = None
             try:
                 conn = self._connect()
+                conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
                 cursor = conn.cursor()
                 cursor.fast_executemany = True
-                cursor.timeout = self._db.query_timeout
                 # DELETE + chunked INSERT in one transaction; rollback on
                 # any failure keeps the table in its pre-push state.
                 cursor.execute(delete_sql, (datasplit.capitalize(),))

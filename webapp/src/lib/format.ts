@@ -157,6 +157,19 @@ export const DASHBOARD_TOP_N = 5;
  */
 export const VISIT_REC_LIMIT = 5000;
 
+/**
+ * UI timing constants (milliseconds). One declaration so transitions
+ * line up across modals, drawers, and toast dismiss timers without each
+ * caller picking its own number.
+ *
+ * - ``OVERLAY_EXIT_MS`` matches the ``transition-opacity`` / ``transform``
+ *   classes on Modal + Drawer (~200ms). Used by the unmount setTimeout
+ *   so the exit animation completes before React removes the node.
+ * - ``TOAST_AUTO_DISMISS_MS`` is the default lifetime of a toast.
+ */
+export const OVERLAY_EXIT_MS = 200;
+export const TOAST_AUTO_DISMISS_MS = 3000;
+
 /** Pull the date out of any row that uses TrxDate / trx_date / ds / date. */
 export function pickDate(row: Record<string, unknown>): string {
   const raw = row.TrxDate ?? row.trx_date ?? row.ds ?? row.date ?? "";

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import logging
 import math
+from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
@@ -49,6 +50,9 @@ class PriorityCalculator:
         item_frequency: float,
         calibration: RouteCalibration,
         explanation: Explanation,
+        tier: str = "MEDIUM",
+        total_visits: Optional[int] = None,
+        item_visits: Optional[int] = None,
     ) -> PriorityResult:
         if item_history is None or item_history.empty or cycle_days <= 0:
             return PriorityResult(0.0, 0.0, 0.0, 0.0)
@@ -57,7 +61,7 @@ class PriorityCalculator:
         quantity = self._quantity_score(item_history, calibration)
         consistency = self._consistency_score(item_history)
 
-        weights = self._blend_weights(item_frequency, calibration)
+        weights = self._blend_weights(item_frequency, calibration, tier=tier)
 
         raw = (
             weights["timing"] * timing
@@ -67,8 +71,13 @@ class PriorityCalculator:
         score = round(max(0.0, min(100.0, raw * 100)), 2)
 
         # ---- emit signals ----
-        total_visits = int(cust_history["TrxDate"].nunique()) if not cust_history.empty else 0
-        item_visits = int(item_history["TrxDate"].nunique())
+        # Reuse caller-supplied counts when available -- gen_history already
+        # computed them for its frequency gate, so a second nunique() pass
+        # here is wasted work.
+        if total_visits is None:
+            total_visits = int(cust_history["TrxDate"].nunique()) if not cust_history.empty else 0
+        if item_visits is None:
+            item_visits = int(item_history["TrxDate"].nunique())
         if total_visits > 0 and item_visits / total_visits >= calibration.frequency_floor:
             explanation.add_item_signal(Signal(
                 kind=KIND_REGULAR_BUYER,
@@ -140,7 +149,8 @@ class PriorityCalculator:
     def _consistency_score(item_history: pd.DataFrame) -> float:
         if item_history.empty or len(item_history) < 2:
             return 0.3
-        dates = pd.to_datetime(item_history["TrxDate"]).unique()
+        # TrxDate already normalised to datetime64 at load.
+        dates = item_history["TrxDate"].unique()
         if len(dates) < 2:
             return 0.3
         intervals = np.diff(np.sort(dates)).astype("timedelta64[D]").astype(float)
@@ -154,16 +164,35 @@ class PriorityCalculator:
         data_boost = min(0.2, len(intervals) * 0.02)
         return min(1.0, consistency + data_boost)
 
-    @staticmethod
-    def _blend_weights(item_frequency: float, calibration: RouteCalibration) -> dict:
-        """Linear blend of low/high-freq weight triples based on frequency.
+    # Tier shifts the freq-blend interpolant toward the weights that match
+    # the customer's archetype:
+    #   HEAVY (hypermarket-like) -> qty-heavy weights -> push t toward 0.
+    #   LIGHT (mini-mart-like)   -> timing-heavy weights -> push t toward 1.
+    # MEDIUM is unchanged. Magnitude (0.2) is half a freq-band so a single
+    # tier shift can never fully invert the freq signal -- it nudges, not
+    # overrides.
+    _TIER_T_OFFSET: Dict[str, float] = {"HEAVY": -0.2, "LIGHT": 0.2, "MEDIUM": 0.0}
 
-        Frequency at or below floor -> low-freq weights.
-        Frequency at or above 0.5 -> high-freq weights.
+    @classmethod
+    def _blend_weights(
+        cls,
+        item_frequency: float,
+        calibration: RouteCalibration,
+        *,
+        tier: str = "MEDIUM",
+    ) -> dict:
+        """Linear blend of low/high-freq weight triples based on frequency,
+        nudged by the customer's basket-size tier.
+
+        Frequency at or below floor -> low-freq weights (qty-heavy).
+        Frequency at or above 0.5 -> high-freq weights (timing-heavy).
+        Tier offset shifts the interpolant within the same axes.
         """
         floor = calibration.frequency_floor
         ceiling = max(floor + 1e-6, 0.5)
-        t = max(0.0, min(1.0, (item_frequency - floor) / (ceiling - floor)))
+        t = (item_frequency - floor) / (ceiling - floor)
+        t += cls._TIER_T_OFFSET.get(tier, 0.0)
+        t = max(0.0, min(1.0, t))
         lo = calibration.priority_weights_low_freq
         hi = calibration.priority_weights_high_freq
         return {k: lo[k] + t * (hi[k] - lo[k]) for k in ("timing", "quantity", "consistency")}

@@ -12,8 +12,11 @@ export interface DataSummary {
 }
 
 export interface ForecastSummary {
-  accuracy_pct: number;
-  total_pairs: number;
+  // Nullable: 0% / 0 pairs is rendered as "—" by callers, so the API
+  // returns null until artifacts that back these numbers exist (avoids
+  // a misleading mid-training "0%" baseline).
+  accuracy_pct: number | null;
+  total_pairs: number | null;
   classes: Record<string, number>;
   test_predictions_count: number;
   future_forecast_count: number;

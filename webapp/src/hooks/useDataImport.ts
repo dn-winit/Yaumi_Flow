@@ -50,9 +50,13 @@ export function useForecastRows(
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useFilterDimensions(filters?: Partial<DashboardFilters>) {
+export function useFilterDimensions(filters?: Partial<DashboardFilters>, enabled = true) {
   // Item selections don't shrink the upstream dropdowns, so we exclude
-  // them from the cache key to avoid pointless refetches.
+  // them from the cache key to avoid pointless refetches. ``enabled``
+  // lets a caller defer the fetch until the dropdowns are actually
+  // about to render -- keeps refresh latency tight on pages that don't
+  // immediately need the picker (e.g. workflow refreshed with a route
+  // already in the URL).
   const upstream = {
     warehouse_codes: filters?.warehouse_codes,
     route_codes: filters?.route_codes,
@@ -61,6 +65,7 @@ export function useFilterDimensions(filters?: Partial<DashboardFilters>) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["eda-filter-dimensions", filterKey(upstream)],
     queryFn: () => dataImportApi.getFilterDimensions(upstream),
+    enabled,
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };

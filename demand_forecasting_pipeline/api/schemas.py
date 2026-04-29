@@ -88,7 +88,7 @@ class ExplainabilityFilters(BaseModel):
 
 class ClassSummaryResponse(BaseModel):
     success: bool
-    total_pairs: int = 0
+    total_pairs: Optional[int] = None
     classes: Dict[str, int] = {}
 
 
@@ -124,6 +124,19 @@ class PipelineStatusResponse(BaseModel):
     steps: Dict[str, str] = {}
 
 
+class FutureRouteSummaryRow(BaseModel):
+    route_code: str
+    skus: int = 0
+    predicted_qty: float = 0.0
+    peak_day: Optional[str] = None
+
+
+class FutureRouteSummaryResponse(BaseModel):
+    success: bool = True
+    date: Optional[str] = None
+    routes: List[FutureRouteSummaryRow] = []
+
+
 # ------------------------------------------------------------------
 # Health
 # ------------------------------------------------------------------
@@ -151,13 +164,17 @@ class HealthResponse(BaseModel):
 # ------------------------------------------------------------------
 
 class ForecastSummaryResponse(BaseModel):
-    accuracy_pct: float
-    total_pairs: int
-    classes: Dict[str, int]
-    test_predictions_count: int
-    future_forecast_count: int
+    # ``accuracy_pct`` and ``total_pairs`` are intentionally nullable: a
+    # numeric zero would render as "0%" / "0 pairs" in the UI, which is
+    # misleading while training is still in flight. ``None`` lets the UI
+    # show "—" until the artifacts that back these numbers actually exist.
+    accuracy_pct: Optional[float] = None
+    total_pairs: Optional[int] = None
+    classes: Dict[str, int] = {}
+    test_predictions_count: int = 0
+    future_forecast_count: int = 0
     last_forecast_date: Optional[str] = None
-    training_summary_exists: bool
+    training_summary_exists: bool = False
     training_overview: Optional[Dict[str, Any]] = None
 
 

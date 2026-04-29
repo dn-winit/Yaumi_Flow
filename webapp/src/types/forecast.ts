@@ -13,7 +13,7 @@ export interface MetricsResponse {
 
 export interface ClassSummaryResponse {
   success: boolean;
-  total_pairs: number;
+  total_pairs: number | null;
   classes: Record<string, number>;
 }
 

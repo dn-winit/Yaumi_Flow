@@ -28,7 +28,12 @@ _DB_COLUMNS = [
     "generated_by",
 ]
 
-# Map from DataFrame column names (PascalCase) to DB column names (snake_case)
+# Map from DataFrame column names (PascalCase) to DB column names (snake_case).
+# The CSV the engine writes uses the right-hand-side of Recommendation.to_dict;
+# the explainability columns (Source / WhyItem / WhyQuantity / Confidence) are
+# folded into the DB's `reason_*` columns by ``_push`` -- not via this map --
+# because they need type conversion (Confidence: 0-1 float -> 0-100 int) and
+# composition (reason_explanation = WhyItem + " | " + WhyQuantity, truncated).
 _COL_MAP = {
     "TrxDate": "trx_date", "RouteCode": "route_code",
     "CustomerCode": "customer_code", "CustomerName": "customer_name",
@@ -43,10 +48,12 @@ _COL_MAP = {
     "PatternQuality": "pattern_quality",
     "PurchaseCount": "purchase_count",
     "TrendFactor": "trend_factor",
-    "ReasonStatus": "reason_status",
-    "ReasonExplanation": "reason_explanation",
-    "ReasonConfidence": "reason_confidence",
 }
+
+# DB column character-length limits (matches scripts/create_tables.sql).
+# Defensive truncation prevents an INSERT error on long explanation strings.
+_REASON_STATUS_MAX = 100
+_REASON_EXPLANATION_MAX = 500
 
 
 class DbPusher:
@@ -89,12 +96,40 @@ class DbPusher:
         table = self._s.recommendation_table
         t0 = time.time()
 
-        # Rename PascalCase to snake_case
+        # 1. Rename the structural columns (PascalCase -> snake_case).
         rename = {k: v for k, v in _COL_MAP.items() if k in df.columns}
         db_df = df.rename(columns=rename).copy()
         db_df["generated_by"] = "API"
 
-        # Ensure all required columns exist
+        # 2. Compose the reason_* columns from the explainability fields the
+        # engine emits. We cannot rely on the rename map for these because:
+        #   * Source -> reason_status is a 1:1 string copy (truncate-safe)
+        #   * WhyItem + WhyQuantity collapse into reason_explanation
+        #     (the DB only has one explanation slot; concatenating preserves
+        #     both signals in a single sentence the UI / auditor can read)
+        #   * Confidence is 0..1 float in the engine but reason_confidence
+        #     is INT in the schema -> rescale to 0..100 percent.
+        # Each derivation defends against a missing source column so a
+        # legacy CSV (from a pre-explainability run) still pushes cleanly.
+        if "Source" in df.columns:
+            db_df["reason_status"] = df["Source"].astype(str).str.slice(0, _REASON_STATUS_MAX)
+        else:
+            db_df["reason_status"] = None
+
+        why_item = df["WhyItem"].astype(str) if "WhyItem" in df.columns else pd.Series([""] * len(df))
+        why_qty = df["WhyQuantity"].astype(str) if "WhyQuantity" in df.columns else pd.Series([""] * len(df))
+        composed = (why_item.fillna("") + " | " + why_qty.fillna("")).str.strip(" |")
+        db_df["reason_explanation"] = composed.str.slice(0, _REASON_EXPLANATION_MAX)
+
+        if "Confidence" in df.columns:
+            conf = pd.to_numeric(df["Confidence"], errors="coerce").fillna(0.0)
+            db_df["reason_confidence"] = (conf.clip(0.0, 1.0) * 100).round().astype(int)
+        else:
+            db_df["reason_confidence"] = 0
+
+        # 3. Backfill any structural column the engine didn't emit. This only
+        # bites when the upstream schema is intentionally smaller (e.g. a
+        # recovery push from an old CSV); a current run hits every column.
         for col in _DB_COLUMNS:
             if col not in db_df.columns:
                 db_df[col] = None
@@ -103,7 +138,9 @@ class DbPusher:
         col_list = ", ".join(f"[{c}]" for c in _DB_COLUMNS)
         insert_sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
 
-        # Delete: date range + optional route
+        # 4. DELETE matches by date (and optional route) so a re-run is
+        # idempotent: same key set lands the same rows. The transaction
+        # below makes DELETE+INSERT atomic.
         delete_sql = f"DELETE FROM {table} WHERE [trx_date] >= ? AND [trx_date] < DATEADD(day, 1, ?)"
         delete_params = [date, date]
         if route_code:
@@ -118,9 +155,9 @@ class DbPusher:
         conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
+            conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
             cursor = conn.cursor()
             cursor.fast_executemany = True
-            cursor.timeout = self._db.query_timeout
             # DELETE + chunked INSERT in one transaction so a partial
             # INSERT failure rolls the DELETE back too -- no orphaned
             # gaps, idempotent on retry.

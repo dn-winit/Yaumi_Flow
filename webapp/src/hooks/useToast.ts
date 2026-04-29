@@ -1,5 +1,6 @@
 import { createContext, useContext, useCallback, useState, type ReactNode } from "react";
 import React from "react";
+import { TOAST_AUTO_DISMISS_MS } from "@/lib/format";
 
 export interface Toast {
   id: string;
@@ -34,10 +35,11 @@ export function ToastProvider({ children }: { children: ReactNode }) {
         return next;
       });
 
-      // Auto-dismiss after 3s
+      // Auto-dismiss using the shared constant so toast lifetime stays
+      // in lockstep with any future tweak in lib/format.ts.
       setTimeout(() => {
         dismiss(id);
-      }, 3000);
+      }, TOAST_AUTO_DISMISS_MS);
     },
     [dismiss],
   );

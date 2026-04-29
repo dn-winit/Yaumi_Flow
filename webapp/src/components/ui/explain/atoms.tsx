@@ -29,17 +29,36 @@ export function Stat({
   label,
   value,
   hint,
+  prose = false,
+  highlight = false,
 }: {
   label: string;
   value: React.ReactNode;
   hint?: React.ReactNode;
+  /** When true, the value renders as wrapping prose (multi-line, no
+   *  truncate, secondary-text weight). Use for narrative cells that hold
+   *  a sentence rather than a numeric KPI -- keeps the outer Stat shell
+   *  identical so the grid alignment doesn't break. */
+  prose?: boolean;
+  /** When true, the card draws the eye to its value: bolder left border
+   *  in the brand colour and a brand-tinted, larger value. Reserved for
+   *  the headline KPI of each modal (the predicted quantity in the
+   *  forecast modal, the recommended quantity in the recommendation
+   *  modal). Other Stats stay neutral so the highlight stands out. */
+  highlight?: boolean;
 }) {
+  const borderClass = highlight ? "border-brand-500" : "border-brand-100";
+  const valueClass = prose
+    ? "mt-0.5 text-caption text-text-secondary leading-snug"
+    : highlight
+      ? "mt-0.5 text-lg font-bold text-brand-700 truncate"
+      : "mt-0.5 text-base font-semibold text-text-primary truncate";
   return (
-    <div className="bg-surface-sunken border-l-2 border-brand-100 rounded-lg px-3 py-2.5 min-w-0">
+    <div className={`bg-surface-sunken border-l-2 ${borderClass} rounded-lg px-3 py-2.5 min-w-0`}>
       <div className="text-caption font-medium text-text-tertiary uppercase tracking-wide truncate">
         {label}
       </div>
-      <div className="mt-0.5 text-base font-semibold text-text-primary truncate">{value}</div>
+      <div className={valueClass}>{value}</div>
       {hint && <div className="mt-0.5 text-caption text-text-tertiary leading-tight">{hint}</div>}
     </div>
   );

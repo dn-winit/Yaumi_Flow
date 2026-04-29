@@ -13,8 +13,9 @@ router = APIRouter(prefix="/explainability", tags=["explainability"])
 def get_class_summary(svc: ArtifactService = Depends(get_artifact_service)):
     """Demand-class breakdown (smooth / intermittent / erratic / lumpy)."""
     summary = svc.get_class_summary()
+    raw_total = summary.get("total_pairs")
     return ClassSummaryResponse(
         success=True,
-        total_pairs=summary.get("total_pairs", 0),
+        total_pairs=int(raw_total) if isinstance(raw_total, int) and raw_total > 0 else None,
         classes=summary.get("classes", {}),
     )

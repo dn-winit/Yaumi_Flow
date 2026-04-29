@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+from typing import Dict
+
 from fastapi import APIRouter, Depends
 
 from demand_forecasting_pipeline.api.dependencies import get_pipeline_service
 from demand_forecasting_pipeline.api.schemas import (
     PipelineRunRequest,
     PipelineRunResponse,
+    PipelineStatusResponse,
 )
 from demand_forecasting_pipeline.services.pipeline_service import PipelineService
 
@@ -30,7 +33,7 @@ def trigger_inference(
     return PipelineRunResponse(**result)
 
 
-@router.get("/status")
+@router.get("/status", response_model=Dict[str, PipelineStatusResponse])
 def get_all_status(svc: PipelineService = Depends(get_pipeline_service)):
     """Bulk status -- one round-trip for every known pipeline name."""
     return svc.get_all_status()

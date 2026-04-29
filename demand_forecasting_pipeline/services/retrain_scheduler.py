@@ -232,10 +232,20 @@ def compute_drift_status(
     if accuracy_svc is not None and getattr(accuracy_svc, "available", False):
         try:
             start, end = _recent_window(s)
-            result = accuracy_svc.get_comparison(start_date=start, end_date=end)
+            # ``limit=None`` returns every row in the window -- drift must
+            # see the full population, not a TOP-N truncation, otherwise
+            # ``recent_accuracy`` drifts from baseline by a sampling
+            # artefact (rows beyond the cap silently skip the WAPE
+            # numerator).
+            result = accuracy_svc.get_comparison(start_date=start, end_date=end, limit=None)
             if result.get("success") and result.get("summary"):
                 live_acc = result["summary"].get("accuracy_pct")
-                if live_acc is not None and live_acc > 0:
+                # ``None`` is "no data scored" (no overlapping rows in the
+                # window). A real 0.0 is "model missed everything" -- a
+                # genuine signal we must NOT suppress, otherwise drift
+                # silently falls through to the test-set fallback when
+                # the model is at its worst.
+                if live_acc is not None:
                     recent_acc = round(live_acc, 2)
                     source = "live"
         except Exception as exc:

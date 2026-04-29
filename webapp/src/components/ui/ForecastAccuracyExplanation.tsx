@@ -4,29 +4,31 @@ import { TOLERANCE_BY_CLASS } from "@/lib/format";
  *  so the table cannot drift from the scoring formula. */
 export default function ForecastAccuracyExplanation() {
   const classes: { key: string; label: string; tone: string; description: string }[] = [
+    // Descriptions mirror ``classDesc`` in ExplainabilityModal /
+    // RecommendationModal -- one phrasing per pattern across the whole UI.
     {
       key: "smooth",
       label: "Stable",
       tone: "bg-success-50 text-success-700 border-success-200",
-      description: "Regular buyers, low size variability — should be predicted tightly",
+      description: "Sells most days in steady quantities",
     },
     {
       key: "intermittent",
       label: "Sparse",
       tone: "bg-info-50 text-info-700 border-info-200",
-      description: "Patterned but with gaps between purchases",
+      description: "Sells in bursts, fairly steady sizes",
     },
     {
       key: "erratic",
       label: "Swingy",
       tone: "bg-warning-50 text-warning-700 border-warning-200",
-      description: "Regular buyers but with large quantity swings",
+      description: "Sells most days, quantities vary",
     },
     {
       key: "lumpy",
       label: "Random",
       tone: "bg-danger-50 text-danger-700 border-danger-200",
-      description: "Sparse and swingy — genuinely hard to predict",
+      description: "Sells in bursts, quantities vary",
     },
   ];
 

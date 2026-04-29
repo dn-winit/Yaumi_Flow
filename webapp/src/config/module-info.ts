@@ -63,36 +63,44 @@ export const RECOMMENDED_ORDERS_INFO = {
     {
       title: "Customer profiling",
       description:
-        "Each customer's complete buying history is analysed — what items they purchase, how frequently, how much per visit, and whether their patterns are consistent or changing.",
-      highlights: ["Per-customer analysis", "Frequency tracking", "Trend detection"],
+        "Each customer's complete buying history is analysed — what items they purchase, how frequently, how much per visit, and whether their patterns are consistent or changing. Customers are bucketed into HEAVY / MEDIUM / LIGHT basket tiers so recommendations weight the right signals for the right archetype (a hypermarket cares about quantity depth; a corner shop cares about timing).",
+      highlights: ["Per-customer analysis", "HEAVY/MEDIUM/LIGHT tiering", "Trend detection"],
     },
     {
       title: "Purchase cycle detection",
       description:
-        "The system identifies each customer's natural buying rhythm per item. Some items are bought weekly, others monthly — the system learns each cycle and knows when the customer is due.",
-      highlights: ["Per-item cycles", "Due-date prediction", "Pattern confidence"],
+        "The system identifies each customer's natural buying rhythm per item. Some items are bought weekly, others monthly — the system learns each cycle and knows when the customer is due. Multi-modal patterns (weekly + monthly bulk) and accelerating/declining trends are detected automatically.",
+      highlights: ["Per-item cycles", "Multi-modal detection", "Trend-aware (accelerating / declining)"],
     },
     {
-      title: "Three recommendation strategies",
+      title: "Five recommendation strategies",
       description:
-        "Three independent approaches work together to build the most complete recommendation for each customer:",
+        "Five independent approaches work together. Each customer-item pair is evaluated by every relevant strategy; the best signal wins, and corroborating signals stack as supporting evidence:",
       highlights: [
-        "History-based — items the customer regularly buys, timed to their cycle",
+        "History — items the customer regularly buys, timed to their personal cycle",
         "Peer matching — items similar customers on the same route buy",
-        "Basket analysis — items commonly purchased together",
+        "Basket analysis — items commonly purchased with what's already in the order",
+        "Reactivation — top items for customers who've gone quiet past their dormancy threshold",
+        "Seed — top van items for first-time / unknown customers",
       ],
     },
     {
       title: "Smart quantity sizing",
       description:
-        "Quantities are based on recent purchase behaviour, not just long-term averages. Recent visits carry more weight, and trending items get adjusted upward or downward automatically.",
-      highlights: ["Recency-weighted", "Trend-adjusted", "Van-load aware"],
+        "Quantities use a recency-weighted average tuned to each customer's own visit cadence — recent visits dominate for daily customers, weekly customers get a slower decay. Trending items adjust upward or downward, and outlier bulk-buys are winsorised so a single big order doesn't bias the average.",
+      highlights: ["Per-customer recency half-life", "Trend-adjusted", "Outlier-resistant", "Van-load aware"],
     },
     {
-      title: "Per-route calibration",
+      title: "Per-route AND per-customer calibration",
       description:
-        "Every threshold and parameter is calculated from the route's own data — not generic settings. What works on one route is different from another, and the system adapts accordingly.",
-      highlights: ["Route-specific tuning", "Data-driven thresholds", "No manual configuration"],
+        "Every threshold is data-driven — no hardcoded business numbers. Per-route thresholds (frequency floor, cycle gate, basket confidence) are recomputed every generation from the route's distribution. Each customer then gets their own personal completion gate so a JIT mini-mart and a bulk-buying hypermarket aren't held to the same trigger.",
+      highlights: ["Route-specific thresholds", "Customer-personalised gates", "No manual configuration"],
+    },
+    {
+      title: "Honest, current-day data",
+      description:
+        "When generating today's plan, the engine excludes today's already-completed sales from the customer's history (the 'as-of cutoff'), so customers who were visited earlier today don't appear as 'just bought' and lose their full basket. Predictions stay forecast-forward, never describe-the-past.",
+      highlights: ["As-of cutoff", "No same-day leakage", "Real per-day numbers"],
     },
     {
       title: "Priority ranking & explainability",

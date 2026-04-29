@@ -24,11 +24,13 @@ interface Props {
 }
 
 function classDesc(cls: string): string {
+  // Neutral, factual descriptions -- avoid words like "harder to predict"
+  // that undermine the supervisor's trust in the number on screen.
   const c = cls.toLowerCase();
-  if (c === "smooth") return "Stable, predictable demand";
-  if (c === "intermittent") return "Gaps between purchases, stable sizes";
-  if (c === "erratic") return "Frequent but variable quantities";
-  if (c === "lumpy") return "Infrequent and variable — harder to predict";
+  if (c === "smooth") return "Sells most days in steady quantities";
+  if (c === "intermittent") return "Sells in bursts, fairly steady sizes";
+  if (c === "erratic") return "Sells most days, quantities vary";
+  if (c === "lumpy") return "Sells in bursts, quantities vary";
   return "";
 }
 
@@ -73,10 +75,12 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
   const predicted = num(row.prediction ?? row.predicted);
   const actual = num(row.actual_qty ?? row.TotalQuantity);
   const pDemand = num(row.p_demand);
+  const qtyIfDemand = num(row.qty_if_demand);
   const q10 = num(row.q_10 ?? row.lower_bound);
   const q90 = num(row.q_90 ?? row.upper_bound);
   const cls = str(row.class ?? row.demand_class);
   const nonzeroRatio = num(row.nonzero_ratio);
+  const avgGapDays = num(row.avg_gap_days);
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
   const windows = stats.data?.windows;
@@ -108,21 +112,55 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
               label="Predicted quantity"
               value={predicted != null ? predicted.toFixed(1) : "-"}
               hint="Best estimate for this item on this date"
+              highlight
             />
             <Stat
-              label="Confidence"
-              value={<ConfidenceBadge value={pDemand} />}
-              hint="How likely this item sells today"
+              label="Likely to sell today"
+              value={<ConfidenceBadge value={pDemand} demandClass={cls} />}
+              hint="Probability the item moves at least one unit today"
             />
             <Stat
               label="Likely range"
               value={q10 != null && q90 != null ? `${q10.toFixed(1)} – ${q90.toFixed(1)}` : "-"}
-              hint="Low-to-high estimate covering most outcomes"
+              hint="From a slow day (10th percentile) to a busy day (90th percentile)"
             />
           </div>
         </div>
 
-        {/* Section 2: Actual vs forecast (only when actuals exist) */}
+        {/* Section 2: Anchor the prediction in the item's own pattern.
+            Renders only when at least one of the contextual stats exists,
+            so the popup stays clean for legacy rows that lack them. */}
+        {(qtyIfDemand != null || nonzeroRatio != null || avgGapDays != null) && (
+          <div>
+            <SectionTitle>How we got there</SectionTitle>
+            <div className={GRID_3}>
+              <Stat
+                label="Expected qty when it sells"
+                value={qtyIfDemand != null ? qtyIfDemand.toFixed(1) : "-"}
+                hint="Average size of a buying day for this item"
+              />
+              <Stat
+                label="Sells how often"
+                value={
+                  nonzeroRatio != null
+                    ? `${(nonzeroRatio * 100).toFixed(0)}% of days`
+                    : "-"
+                }
+                hint="Share of historical days this item moves on this route"
+              />
+              <Stat
+                label="Typical gap"
+                value={avgGapDays != null ? `${avgGapDays.toFixed(0)} days` : "-"}
+                hint="Average wait between purchases"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Section 3: Actual vs forecast (only when actuals exist).
+            ``Days with sales`` was here too -- removed because it duplicates
+            the ``Sells how often`` stat in the section above (both read
+            ``nonzero_ratio``). Two stats fit cleanly in the 3-col grid. */}
         {actual != null && (
           <div>
             <SectionTitle>How it performed</SectionTitle>
@@ -149,11 +187,6 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
                     ? `${variance > 0 ? "Sold" : "Loaded"} ${Math.abs(variance).toFixed(1)} ${variance > 0 ? "more than predicted" : "more than sold"}`
                     : "Difference vs prediction"
                 }
-              />
-              <Stat
-                label="Days with sales"
-                value={nonzeroRatio != null ? `${(nonzeroRatio * 100).toFixed(0)}%` : "-"}
-                hint="Share of days this item sells on this route"
               />
             </div>
           </div>

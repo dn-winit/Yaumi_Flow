@@ -41,6 +41,57 @@ _ITEM_COLS = [
 ]
 
 
+# ---------------------------------------------------------------------------
+# Defensive scalar coercion helpers.
+#
+# The session JSON snapshot is built by trusted server code, but some fields
+# round-trip through the browser (e.g. supervisor edits a quantity in the UI)
+# and arrive as strings or floats. These helpers guarantee the shape the
+# schema requires, so a single bad row never aborts the whole executemany.
+# ---------------------------------------------------------------------------
+
+def _to_int(value: Any, default: int = 0) -> int:
+    """Best-effort int cast. Truncates floats (so 5.7 -> 5), maps None / NaN
+    / unparseable strings to ``default``."""
+    if value is None:
+        return default
+    try:
+        return int(float(value))
+    except (TypeError, ValueError):
+        return default
+
+
+def _to_float(value: Any, default: float = 0.0) -> float:
+    if value is None:
+        return default
+    try:
+        f = float(value)
+        # NaN survives float() -- treat as missing.
+        return f if f == f else default  # noqa: PLR0124 -- NaN check
+    except (TypeError, ValueError):
+        return default
+
+
+def _str_clip(value: Any, max_len: int) -> str:
+    """Coerce to string and clip at the schema's NVARCHAR length so we
+    never trip a "String or binary data would be truncated" error."""
+    if value is None:
+        return ""
+    s = str(value)
+    return s if len(s) <= max_len else s[:max_len]
+
+
+# NVARCHAR limits per scripts/create_tables.sql. The 'session_id' column is
+# defined NVARCHAR(100) on all three tables (foreign key alignment).
+_LEN_SESSION_ID = 100
+_LEN_ROUTE_CODE = 50
+_LEN_CUSTOMER_CODE = 50
+_LEN_ITEM_CODE = 50
+_LEN_ITEM_NAME = 255
+_LEN_TIER = 50
+_LEN_STATUS = 20
+
+
 class DbSaver:
     """Pushes supervision session data to 3 DB tables in YaumiAIML."""
 
@@ -75,9 +126,9 @@ class DbSaver:
         conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
+            conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
             cursor = conn.cursor()
             cursor.fast_executemany = True
-            cursor.timeout = self._db.query_timeout
 
             # All three writes share one transaction so DELETE+INSERT
             # stays atomic per session_id -- any failure rolls the whole
@@ -114,8 +165,8 @@ class DbSaver:
         conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
+            conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
             cursor = conn.cursor()
-            cursor.timeout = self._db.query_timeout
 
             cursor.execute(
                 f"SELECT TOP 1 session_id FROM {self._s.route_summary_table} "
@@ -147,8 +198,8 @@ class DbSaver:
         conn: Optional[pyodbc.Connection] = None
         try:
             conn = self._connect()
+            conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
             cursor = conn.cursor()
-            cursor.timeout = self._db.query_timeout
             cursor.execute(
                 f"SELECT COUNT(*) FROM {self._s.route_summary_table} "
                 f"WHERE route_code = ? AND supervision_date = ?",
@@ -173,26 +224,29 @@ class DbSaver:
         table = self._s.route_summary_table
         cursor.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
 
-        total_c = data.get("totalCustomers", 0)
-        visited_c = data.get("visitedCustomers", 0)
+        total_c = _to_int(data.get("totalCustomers"))
+        visited_c = _to_int(data.get("visitedCustomers"))
         # Fulfillment rate is "of what we recommended for the customers we
         # actually visited, how much sold". Mixing all-customer recommended
         # with visited-only actuals would let unvisited customers drag the
         # rate down, which has nothing to do with forecast quality.
-        visited_rec = data.get("visitedRecommended", 0)
-        visited_act = data.get("visitedActual", 0)
+        visited_rec = _to_int(data.get("visitedRecommended"))
+        visited_act = _to_int(data.get("visitedActual"))
 
         ph = ", ".join("?" for _ in _ROUTE_COLS)
         cursor.execute(
             f"INSERT INTO {table} ({', '.join(f'[{c}]' for c in _ROUTE_COLS)}) VALUES ({ph})",
             (
-                sid, data.get("routeCode", ""), data.get("date", ""),
+                _str_clip(sid, _LEN_SESSION_ID),
+                _str_clip(data.get("routeCode"), _LEN_ROUTE_CODE),
+                data.get("date", ""),
                 total_c, visited_c,
                 round(visited_c / max(total_c, 1) * 100, 1),
                 visited_rec, visited_act,
                 round(visited_act / max(visited_rec, 1) * 100, 1),
-                data.get("visitedAchievement", 0),
-                data.get("status", "closed"), now,
+                _to_float(data.get("visitedAchievement")),
+                _str_clip(data.get("status", "closed"), _LEN_STATUS),
+                now,
             ),
         )
 
@@ -200,20 +254,29 @@ class DbSaver:
         table = self._s.customer_summary_table
         cursor.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
 
+        clipped_sid = _str_clip(sid, _LEN_SESSION_ID)
         rows = []
         for code, c in customers.items():
             if not c.get("visited"):
                 continue
-            total_items = c.get("totalItems", len(c.get("items", [])))
-            sold = c.get("itemsSold", 0)
-            total_rec = c.get("totalRecommended", 0)
-            total_act = c.get("totalActual", 0)
+            total_items = _to_int(c.get("totalItems", len(c.get("items", []))))
+            sold = _to_int(c.get("itemsSold"))
+            total_rec = _to_int(c.get("totalRecommended"))
+            total_act = _to_int(c.get("totalActual"))
             rows.append((
-                sid, code, c.get("visitSequence", 0),
-                total_items, sold, c.get("coverage", 0),
+                clipped_sid,
+                _str_clip(code, _LEN_CUSTOMER_CODE),
+                _to_int(c.get("visitSequence")),
+                total_items, sold,
+                _to_float(c.get("coverage")),
                 total_rec, total_act,
                 round(total_act / max(total_rec, 1) * 100, 1),
-                c.get("score", 0), c.get("llmAnalysis", ""), now,
+                _to_float(c.get("score")),
+                # llm_performance_analysis is NVARCHAR(MAX) so no clip; coerce
+                # to str so a non-string LLM payload (rare but possible)
+                # doesn't crash pyodbc's parameter binder.
+                str(c.get("llmAnalysis") or ""),
+                now,
             ))
 
         if rows:
@@ -228,26 +291,35 @@ class DbSaver:
         table = self._s.item_details_table
         cursor.execute(f"DELETE FROM {table} WHERE session_id = ?", (sid,))
 
+        clipped_sid = _str_clip(sid, _LEN_SESSION_ID)
         rows = []
         for code, c in customers.items():
             if not c.get("visited"):
                 continue
+            clipped_code = _str_clip(code, _LEN_CUSTOMER_CODE)
             for it in c.get("items", []):
-                rec_qty = it.get("recommendedQuantity", 0)
-                adj = it.get("adjustment", 0)
+                rec_qty = _to_int(it.get("recommendedQuantity"))
+                adj = _to_int(it.get("adjustment"))
                 # Prefer the stored effectiveRecommended so the DB row matches
                 # the JSON snapshot exactly; fall back to the sum only if an
                 # older payload omits it.
-                effective = it.get("effectiveRecommended", rec_qty + adj)
+                effective = _to_int(it.get("effectiveRecommended", rec_qty + adj))
                 rows.append((
-                    sid, code, it.get("itemCode", ""), it.get("itemName", ""),
+                    clipped_sid,
+                    clipped_code,
+                    _str_clip(it.get("itemCode"), _LEN_ITEM_CODE),
+                    _str_clip(it.get("itemName"), _LEN_ITEM_NAME),
                     rec_qty, effective, adj,
-                    it.get("actualQuantity", 0),
+                    _to_int(it.get("actualQuantity")),
                     1 if it.get("wasEdited") else 0,
                     1 if it.get("wasSold") else 0,
-                    it.get("tier", ""), it.get("priorityScore", 0), it.get("vanInventoryQty", 0),
-                    it.get("daysSinceLastPurchase", 0), it.get("purchaseCycleDays", 0),
-                    it.get("frequencyPercent", 0), now,
+                    _str_clip(it.get("tier"), _LEN_TIER),
+                    _to_float(it.get("priorityScore")),
+                    _to_int(it.get("vanInventoryQty")),
+                    _to_int(it.get("daysSinceLastPurchase")),
+                    _to_float(it.get("purchaseCycleDays")),
+                    _to_float(it.get("frequencyPercent")),
+                    now,
                 ))
 
         if rows:
