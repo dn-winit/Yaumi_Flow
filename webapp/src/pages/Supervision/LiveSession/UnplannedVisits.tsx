@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import Card from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
@@ -20,20 +20,17 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
 
   const customers: UnplannedVisitor[] = data?.customers ?? [];
 
-  // Tiles for the grid. Every unplanned customer is by definition
-  // live-visited (we know about them precisely because they invoiced
-  // today), so the green dot is always lit.
-  const tiles = useMemo<CustomerStat[]>(
-    () =>
-      customers.map((c) => ({
-        customerCode: c.customer_code,
-        customerName: c.customer_name ?? "",
-        uniqueSkus: c.items.length,
-        totalUnits: c.total_qty,
-        liveVisited: true,
-      })),
-    [customers]
-  );
+  // Tiles for the grid. ``unique_skus``, ``total_qty`` and
+  // ``live_visited`` are all server-supplied; the client just maps
+  // wire field names onto component prop names (a presentation
+  // adapter, no calculation).
+  const tiles: CustomerStat[] = customers.map((c) => ({
+    customerCode: c.customer_code,
+    customerName: c.customer_name ?? "",
+    uniqueSkus: c.unique_skus,
+    totalUnits: c.total_qty,
+    liveVisited: c.live_visited,
+  }));
 
   const selected = selectedCode
     ? customers.find((c) => c.customer_code === selectedCode) ?? null

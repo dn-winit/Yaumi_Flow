@@ -7,10 +7,15 @@ set -e
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
-# Load unified env
-set -a
-source .env 2>/dev/null || true
-set +a
+# Each service loads .env itself via pydantic-settings (`_env_file`). We
+# intentionally do NOT `source` the file here: bash exports every value
+# as a literal string, which Pydantic v2 then re-parses as JSON. List
+# fields like ``DF_LIVE_ROUTE_CODES=[9105,...]`` parse to list[int] from
+# JSON but the field is typed list[str], so the service refuses to boot
+# with a validation error. Pydantic's own dotenv parser handles the same
+# .env without that strictness clash, which is why running each service
+# one-by-one (without bash pre-loading the env) works while a bulk start
+# previously did not.
 
 echo "Starting Yaumi Flow services..."
 

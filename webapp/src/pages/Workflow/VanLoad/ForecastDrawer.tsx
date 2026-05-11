@@ -1,4 +1,3 @@
-import { useMemo } from "react";
 import Drawer from "@/components/ui/Drawer";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
@@ -10,9 +9,10 @@ import LineChart from "@/components/charts/LineChart";
 import { CHART_COLOR } from "@/components/charts/theme";
 import PredictedValue from "@/components/ui/PredictedValue";
 import ConfidenceBadge from "@/components/ui/ConfidenceBadge";
-import { useFutureForecast } from "@/hooks/useForecast";
-import { toNum, pickDate, fmtNum } from "@/lib/format";
+import { useForecastDrawerPageView } from "@/hooks/useForecast";
+import { fmtNum } from "@/lib/format";
 import { fmtDate, fmtDateRange, todayIso } from "@/lib/date";
+import type { ForecastDrawerTableRow } from "@/api/forecast";
 import type { Row } from "@/types/common";
 
 interface Props {
@@ -22,155 +22,132 @@ interface Props {
   itemCodes?: string[];
 }
 
+/** Adapter: wrap a ForecastDrawerTableRow into the legacy Row shape
+ *  the ExplainabilityModal reads. The server already supplies the
+ *  engine intermediates the modal renders inside ``explain``. */
+function toLegacyRow(r: ForecastDrawerTableRow, routeCode: string | undefined): Row {
+  return {
+    ItemCode: r.item_code,
+    ItemName: r.item_name,
+    RouteCode: routeCode ?? "",
+    TrxDate: r.date,
+    prediction: r.units_to_load,
+    p_demand: r.p_demand,
+    demand_class: r.demand_class,
+    class: r.demand_class,
+    lower_bound: r.lower_bound,
+    upper_bound: r.upper_bound,
+    ...r.explain,
+  } as unknown as Row;
+}
+
 export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: Props) {
-  const params = useMemo(() => {
-    const p: Record<string, unknown> = {};
-    if (routeCode) p.route_code = routeCode;
-    if (itemCodes && itemCodes.length === 1) p.item_code = itemCodes[0];
-    return p;
-  }, [routeCode, itemCodes]);
+  const { data: view, loading } = useForecastDrawerPageView(
+    routeCode,
+    itemCodes,
+    todayIso(),
+    open,
+  );
 
-  const { data, loading } = useFutureForecast(params, open);
-
-  // "Future Forecast" is strictly forward-looking.
-  const today = todayIso();
-  const filteredRows = useMemo(() => {
-    const rows = (data?.data ?? []) as Row[];
-    const future = rows.filter((r) => pickDate(r) >= today);
-    if (!itemCodes || itemCodes.length === 0) return future;
-    const set = new Set(itemCodes);
-    return future.filter((r) => set.has(String(r.ItemCode ?? "")));
-  }, [data, itemCodes, today]);
-
-  // Quantiles are not additive across SKUs -- only render the band when exactly
-  // one SKU is in view.
-  const showBand =
-    filteredRows.length > 0 &&
-    new Set(filteredRows.map((r) => String(r.ItemCode ?? ""))).size === 1;
-
-  const chartData = useMemo(() => {
-    const map = new Map<string, { predicted: number; q10: number; q90: number }>();
-    filteredRows.forEach((r) => {
-      const d = pickDate(r);
-      if (!d) return;
-      const cur = map.get(d) ?? { predicted: 0, q10: 0, q90: 0 };
-      cur.predicted += toNum(r.prediction) ?? 0;
-      if (showBand) {
-        cur.q10 += toNum(r.q_10) ?? 0;
-        cur.q90 += toNum(r.q_90) ?? 0;
-      }
-      map.set(d, cur);
-    });
-    return Array.from(map.entries())
-      .sort(([a], [b]) => a.localeCompare(b))
-      .map(([date, v]) => ({
-        date,
-        predicted: Number(v.predicted.toFixed(2)),
-        q10: Number(v.q10.toFixed(2)),
-        q90: Number(v.q90.toFixed(2)),
-      }));
-  }, [filteredRows, showBand]);
-
-  const summary = useMemo(() => {
-    if (chartData.length === 0) {
-      return { horizon: 0, total: 0, skus: 0 };
-    }
-    const total = chartData.reduce((n, r) => n + r.predicted, 0);
-    const skus = new Set(filteredRows.map((r) => String(r.ItemCode ?? ""))).size;
-    return { horizon: chartData.length, total, skus };
-  }, [chartData, filteredRows]);
-
-  const tableRows = useMemo(() => {
-    return [...filteredRows].sort((a, b) => {
-      const da = pickDate(a);
-      const db = pickDate(b);
-      if (da !== db) return da.localeCompare(db);
-      return (toNum(b.prediction) ?? 0) - (toNum(a.prediction) ?? 0);
-    });
-  }, [filteredRows]);
+  const showBand = Boolean(view?.show_band);
 
   const columns = [
-    { key: "Date", label: "Date", render: (r: Row) => fmtDate(pickDate(r)) },
-    { key: "ItemCode", label: "Item", render: (r: Row) => String(r.ItemCode ?? "-") },
+    {
+      key: "Date",
+      label: "Date",
+      render: (r: ForecastDrawerTableRow) => fmtDate(r.date),
+    },
+    {
+      key: "ItemCode",
+      label: "Item",
+      render: (r: ForecastDrawerTableRow) => r.item_code || "-",
+    },
     {
       key: "Predicted",
       label: "Units to load",
-      render: (r: Row) => <PredictedValue row={r} value={toNum(r.prediction)} />,
+      render: (r: ForecastDrawerTableRow) => (
+        <PredictedValue
+          row={toLegacyRow(r, routeCode)}
+          value={r.units_to_load}
+        />
+      ),
     },
     {
       key: "Confidence",
       label: "Chance of selling",
-      render: (r: Row) => (
+      render: (r: ForecastDrawerTableRow) => (
         <ConfidenceBadge
-          value={toNum(r.p_demand)}
-          demandClass={r.class as string | undefined}
+          value={r.p_demand}
+          demandClass={r.demand_class ?? undefined}
         />
       ),
     },
     {
       key: "Range",
       label: "Likely range (low-high)",
-      render: (r: Row) => {
-        const lo = toNum(r.q_10);
-        const hi = toNum(r.q_90);
-        if (lo == null || hi == null) return "-";
-        return `${lo.toFixed(1)} - ${hi.toFixed(1)}`;
+      render: (r: ForecastDrawerTableRow) => {
+        if (r.lower_bound == null || r.upper_bound == null) return "-";
+        return `${r.lower_bound.toFixed(1)} - ${r.upper_bound.toFixed(1)}`;
       },
     },
   ];
 
+  const summary = view?.summary;
   const windowLabel =
-    summary.horizon > 0
-      ? fmtDateRange(chartData[0].date, chartData[chartData.length - 1].date)
-      : `from ${fmtDate(today)}`;
+    summary && summary.window_start && summary.window_end
+      ? fmtDateRange(summary.window_start, summary.window_end)
+      : `from ${fmtDate(todayIso())}`;
 
   return (
-    <Drawer open={open} onClose={onClose} title="Upcoming plan — van load" width="xl">
+    <Drawer open={open} onClose={onClose} title="Upcoming plan - van load" width="xl">
       <div className="space-y-6">
         <DrawerContextBar
           routeCode={routeCode}
           itemCodes={itemCodes}
           dateRange={windowLabel}
           extra={
-            filteredRows.length > 0 && (
+            summary && summary.line_count > 0 ? (
               <span className="text-caption text-text-tertiary">
-                {fmtNum(filteredRows.length)} lines
+                {fmtNum(summary.line_count)} lines
               </span>
-            )
+            ) : undefined
           }
         />
 
         {loading ? (
           <Loading message="Loading upcoming van load..." />
-        ) : filteredRows.length === 0 ? (
+        ) : !view || !view.available || !summary || view.table_rows.length === 0 ? (
           <EmptyState
             title="Nothing scheduled"
-            message="No upcoming load from today onwards for this route/item selection."
-            icon="📈"
+            message={
+              view?.message ||
+              "No upcoming load from today onwards for this route/item selection."
+            }
+            icon="trend"
           />
         ) : (
           <>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
               <MetricCard
                 label="Days covered"
-                value={`${summary.horizon} days`}
+                value={`${summary.horizon_days} days`}
                 subtitle={`${summary.skus} items`}
               />
               <MetricCard
                 label="Total van load"
-                value={fmtNum(summary.total)}
+                value={fmtNum(summary.total_van_load)}
                 subtitle="Units across the window"
               />
               <MetricCard
                 label="Avg per day"
-                value={summary.horizon > 0 ? fmtNum(summary.total / summary.horizon) : "-"}
+                value={summary.horizon_days > 0 ? fmtNum(summary.avg_per_day) : "-"}
                 subtitle="Units / day"
               />
             </div>
 
             <LineChart
               title={`Daily van load${showBand ? "" : " - route total"}`}
-              data={chartData}
+              data={view.chart_data as unknown as Record<string, unknown>[]}
               xKey="date"
               series={
                 showBand
@@ -186,9 +163,16 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
 
             <Card
               title="Line-item detail"
-              actions={<span className="text-body text-text-tertiary">{tableRows.length} rows</span>}
+              actions={
+                <span className="text-body text-text-tertiary">
+                  {view.table_rows.length} rows
+                </span>
+              }
             >
-              <Table data={tableRows} columns={columns} />
+              <Table
+                data={view.table_rows as unknown as Record<string, unknown>[]}
+                columns={columns as unknown as Parameters<typeof Table>[0]["columns"]}
+              />
             </Card>
           </>
         )}

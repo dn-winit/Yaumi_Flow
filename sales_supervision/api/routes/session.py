@@ -1,27 +1,39 @@
 """
-Session lifecycle: initialize -> visit -> save-active. Plus the live
-unplanned-visits poll the live UI uses to flag drop-ins. Everything else
-(update-actuals, get-summary, full-session, route-score) had no UI
-consumer and was dropped to keep the surface minimal.
+Session lifecycle: initialize -> visit (auto-persisted). Plus the live
+unplanned-visits poll the live UI uses to flag drop-ins.
+
+Every ``process_visit`` call upserts the route header + the visited
+customer + that customer's items into YaumiAIML in the background.
+There is no separate "save session" step -- the DB stays in sync with
+the in-memory session as visits land.
 """
 
 from __future__ import annotations
 
+import logging
+import threading
 import time
 from collections import OrderedDict
+from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends
+logger = logging.getLogger(__name__)
+
+from fastapi import APIRouter, BackgroundTasks, Depends
 
 from sales_supervision.api.dependencies import (
+    get_auto_visit_service,
     get_db_saver,
     get_live_actuals,
     get_session_manager,
-    get_store,
 )
 from sales_supervision.api.schemas import (
     InitSessionRequest,
+    LlmSaveResponse,
     ProcessVisitRequest,
-    SaveSessionResponse,
+    SaveBriefingRequest,
+    SaveCustomerAnalysisRequest,
+    SaveRouteAnalysisRequest,
+    SavedVisitsResponse,
     SessionResponse,
     UnplannedVisitsResponse,
     VisitResponse,
@@ -29,40 +41,68 @@ from sales_supervision.api.schemas import (
 from sales_supervision.core.session import SessionManager
 from sales_supervision.services.db_saver import DbSaver
 from sales_supervision.services.live_actuals import LiveActualsClient
-from sales_supervision.services.storage.store import SessionStore
 
 router = APIRouter(prefix="/session", tags=["session"])
 
 
 # In-memory active sessions, keyed by session_id. Without a save the
 # entry would otherwise live forever in a long-running process and leak
-# memory. We cap the registry and evict the least-recently-used entry
-# whenever the cap is hit, plus drop entries idle past _SESSION_TTL_S so
-# abandoned visits are reclaimed automatically.
-_SESSION_REGISTRY_MAX = 256
-_SESSION_TTL_S = 8 * 60 * 60  # 8 hours -- one supervisor day
+# memory. The registry caps both concurrent in-memory sessions and how
+# long an idle session is held; both come from Settings so deployments
+# with longer shifts (12-hour depots, weekend coverage) tune via env
+# vars without code changes.
+from sales_supervision.config.settings import get_settings as _get_ss_settings
 
 
 class _SessionRegistry:
-    """LRU + TTL store for in-flight supervision sessions."""
+    """LRU + TTL store for in-flight supervision sessions.
+
+    Also vends a per-session ``threading.Lock`` so concurrent ``/visit``
+    requests on the same session serialise their in-memory mutations.
+    Without this, a supervisor double-tap on the same customer (or a
+    rapid sequence of taps across customers) interleaves
+    ``mgr.process_visit`` writes to ``session.customers[*]`` and the
+    final session state -- and the snapshot the background DB-upsert
+    captures -- becomes non-deterministic.
+    """
 
     def __init__(self, maxsize: int, ttl_seconds: int) -> None:
         self._maxsize = maxsize
         self._ttl = ttl_seconds
         self._items: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
+        # Locks live alongside sessions and are evicted with them. The
+        # outer mutex protects the locks dict from concurrent allocate
+        # / pop; each per-session lock is held only during a single
+        # visit's in-memory mutation + snapshot.
+        self._locks: Dict[str, threading.Lock] = {}
+        self._locks_mutex = threading.Lock()
 
     def _sweep(self) -> None:
         cutoff = time.time() - self._ttl
         stale = [sid for sid, (ts, _) in self._items.items() if ts < cutoff]
         for sid in stale:
             self._items.pop(sid, None)
+            self._drop_lock(sid)
+
+    def _drop_lock(self, session_id: str) -> None:
+        with self._locks_mutex:
+            self._locks.pop(session_id, None)
+
+    def lock_for(self, session_id: str) -> threading.Lock:
+        with self._locks_mutex:
+            lock = self._locks.get(session_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._locks[session_id] = lock
+            return lock
 
     def set(self, session_id: str, session: object) -> None:
         self._sweep()
         self._items[session_id] = (time.time(), session)
         self._items.move_to_end(session_id)
         while len(self._items) > self._maxsize:
-            self._items.popitem(last=False)
+            evicted, _ = self._items.popitem(last=False)
+            self._drop_lock(evicted)
 
     def get(self, session_id: str):
         self._sweep()
@@ -78,17 +118,48 @@ class _SessionRegistry:
 
     def pop(self, session_id: str) -> None:
         self._items.pop(session_id, None)
+        self._drop_lock(session_id)
 
 
-_sessions = _SessionRegistry(_SESSION_REGISTRY_MAX, _SESSION_TTL_S)
+_ss = _get_ss_settings()
+_sessions = _SessionRegistry(_ss.session_registry_max, _ss.session_ttl_seconds)
 
 
 @router.post("/initialize", response_model=SessionResponse)
 def initialize_session(
     req: InitSessionRequest,
     mgr: SessionManager = Depends(get_session_manager),
+    db_saver: DbSaver = Depends(get_db_saver),
+    auto_visit_svc=Depends(get_auto_visit_service),
 ):
+    # Bring the supervision DB up to date with YaumiLive for this
+    # (route, date) BEFORE we hydrate. Same code path the 60s cron
+    # uses; running it synchronously here means the saved snapshot we
+    # load below already reflects every customer YaumiLive has invoiced
+    # so far. The page then snaps straight to the correct count instead
+    # of ticking 1, 2, 3 in front of the supervisor as a per-customer
+    # reconciliation walks the counter up.
+    if auto_visit_svc is not None and db_saver.available:
+        try:
+            # ``skip_llm=True`` runs only Phase 0 + Phase 1 (route
+            # header refresh + visit upserts). LLM phases (briefings,
+            # retros) are handled by the 60s cron -- idempotent, so
+            # the next tick picks them up. Keeps page-open latency
+            # bounded to a few seconds.
+            auto_visit_svc.reconcile_route(req.route_code, req.date, skip_llm=True)
+        except Exception as exc:
+            # Best-effort -- the 60s cron will catch up on the next tick
+            # even if this synchronous attempt fails.
+            logger.warning(
+                "init_session_reconcile_failed route=%s date=%s err=%s",
+                req.route_code, req.date, exc,
+            )
+
     session = mgr.create_session(req.route_code, req.date, req.recommendations)
+    if db_saver.available:
+        saved = db_saver.load_session_visits(req.route_code, req.date)
+        if saved:
+            mgr.hydrate_saved_visits(session, saved)
     _sessions.set(session.session_id, session)
     return SessionResponse(success=True, session=session.summary())
 
@@ -96,11 +167,21 @@ def initialize_session(
 @router.post("/visit", response_model=VisitResponse)
 def process_visit(
     req: ProcessVisitRequest,
+    background_tasks: BackgroundTasks,
     mgr: SessionManager = Depends(get_session_manager),
     live: LiveActualsClient = Depends(get_live_actuals),
+    db_saver: DbSaver = Depends(get_db_saver),
 ):
-    """Mark a customer visited. Per-item actuals are pulled live from
-    YaumiLive via data_import -- the client never supplies them."""
+    """Mark a customer visited and persist the visit to YaumiAIML.
+
+    Per-item actuals are pulled live from YaumiLive via data_import --
+    the client never supplies them. Once the in-memory session is
+    updated, the route header, the visited customer's row, and that
+    customer's item rows are upserted in a single transaction. The
+    upsert runs as a FastAPI ``BackgroundTask`` so the response returns
+    to the field UI immediately and warehouse latency never blocks a
+    visit tap.
+    """
     session = _sessions.get(req.session_id)
     if session is None:
         return VisitResponse(success=False, visit={"error": f"Session {req.session_id} not found"})
@@ -109,75 +190,171 @@ def process_visit(
     if customer is None:
         return VisitResponse(success=False, visit={"error": f"Customer {req.customer_code} not in session"})
 
-    actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
+    # Per-session lock serialises in-memory mutation across concurrent
+    # ``/visit`` calls (e.g. supervisor double-tap, or rapid-fire taps
+    # across customers in the same session). Lock duration covers the
+    # live-actuals fetch, the in-memory ``mgr.process_visit`` write,
+    # and the snapshot capture for the background upsert. The DB
+    # upsert itself runs outside the lock because it's already
+    # idempotent on (session_id, customer_code).
+    with _sessions.lock_for(req.session_id):
+        actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
 
-    # Scoring evaluates planned items only; surface any extras the
-    # customer bought as ``alsoBought`` so the UI can show them as
-    # awareness-only context (no score impact).
-    planned_item_codes = {it.item_code for it in customer.items}
-    also_bought = [
-        {"item_code": code, "qty": qty}
-        for code, qty in actual_sales.items()
-        if code not in planned_item_codes and qty > 0
-    ]
-    also_bought.sort(key=lambda r: r["qty"], reverse=True)
+        # Scoring evaluates planned items only; surface any extras the
+        # customer bought as ``alsoBought`` so the UI can show them as
+        # awareness-only context (no score impact).
+        planned_item_codes = {it.item_code for it in customer.items}
+        also_bought = [
+            {"item_code": code, "qty": qty}
+            for code, qty in actual_sales.items()
+            if code not in planned_item_codes and qty > 0
+        ]
+        also_bought.sort(key=lambda r: r["qty"], reverse=True)
 
-    result = mgr.process_visit(session, req.customer_code, actual_sales)
+        result = mgr.process_visit(session, req.customer_code, actual_sales)
+
+        # Snapshot the current session state under the lock so the
+        # background upsert sees a coherent view. Once the snapshot is
+        # captured into the closure parameters, the worker can run
+        # without holding the lock -- it only reads the immutable dict.
+        snapshot = session.to_dict()
+        session_totals = snapshot["visit_totals"]
+        actual_qty = customer.total_actual
+        recommended_qty = customer.total_recommended
+
+    if db_saver.available:
+        background_tasks.add_task(
+            db_saver.upsert_visit,
+            snapshot,
+            req.customer_code,
+        )
+
     payload = result.to_dict()
     payload["actualSales"] = actual_sales
     payload["alsoBought"] = also_bought
     payload["actualFetchedFromLive"] = True
+    # Pure-render fields the live UI used to compute on the client.
+    # ``actualQty`` is the rec-fulfilled total (sum of ``min(rec, act)``
+    # per item), identical to legacy ``recommendedTotal - unsoldTotal``.
+    payload["actualQty"] = actual_qty
+    payload["recommendedQty"] = recommended_qty
+    # Updated cumulative session-level visit aggregates so the tile
+    # row updates without the client having to re-aggregate the
+    # in-session ``visits`` map.
+    payload["sessionTotals"] = session_totals
     return VisitResponse(success=True, visit=payload)
 
 
-@router.post("/save-active", response_model=SaveSessionResponse)
-def save_active_session(
-    session_id: str,
-    mgr: SessionManager = Depends(get_session_manager),
-    store: SessionStore = Depends(get_store),
-    db_saver: DbSaver = Depends(get_db_saver),
-):
-    """Persist the active in-memory session to disk + DB (when configured)
-    and free its slot in the in-memory registry.
+# ----------------------------------------------------------------------
+# LLM-payload persistence
+#
+# Three artifacts, three endpoints. Each runs the actual DB write as a
+# FastAPI ``BackgroundTask`` so the UI returns immediately -- the LLM
+# response is already on screen by the time this fires. Body shape is
+# always (session_id, [customer_code], content); ``content`` is the
+# JSON-stringified analytics payload, stored as-is so a future schema
+# change in the LLM response doesn't require a DB migration.
+# ----------------------------------------------------------------------
 
-    File save is required; DB save is best-effort when configured. The
-    session stays in the in-memory registry on file-save failure so the
-    supervisor can retry. On DB-only failure we still drop the in-memory
-    slot (the JSON on disk is the source of truth) and flag the warning
-    in the response so the UI can surface it.
+
+def _snapshot_or_error(
+    session_id: str, db_saver: Optional[DbSaver] = None,
+) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
+    """Locate the session and return its dict snapshot.
+
+    Order of resolution:
+      1. In-memory registry -- the live, hot path.
+      2. DB rebuild from the saved (route, date) header -- covers the
+         case where the supervisor saves an LLM payload after the
+         session has been evicted from the registry (TTL expiry, server
+         restart, or simply a re-opened tab on a previously-closed
+         session). Without this fallback, a 200 OK from the analyzer
+         would silently fail to persist and the row would stay NULL.
+
+    Returned tuple is ``(snapshot, error)`` -- exactly one is non-None.
     """
     session = _sessions.get(session_id)
-    if session is None:
-        return SaveSessionResponse(
-            success=False, db_ok=False,
-            error=f"Session {session_id} not found",
-        )
+    if session is not None:
+        return session.to_dict(), None
+    if db_saver is not None and db_saver.available:
+        snap = db_saver.load_session_by_id(session_id)
+        if snap is not None:
+            return snap, None
+    return None, f"Session {session_id} not found"
 
-    mgr.close_session(session)
-    data = session.to_dict()
 
-    file_result = store.save(data)
-    if not file_result.get("success"):
-        return SaveSessionResponse(
-            success=False, db_ok=False,
-            error=file_result.get("error", "File save failed"),
-            file=file_result,
-        )
-
-    db_result = db_saver.save_session(data) if db_saver.available else None
-    db_ok = db_result is None or db_result.get("success", False)
-
-    _sessions.pop(session_id)
-    return SaveSessionResponse(
-        success=True,
-        db_ok=db_ok,
-        warning=(
-            None if db_ok
-            else f"Session saved to disk but DB write failed: {db_result.get('error', 'unknown')}"
-        ),
-        file=file_result,
-        db=db_result,
+@router.post("/briefing", response_model=LlmSaveResponse)
+def save_pre_visit_briefing(
+    req: SaveBriefingRequest,
+    background_tasks: BackgroundTasks,
+    db_saver: DbSaver = Depends(get_db_saver),
+):
+    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
+    if err or snapshot is None:
+        return LlmSaveResponse(success=False, error=err)
+    if not db_saver.available:
+        return LlmSaveResponse(success=True)  # silently no-op; not a UI failure
+    background_tasks.add_task(
+        db_saver.save_pre_visit_briefing,
+        snapshot, req.customer_code, req.content,
     )
+    return LlmSaveResponse(success=True)
+
+
+@router.post("/customer-analysis", response_model=LlmSaveResponse)
+def save_customer_analysis(
+    req: SaveCustomerAnalysisRequest,
+    background_tasks: BackgroundTasks,
+    db_saver: DbSaver = Depends(get_db_saver),
+):
+    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
+    if err or snapshot is None:
+        return LlmSaveResponse(success=False, error=err)
+    if not db_saver.available:
+        return LlmSaveResponse(success=True)
+    background_tasks.add_task(
+        db_saver.save_customer_analysis,
+        snapshot, req.customer_code, req.content,
+    )
+    return LlmSaveResponse(success=True)
+
+
+@router.post("/route-analysis", response_model=LlmSaveResponse)
+def save_route_analysis(
+    req: SaveRouteAnalysisRequest,
+    background_tasks: BackgroundTasks,
+    db_saver: DbSaver = Depends(get_db_saver),
+):
+    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
+    if err or snapshot is None:
+        return LlmSaveResponse(success=False, error=err)
+    if not db_saver.available:
+        return LlmSaveResponse(success=True)
+    background_tasks.add_task(db_saver.save_route_analysis, snapshot, req.content)
+    return LlmSaveResponse(success=True)
+
+
+@router.get("/saved", response_model=SavedVisitsResponse)
+def saved_visits(
+    route_code: str,
+    date: str,
+    db_saver: DbSaver = Depends(get_db_saver),
+):
+    """Already-saved visit data for a (route, date), keyed by
+    customer_code. Used by the live UI on mount so a customer with a
+    prior visit renders their actuals + score immediately, without
+    re-running the briefing -> mark-visited flow.
+
+    Returns ``available=False`` when the DB isn't configured or no
+    session has landed for the (route, date) yet -- the UI then falls
+    back to the empty-state path.
+    """
+    if not db_saver.available:
+        return SavedVisitsResponse(available=False)
+    payload = db_saver.load_session_visits(route_code, date)
+    if not payload:
+        return SavedVisitsResponse(available=False)
+    return SavedVisitsResponse(**payload)
 
 
 @router.get("/unplanned/{session_id}", response_model=UnplannedVisitsResponse)
@@ -209,7 +386,10 @@ def get_unplanned_visits(
         if code in planned:
             planned_visited.append(code)
         else:
-            v["total_qty"] = sum(int(it.get("qty") or 0) for it in v.get("items", []))
+            items = list(v.get("items") or [])
+            v["total_qty"] = sum(int(it.get("qty") or 0) for it in items)
+            v["unique_skus"] = len(items)
+            v["live_visited"] = True
             unplanned.append(v)
     unplanned.sort(key=lambda v: v.get("total_qty", 0), reverse=True)
 

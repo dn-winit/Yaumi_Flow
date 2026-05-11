@@ -3,20 +3,20 @@ Holiday and custom-event features.
 
 What gets emitted (all opt-in via config, nothing hardcoded):
 
-  - ``hol_<slug>`` — one binary per public holiday returned by the
+  - ``hol_<slug>`` - one binary per public holiday returned by the
     ``holidays`` library.
-  - ``hol_group_<name>`` — aggregate flag for every group declared in
+  - ``hol_group_<name>`` - aggregate flag for every group declared in
     ``holidays.groups`` (user-configured; empty by default).
-  - ``n_holidays_in_period`` — count per period (useful at >= weekly grain).
+  - ``n_holidays_in_period`` - count per period (useful at >= weekly grain).
   - Proximity features (``days_to_next_holiday`` /
     ``days_since_last_holiday`` / ``is_pre_holiday_<N>d`` /
     ``is_post_holiday_<N>d``) when ``holidays.proximity.enabled`` is true.
-  - ``evt_<name>`` — binary for flat custom events (``start``/``end``).
-  - ``evt_<name>_<phase>`` + ``evt_<name>_any`` — per-phase binaries for
+  - ``evt_<name>`` - binary for flat custom events (``start``/``end``).
+  - ``evt_<name>_<phase>`` + ``evt_<name>_any`` - per-phase binaries for
     phased custom events.
 
 Nothing in this module decides what counts as a "religious" or "national"
-holiday — the groups map lives in config.
+holiday - the groups map lives in config.
 """
 
 from __future__ import annotations
@@ -30,13 +30,13 @@ from ._calendar import proximity_features
 try:
     import holidays as _holidays_lib
     _HAS_HOLIDAYS = True
-except ImportError:  # pragma: no cover — library is a declared dep
+except ImportError:  # pragma: no cover - library is a declared dep
     _HAS_HOLIDAYS = False
 
 
 _PARENS_RE = re.compile(r"\s*\([^)]*\)")
 _HOLIDAY_SUFFIX_RE = re.compile(r"\s*holiday\s*$", re.IGNORECASE)
-_APOSTROPHE_RE = re.compile(r"['’]")
+_APOSTROPHE_RE = re.compile(r"['']")
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
 
 
@@ -146,7 +146,7 @@ def add_holiday_features(
     else:
         df["n_holidays_in_period"] = 0
 
-    # --- Proximity (daily grain only — concept doesn't map cleanly above) ---
+    # --- Proximity (daily grain only - concept doesn't map cleanly above) ---
     prox = cfg.get("proximity") or {}
     if prox.get("enabled", False) and gran == "D" and not cal.empty:
         prox_df = proximity_features(

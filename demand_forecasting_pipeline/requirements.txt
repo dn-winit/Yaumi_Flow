@@ -10,9 +10,14 @@ optuna>=3.5
 pyyaml>=6.0
 joblib>=1.3
 
-# Calendar features used by feature_engineering/{holiday,hijri,salary_cycle}_features
-holidays>=0.45
-hijridate>=2.4
+# Calendar features used by feature_engineering/{holiday,hijri,salary_cycle}_features.
+# Upper-bounded because slug names and Hijri-conversion edge cases can drift across
+# minor releases; the feature_schema_hash guard would catch the rename and refuse
+# inference, but pinning prevents the surprise in the first place. Bump the upper
+# bound after a deliberate retrain pass against the new version.
+# Verified at 0.94: AE slugs stable (new_years_day, eid_al_fitr, arafat_day, etc.).
+holidays>=0.45,<1.0
+hijridate>=2.4,<3.0
 
 # API Layer
 fastapi>=0.115.0
@@ -29,3 +34,10 @@ httpx>=0.27
 
 # Structured logging used by services + jobs
 structlog>=24.1
+
+# Prometheus client (metrics exposed at /api/v1/forecast/metrics/prometheus)
+prometheus-client>=0.20
+
+# APScheduler -- replaces the hand-rolled retrain loop with a cron-style
+# scheduler that wakes on time, not on accumulated sleep.
+apscheduler>=3.10

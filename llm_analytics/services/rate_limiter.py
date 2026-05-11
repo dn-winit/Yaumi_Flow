@@ -10,28 +10,41 @@ import time
 
 logger = logging.getLogger(__name__)
 
-# How long acquire() waits for a token before giving up. Sized to be
-# noticeably shorter than the LLM client timeout so a request that
-# can't get a token fails fast instead of stacking on the budget.
-_DEFAULT_ACQUIRE_TIMEOUT_SECONDS = 5.0
-# Poll interval between token re-checks while waiting. Small enough to
-# feel responsive, large enough that the busy loop is not a CPU sink.
-_ACQUIRE_POLL_INTERVAL_SECONDS = 0.1
-
 
 class RateLimiter:
-    """Token bucket rate limiter with configurable window."""
+    """Token bucket rate limiter with configurable window.
 
-    def __init__(self, max_requests: int = 10, window_seconds: int = 60) -> None:
-        self._max = max_requests
-        self._window = window_seconds
+    All timing knobs come from the caller (Analyzer wires them from
+    Settings) so a single ``.env`` change governs both the live service
+    and the in-process backfill paths -- no module-level magic numbers.
+    """
+
+    def __init__(
+        self,
+        max_requests: int,
+        window_seconds: int,
+        *,
+        acquire_timeout_seconds: float,
+        poll_interval_seconds: float,
+    ) -> None:
+        if max_requests < 1 or window_seconds <= 0:
+            raise ValueError("max_requests and window_seconds must be positive")
+        if poll_interval_seconds <= 0 or acquire_timeout_seconds <= 0:
+            raise ValueError("acquire/poll intervals must be positive")
+        self._max = int(max_requests)
+        self._window = float(window_seconds)
         self._tokens = float(max_requests)
         self._last_refill = time.monotonic()
         self._lock = threading.Lock()
+        self._acquire_timeout = float(acquire_timeout_seconds)
+        self._poll_interval = float(poll_interval_seconds)
 
-    def acquire(self, timeout: float = _DEFAULT_ACQUIRE_TIMEOUT_SECONDS) -> bool:
-        """Try to acquire a token. Returns True if allowed, False if rate limited."""
-        deadline = time.monotonic() + timeout
+    def acquire(self, timeout: float | None = None) -> bool:
+        """Try to acquire a token. ``True`` if allowed, ``False`` if
+        the deadline elapses before a token frees up.
+        """
+        wait = self._acquire_timeout if timeout is None else float(timeout)
+        deadline = time.monotonic() + wait
 
         while True:
             with self._lock:
@@ -42,11 +55,15 @@ class RateLimiter:
 
             if time.monotonic() >= deadline:
                 return False
-            time.sleep(_ACQUIRE_POLL_INTERVAL_SECONDS)
+            time.sleep(self._poll_interval)
 
     def _refill(self) -> None:
         now = time.monotonic()
         elapsed = now - self._last_refill
-        refill = elapsed * (self._max / self._window)
-        self._tokens = min(float(self._max), self._tokens + refill)
+        if elapsed <= 0:
+            return
+        self._tokens = min(
+            float(self._max),
+            self._tokens + elapsed * (self._max / self._window),
+        )
         self._last_refill = now

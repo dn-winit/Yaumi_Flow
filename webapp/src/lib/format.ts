@@ -11,25 +11,84 @@ export function toNum(v: unknown): number | null {
 
 const MISSING = "--";
 
+/**
+ * Format a number in full, with locale thousands separators (e.g. "6,576").
+ *
+ * The previous implementation abbreviated to ``K`` / ``M`` once the value
+ * crossed 1,000 / 1,000,000. That hurt cross-tile comparisons -- two views
+ * showing "6.2K" and "6.6K" look like the same rounded number even when
+ * the underlying difference is 400 units. Operators asked for raw counts
+ * everywhere so each tile is directly verifiable against the data, and
+ * rounding only happens where an average is being shown (caller passes
+ * ``digits`` explicitly in those places).
+ */
 export function fmtNum(v: unknown, digits = 0): string {
   const n = toNum(v);
   if (n == null) return MISSING;
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
-  if (abs >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
   return n.toLocaleString(undefined, {
     minimumFractionDigits: digits,
     maximumFractionDigits: digits,
   });
 }
 
-export function fmtCurrency(v: unknown): string {
+export function fmtCurrency(v: unknown, digits = 2): string {
   const n = toNum(v);
   if (n == null) return MISSING;
-  const abs = Math.abs(n);
-  if (abs >= 1_000_000) return `AED ${(n / 1_000_000).toFixed(2)}M`;
-  if (abs >= 1_000) return `AED ${(n / 1_000).toFixed(1)}K`;
-  return `AED ${n.toFixed(2)}`;
+  return `AED ${n.toLocaleString(undefined, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  })}`;
+}
+
+/**
+ * Format a percentage already on a 0..100 scale (e.g. ``87.4``).
+ * Returns ``MISSING`` for null / NaN. Default 1 decimal to match the
+ * tile / chart rendering convention used across the app.
+ */
+export function fmtPct(v: unknown, digits = 1): string {
+  const n = toNum(v);
+  if (n == null) return MISSING;
+  return `${n.toFixed(digits)}%`;
+}
+
+/**
+ * Format a basis-point fraction (0..1) as a whole-number percentage.
+ * Used for tolerance / threshold display: ``fmtBps(0.20)`` -> ``"20%"``.
+ */
+export function fmtBps(v: unknown): string {
+  const n = toNum(v);
+  if (n == null) return MISSING;
+  return `${Math.round(n * 100)}%`;
+}
+
+/**
+ * Format a [lo, hi] confidence interval / range with a single decimal
+ * by default. Returns ``MISSING`` when either bound is unparseable so
+ * the UI never renders ``NaN - NaN``.
+ */
+export function fmtRange(lo: unknown, hi: unknown, digits = 1): string {
+  const a = toNum(lo);
+  const b = toNum(hi);
+  if (a == null || b == null) return MISSING;
+  return `${a.toFixed(digits)} – ${b.toFixed(digits)}`;
+}
+
+/** Format a duration in seconds as ``Xs`` / ``Xm`` / ``Xm Ys``. */
+export function fmtDuration(seconds: unknown): string {
+  const n = toNum(seconds);
+  if (n == null || n <= 0) return "0s";
+  if (n < 60) return `${Math.round(n)}s`;
+  const m = Math.floor(n / 60);
+  const s = Math.round(n % 60);
+  return s > 0 ? `${m}m ${s}s` : `${m}m`;
+}
+
+/** Format a file size in megabytes as ``X.X MB`` / ``X.X GB``. */
+export function fmtFileSize(mb: unknown): string {
+  const n = toNum(mb);
+  if (n == null) return MISSING;
+  if (n >= 1024) return `${(n / 1024).toFixed(2)} GB`;
+  return `${n.toFixed(1)} MB`;
 }
 
 /**
@@ -75,36 +134,18 @@ export function hasRealConfidence(demandClass: string | null | undefined): boole
 export const TOLERANCE_PCT = 0.2;
 export const LEAKAGE_SHARE_WARN = 0.05;
 
-// Per-class miss tolerance for composite accuracy. Mirrors
-// TOLERANCE_BY_CLASS in demand_forecasting_pipeline/src/evaluation/metrics.py
-// (kept in lockstep manually).
+// Per-class miss tolerance for composite accuracy. Read by the
+// ForecastAccuracyExplanation popup so the displayed tolerance band
+// stays in lockstep with the server-side definition in
+// demand_forecasting_pipeline/src/evaluation/metrics.py. The full
+// composite-accuracy calculation itself runs server-side; this table
+// is presentation-only (label copy).
 export const TOLERANCE_BY_CLASS: Readonly<Record<string, number>> = {
   smooth:       0.10,
   intermittent: 0.20,
   erratic:      0.30,
   lumpy:        0.40,
 };
-export const DEFAULT_CLASS_TOLERANCE = 0.20;
-
-/** Composite accuracy on the client -- mirror of Python composite_summary. */
-export function compositeAccuracy(
-  rows: { predicted: number; actual: number; demandClass?: string | null }[],
-): number | null {
-  let scoredActual = 0;
-  let realMiss = 0;
-  for (const r of rows) {
-    if (!(r.predicted > 0) || !(r.actual > 0)) continue;
-    const tol =
-      TOLERANCE_BY_CLASS[String(r.demandClass ?? "").trim().toLowerCase()] ??
-      DEFAULT_CLASS_TOLERANCE;
-    const absErr = Math.abs(r.predicted - r.actual);
-    const allowed = tol * r.actual;
-    realMiss += Math.max(0, absErr - allowed);
-    scoredActual += r.actual;
-  }
-  if (scoredActual <= 0) return null;
-  return Math.max(0, 100 - (realMiss / scoredActual) * 100);
-}
 
 /**
  * Recommendation-adoption thresholds.

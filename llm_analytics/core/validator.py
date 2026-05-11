@@ -22,11 +22,15 @@ def sanitize_customer_codes(response: Dict[str, Any], actual_codes: Set[str]) ->
 
         return re.sub(r"Customer-(\d+)", _replace_prefixed, text)
 
-    text_keys = [
-        "route_summary", "supervisor_priorities",
-        "high_performers_with_practices", "critical_issues",
-        "priority_customers", "opportunities",
-    ]
+    # Mirror the ``RouteAnalysis`` schema -- those are the only fields the
+    # LLM can drop a hallucinated customer code into. Listing keys that
+    # the schema doesn't define would just be dead.
+    text_keys = (
+        "route_summary",
+        "supervisor_priorities",
+        "high_performers_with_practices",
+        "critical_issues",
+    )
     for key in text_keys:
         val = response.get(key)
         if isinstance(val, str):
@@ -35,8 +39,3 @@ def sanitize_customer_codes(response: Dict[str, Any], actual_codes: Set[str]) ->
             response[key] = [_clean(item) if isinstance(item, str) else item for item in val]
 
     return response
-
-
-def validate_response_structure(data: Dict[str, Any], required_keys: list[str]) -> bool:
-    """Check that all required keys exist in the response."""
-    return all(k in data for k in required_keys)

@@ -1,7 +1,7 @@
 """
 Hijri-calendar derived features.
 
-Ramadan is month 9 in the Islamic calendar — a 29/30 day window whose
+Ramadan is month 9 in the Islamic calendar - a 29/30 day window whose
 Gregorian dates shift ~11 days per year. Gregorian-only holiday libraries
 miss it entirely, so we compute it directly from the Islamic calendar.
 
@@ -30,14 +30,14 @@ from ._calendar import is_daily, proximity_features
 try:
     from hijridate import Gregorian, Hijri
     _HAS_HIJRI = True
-except ImportError:  # pragma: no cover — declared as a dep
+except ImportError:  # pragma: no cover - declared as a dep
     _HAS_HIJRI = False
 
 
 def _ramadan_ranges_for(panel_start: pd.Timestamp, panel_end: pd.Timestamp) -> list[tuple[date, date]]:
     """Return a sorted list of (start, end) Gregorian dates for every Ramadan
     that overlaps the panel range. Implemented by scanning Hijri years bracketing
-    the panel; a small, closed set (≤ 10 years in typical training windows)."""
+    the panel; a small, closed set (<= 10 years in typical training windows)."""
     if not _HAS_HIJRI:
         return []
 
@@ -88,7 +88,7 @@ def add_hijri_features(
     idx = np.searchsorted(starts, d64, side="right") - 1
     in_range = (idx >= 0) & (d64 >= starts[np.clip(idx, 0, None)]) & (d64 <= ends[np.clip(idx, 0, None)])
 
-    # Day within Ramadan (1-based) — only meaningful at daily grain.
+    # Day within Ramadan (1-based) - only meaningful at daily grain.
     day_in = np.zeros(len(d64), dtype=int)
     valid = in_range
     day_in[valid] = (d64[valid] - starts[idx[valid]]).astype("timedelta64[D]").astype(int) + 1

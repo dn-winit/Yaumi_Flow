@@ -10,13 +10,17 @@ __pycache__/
 webapp/node_modules/
 webapp/dist/
 webapp/.vite/
+webapp/tsconfig.tsbuildinfo
 
 # ── Environment (secrets — never commit) ────────────────
 .env
 */.env
 
-# ── Data (large CSVs produced by import pipeline) ──────
+# ── Data (large CSVs / artifacts produced by pipelines) ─
 data/*.csv
+data/imports/
+data/forecast/
+data/recommendations/
 
 # ── Demand Forecast artifacts (regeneratable) ──────────
 demand_forecasting_pipeline/artifacts/**/*.pkl

@@ -3,9 +3,9 @@ ETS (Exponential Smoothing) forecaster.
 
 The model fits ``statsmodels.ExponentialSmoothing`` **once per pair** at
 fit time and caches the fitted results object. ``predict`` then calls
-``.forecast(n)`` against the cached fit — no refits on the per-prediction
+``.forecast(n)`` against the cached fit - no refits on the per-prediction
 path. This matters because the previous design refitted the full state-space
-model on every test row, producing an O(pairs × horizon) blow-up that
+model on every test row, producing an O(pairs x horizon) blow-up that
 dominated the training/inference budget at daily scale.
 
 ``seasonal_periods`` should be set by the caller based on data granularity
@@ -24,7 +24,7 @@ from .base import StatForecaster
 try:
     from statsmodels.tsa.holtwinters import ExponentialSmoothing
     _HAS_SM = True
-except ImportError:  # pragma: no cover — declared as a dep
+except ImportError:  # pragma: no cover - declared as a dep
     _HAS_SM = False
 
 
@@ -49,6 +49,11 @@ class ETSForecaster(StatForecaster):
                 trend = self.params.get("trend", None)
                 seasonal = self.params.get("seasonal", None)
                 sp = int(self.params.get("seasonal_periods", 7))
+                # ``damped_trend`` lets routing dispatch declining pairs to an
+                # ETS that doesn't extrapolate the slope linearly forever
+                # (which would otherwise predict negative demand). Only valid
+                # when ``trend`` is set; statsmodels requires the pair.
+                damped = bool(self.params.get("damped_trend", False))
                 if seasonal and len(history) < 2 * sp:
                     seasonal = None  # not enough history for the requested seasonality
                 model = ExponentialSmoothing(
@@ -56,6 +61,7 @@ class ETSForecaster(StatForecaster):
                     trend=trend,
                     seasonal=seasonal,
                     seasonal_periods=sp if seasonal else None,
+                    damped_trend=damped if trend else False,
                     initialization_method="estimated",
                 )
                 return model.fit(optimized=True)
@@ -67,7 +73,7 @@ class ETSForecaster(StatForecaster):
     def _predict_pair(self, history: np.ndarray, n: int) -> np.ndarray:
         """Use the cached fit if available; otherwise fall back to the series
         mean. Called once per pair by the base class's ``predict``."""
-        # Match the cache entry by history identity — cached state lives at
+        # Match the cache entry by history identity - cached state lives at
         # ``self.fit_cache_[pair_key]`` and the base's predict passes the same
         # ``history`` object it stored at fit time.
         fit = self._lookup_fit(history)
@@ -92,7 +98,7 @@ class ETSForecaster(StatForecaster):
         return None
 
     def _predict_one(self, history):
-        # Retained for interface compatibility. Not used on the hot path —
+        # Retained for interface compatibility. Not used on the hot path -
         # fit_cache_ avoids refits.
         fit = self._try_fit_ets(history)
         if fit is None:

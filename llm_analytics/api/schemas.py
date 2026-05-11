@@ -39,7 +39,6 @@ class AnalysisResponse(BaseModel):
     success: bool
     analysis_type: str
     data: Dict[str, Any]
-    cached: bool = False
 
 
 class HealthResponse(BaseModel):

@@ -4,7 +4,7 @@ Granularity-aware time helpers.
 ``period_alias`` maps the short granularity codes used across config
 (``D``/``W``/``M``/``Q``/``Y``) to the pandas offset aliases used by
 ``pd.date_range`` / ``pd.Period``. ``period_offset`` produces a
-``DateOffset`` for arithmetic. Unknown granularities raise loud —
+``DateOffset`` for arithmetic. Unknown granularities raise loud -
 silently falling back would hide config typos.
 """
 

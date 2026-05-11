@@ -123,13 +123,31 @@ class AdoptionService:
             else pd.Series(0.0, index=merged.index)
         )
 
+        # Single source of truth for "what counts as a working day" in
+        # this window: dates with actual sales activity for the chosen
+        # scope. Same input as the dashboard's working-day axis, so the
+        # padded chart and the dashboard line up by construction.
+        active_dates = self._active_dates(merged, sales)
+
+        # ``daily`` is padded to every active date so the X-axis never
+        # skips a day. Days without recommendations land with
+        # ``adoption_pct=None`` so the line chart breaks cleanly instead
+        # of dragging to the floor.
+        daily = self._daily_padded(merged, active_dates)
+        summary = self._summary(merged)
+        # Attach the derived metrics that used to be computed on the
+        # client (pick / perfect-pick percentages, best-performing day,
+        # working-day count) so the drawer never aggregates the daily
+        # series itself.
+        summary.update(self._derived_metrics(summary, daily, active_dates))
+
         return {
             "available": True,
             "start_date": start_date,
             "end_date": end_date,
             "route_code": route_code,
-            "summary": self._summary(merged),
-            "daily": self._daily(merged),
+            "summary": summary,
+            "daily": daily,
             "top_over_recommended": self._top_items(merged, which="over", limit=10),
             "top_missed": self._top_items(merged, which="missed", limit=10),
             "by_tier": self._by_tier(merged),
@@ -364,26 +382,116 @@ class AdoptionService:
         }
 
     @staticmethod
-    def _daily(merged: pd.DataFrame) -> List[Dict[str, Any]]:
-        """Daily adoption rate, ordered by date."""
-        if merged.empty:
-            return []
-        grouped = merged.groupby("trx_date")
-        rows: List[Dict[str, Any]] = []
-        for day, g in grouped:
-            if pd.isna(day):
+    def _active_dates(merged: pd.DataFrame, sales: pd.DataFrame) -> List[str]:
+        """Working-day axis for the window. A day counts when either
+        the rep was on the road (recs OR sales activity in scope).
+
+        The union keeps days with recs but no sales (engine ran on a
+        no-sale day) and days with sales but no recs (rep delivered
+        without a list) both visible in the chart -- the supervisor
+        needs to see both kinds of gaps.
+        """
+        seen: set[str] = set()
+        for frame in (merged, sales):
+            if frame.empty or "trx_date" not in frame.columns:
                 continue
-            recommended = int(((g["_merge"] == "left_only") | (g["_merge"] == "both")).sum())
-            adopted = int(g["adopted"].sum())
-            rate = round(adopted / recommended * 100, 1) if recommended else 0.0
-            rows.append({
-                "date": str(day),
-                "recommended": recommended,
-                "adopted": adopted,
-                "adoption_pct": rate,
-            })
-        rows.sort(key=lambda r: r["date"])
+            for d in frame["trx_date"].dropna().astype(str).unique():
+                seen.add(d)
+        return sorted(seen)
+
+    @staticmethod
+    def _daily_padded(
+        merged: pd.DataFrame, active_dates: List[str]
+    ) -> List[Dict[str, Any]]:
+        """Daily adoption rate padded to every working day in the window.
+
+        Days without any recommendation rows land with
+        ``adoption_pct=None`` (the chart treats them as a break in the
+        line). A real zero (rec > 0 but adopted = 0) plots as 0.0 --
+        the honest signal a supervisor needs to see.
+        """
+        if not active_dates and merged.empty:
+            return []
+        by_date: Dict[str, Dict[str, Any]] = {}
+        if not merged.empty:
+            for day, g in merged.groupby("trx_date"):
+                if pd.isna(day):
+                    continue
+                recommended = int(
+                    ((g["_merge"] == "left_only") | (g["_merge"] == "both")).sum()
+                )
+                adopted = int(g["adopted"].sum())
+                rate = (
+                    round(adopted / recommended * 100, 1) if recommended else 0.0
+                )
+                by_date[str(day)] = {
+                    "date": str(day),
+                    "recommended": recommended,
+                    "adopted": adopted,
+                    "adoption_pct": rate,
+                }
+        rows: List[Dict[str, Any]] = []
+        for d in active_dates:
+            if d in by_date:
+                rows.append(by_date[d])
+            else:
+                rows.append(
+                    {
+                        "date": d,
+                        "recommended": 0,
+                        "adopted": 0,
+                        "adoption_pct": None,
+                    }
+                )
         return rows
+
+    @staticmethod
+    def _derived_metrics(
+        summary: Dict[str, Any],
+        daily: List[Dict[str, Any]],
+        active_dates: List[str],
+    ) -> Dict[str, Any]:
+        """Server-side compute for the four "derived" values the drawer
+        used to recompute on every render: pick accuracy, perfect-pick
+        rate, days-with-recommendations count, best-performing day.
+
+        Each is None when the source counts can't yield a meaningful
+        number (e.g. no recommendations at all in the window).
+        """
+        skus_recommended = int(summary.get("skus_recommended") or 0)
+        skus_adopted = int(summary.get("skus_adopted") or 0)
+        skus_perfect = int(summary.get("skus_perfect") or 0)
+
+        pick_accuracy_pct: Optional[float] = (
+            round(skus_adopted / skus_recommended * 100.0, 1)
+            if skus_recommended > 0
+            else None
+        )
+        perfect_pick_pct: Optional[float] = (
+            round(skus_perfect / skus_adopted * 100.0, 1)
+            if skus_adopted > 0
+            else None
+        )
+
+        days_with_recs = sum(1 for d in daily if (d.get("recommended") or 0) > 0)
+        active_days = len(active_dates)
+
+        best_day: Optional[Dict[str, Any]] = None
+        for d in daily:
+            rec = int(d.get("recommended") or 0)
+            pct = d.get("adoption_pct")
+            if rec <= 0 or pct is None:
+                continue
+            if best_day is None or float(pct) > float(best_day["pct"]):
+                best_day = {"date": d["date"], "pct": float(pct)}
+
+        return {
+            "pick_accuracy_pct": pick_accuracy_pct,
+            "perfect_pick_pct": perfect_pick_pct,
+            "days_with_recs": days_with_recs,
+            "active_days": active_days,
+            "best_day": best_day,
+        }
 
     @staticmethod
     def _top_items(merged: pd.DataFrame, *, which: str, limit: int) -> List[Dict[str, Any]]:

@@ -2,7 +2,7 @@
 Per-pair Conformalized Quantile Regression (CQR) calibration.
 
 The class-level quantile model emits a wide ``[q_low, q_high]`` band that
-covers the worst pair in its class — too loose for stable pairs. CQR shrinks
+covers the worst pair in its class - too loose for stable pairs. CQR shrinks
 or widens the band per pair using validation-set residuals, while preserving
 the configured marginal coverage.
 
@@ -12,19 +12,19 @@ For each calibration row the *conformity score* is::
 
 Positive ``E_i`` means the actual fell outside the predicted band (band too
 tight). Negative means the actual was inside (band could be tighter without
-losing coverage). The per-pair offset is the empirical ``(1-α)`` quantile of
-``{E_i}`` — at inference we shift ``q_low`` down and ``q_high`` up by that
+losing coverage). The per-pair offset is the empirical ``(1-alpha)`` quantile of
+``{E_i}`` - at inference we shift ``q_low`` down and ``q_high`` up by that
 offset.
 
 Fallback hierarchy (config-driven via ``min_samples_per_pair``):
 
-  pair → class → global → zero (no calibration)
+  pair -> class -> global -> zero (no calibration)
 
 Pairs with fewer than ``min_samples_per_pair`` calibration rows borrow the
 class-wide offset; classes with no rows fall through to the global offset;
 empty calibration sets fall through to zero (the bands stay as-is).
 
-This module is pure compute — no I/O. Train- and inference-side wiring is
+This module is pure compute - no I/O. Train- and inference-side wiring is
 in ``pipelines/{train,inference}_pipeline.py``.
 """
 
@@ -37,7 +37,7 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Returned offset frame columns — keep the surface area explicit so the
+# Returned offset frame columns - keep the surface area explicit so the
 # inference-side merge knows exactly which columns to expect.
 # `coverage_widening_added` is the cumulative additive shift applied by
 # ``calibrate_to_target_coverage`` (0.0 when no class-wide widening was
@@ -51,12 +51,12 @@ OFFSET_FRAME_COLUMNS = (
 
 
 def _empirical_one_sided_quantile(scores: np.ndarray, target_coverage: float) -> float:
-    """Finite-sample-corrected ``(1-α)`` empirical quantile.
+    """Finite-sample-corrected ``(1-alpha)`` empirical quantile.
 
     Uses the standard split-conformal correction: rank the scores, pick the
-    ``ceil((n+1)·target_coverage)`` th value (1-indexed). When
+    ``ceil((n+1).target_coverage)`` th value (1-indexed). When
     ``ceil(...) > n`` (very small ``n`` and high coverage) the offset
-    saturates at the maximum observed score — the most conservative
+    saturates at the maximum observed score - the most conservative
     finite-sample answer.
     """
     n = scores.size
@@ -84,7 +84,7 @@ def compute_pair_offsets(
     ``val_calibration`` must contain ``group_keys + [target_col, q_low_col,
     q_high_col]`` plus optionally ``class_col``. Each row is one pair-period
     where actuals are known and the class quantile model has produced a
-    band — so the residual ``E_i`` is well defined.
+    band - so the residual ``E_i`` is well defined.
 
     Returns a frame with one row per pair seen in the calibration set, with
     columns::
@@ -101,7 +101,7 @@ def compute_pair_offsets(
     needed = set(group_keys) | {target_col, q_low_col, q_high_col}
     missing = needed - set(val_calibration.columns)
     if missing:
-        logger.warning("conformal: calibration set missing columns %s — returning empty offsets", missing)
+        logger.warning("conformal: calibration set missing columns %s - returning empty offsets", missing)
         return pd.DataFrame(columns=group_keys + list(OFFSET_FRAME_COLUMNS))
 
     df = val_calibration[list(needed | ({class_col} if class_col and class_col in val_calibration.columns else set()))].copy()
@@ -310,11 +310,11 @@ def apply_pair_offsets(
     ``forecast`` carries the raw ``q_low_col`` / ``q_high_col`` from the
     class quantile model. ``offsets`` is the frame produced by
     :func:`compute_pair_offsets`. Pairs missing from ``offsets`` get
-    ``offset = 0`` — the band is unchanged, which matches the conservative
+    ``offset = 0`` - the band is unchanged, which matches the conservative
     behaviour we want for cold-start pairs at inference time.
 
     The lower bound is floored at ``floor`` (default 0) since demand can't
-    go negative; the upper bound is left unbounded — letting it stay
+    go negative; the upper bound is left unbounded - letting it stay
     honest, which is the whole point of widening when calibration says so.
     """
     if forecast.empty or q_low_col not in forecast.columns or q_high_col not in forecast.columns:
@@ -330,7 +330,7 @@ def apply_pair_offsets(
     out[q_low_col] = (pd.to_numeric(out[q_low_col], errors="coerce") - out["conformal_offset"]).clip(lower=floor)
     out[q_high_col] = pd.to_numeric(out[q_high_col], errors="coerce") + out["conformal_offset"]
 
-    # Defensive: keep low ≤ high. A pathological negative offset that
+    # Defensive: keep low <= high. A pathological negative offset that
     # exceeds the band width could otherwise invert the interval.
     swap_mask = out[q_low_col] > out[q_high_col]
     if swap_mask.any():

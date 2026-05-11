@@ -4,8 +4,10 @@ import Card from "@/components/ui/Card";
 import Button from "@/components/ui/Button";
 import MetricCard from "@/components/charts/MetricCard";
 import Loading from "@/components/ui/Loading";
+import Alert from "@/components/ui/Alert";
 import PageHeader from "@/components/layout/PageHeader";
 import { useCacheStats } from "@/hooks/useAnalytics";
+import { fmtPct } from "@/lib/format";
 
 export default function CacheAdminPage() {
   const { data: stats, loading, error, refetch } = useCacheStats();
@@ -33,11 +35,7 @@ export default function CacheAdminPage() {
     <div className="space-y-6">
       <PageHeader title="Cache" />
 
-      {error && (
-        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
-          {error}
-        </div>
-      )}
+      {error && <Alert variant="error">{error}</Alert>}
 
       {stats && (
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-4">
@@ -45,7 +43,7 @@ export default function CacheAdminPage() {
           <MetricCard label="Cache Misses" value={stats.misses} />
           <MetricCard
             label="Hit Rate"
-            value={`${(stats.hit_rate * 100).toFixed(1)}%`}
+            value={fmtPct(stats.hit_rate * 100)}
             trend={stats.hit_rate > 0.5 ? "up" : "down"}
           />
           <MetricCard label="Cached Entries" value={stats.cached_entries} />
@@ -62,7 +60,9 @@ export default function CacheAdminPage() {
           </Button>
         </div>
         {clearError && (
-          <p className="text-body text-danger-600 mt-3">{clearError}</p>
+          <div className="mt-3">
+            <Alert variant="error">{clearError}</Alert>
+          </div>
         )}
       </Card>
     </div>

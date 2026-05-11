@@ -3,7 +3,7 @@ Raw data loader.
 
 Accepts explicit dtype hints so ID columns such as route/item codes stay as
 strings (preserves leading zeros, makes joins predictable). If no hints are
-given, pandas infers — acceptable for dev but not recommended for prod.
+given, pandas infers - acceptable for dev but not recommended for prod.
 """
 
 from __future__ import annotations

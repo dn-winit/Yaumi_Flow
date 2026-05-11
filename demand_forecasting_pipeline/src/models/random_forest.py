@@ -16,7 +16,7 @@ class RandomForestForecaster(BaseForecaster):
         X = df[feature_cols].fillna(0.0).values
         y = df[target_col].values
 
-        # ``max_depth`` can legitimately be None (unlimited depth) — don't
+        # ``max_depth`` can legitimately be None (unlimited depth) - don't
         # wrap in int().
         max_depth = self.params.get("max_depth", None)
         resolved = {

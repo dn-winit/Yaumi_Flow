@@ -69,11 +69,17 @@ export interface ItemStatsWindow {
   days: number;
 }
 
-// Four headline metrics for the executive dashboard. All sourced from
-// sales_recent.csv; lost_opportunity additionally joins demand_forecast.csv
-// to value the forecast gap. Each metric ships both the aggregate over the
-// period AND the per-day average, with the denominator visible (working_days
-// for tiles 1-3, covered_days for tile 4) so the math is verifiable.
+// Four headline metrics for the executive dashboard.
+//
+// Tiles 1-3 are sales-only aggregates over sales_recent.csv. Tile 4
+// (lost_opportunity) joins demand_forecast.csv with sales and uses the
+// **reconciled van load** (V5_b: bias-corrected + clamped carry-over)
+// as the "what we said to load" baseline, NOT the raw model output --
+// the metric measures gap between recommended load and actual sold.
+//
+// Each metric ships both the aggregate AND the per-day average, with
+// the denominator visible (working_days for 1-3, covered_days for 4)
+// so the math is verifiable on the surface.
 export interface BusinessKpis {
   available: boolean;
   message?: string;
@@ -164,32 +170,6 @@ export interface SalesOverviewResponse {
   categories?: CategoryBreakdown[];
 }
 
-// EDA -- per-(date, route, item) forecast vs actual rows for the
-// VanLoad Past-analysis drawer. Sourced from the same merge that powers
-// the dashboard's business KPIs.
-export interface ForecastRow {
-  trx_date: string;
-  route_code: string;
-  item_code: string;
-  item_name: string;
-  predicted: number;
-  actual_qty: number;
-  price: number;
-  // SBC bucket (smooth | intermittent | erratic | lumpy). Empty for sale-only rows.
-  demand_class: string;
-}
-
-export interface ForecastRowsResponse {
-  available: boolean;
-  message?: string;
-  lookback?: string;
-  anchor_date?: string;
-  working_days?: number;
-  covered_routes?: number;
-  covered_days?: number;
-  rows?: ForecastRow[];
-}
-
 // EDA -- cascading filter dimensions (warehouse → route → category → item)
 export interface FilterDimensionOption {
   code: string;
@@ -205,6 +185,10 @@ export interface FilterDimensions {
   routes: FilterDimensionOption[];
   categories: FilterDimensionOption[];
   items: FilterDimensionOption[];
+  /** Server-side trim of the input selection vector against the
+   *  cascaded option sets. Frontend applies it verbatim -- no
+   *  client-side validation pass against the available options. */
+  trimmed_selections: DashboardFilters;
 }
 
 // Empty arrays mean "no filter applied" -- backend treats them as "all".

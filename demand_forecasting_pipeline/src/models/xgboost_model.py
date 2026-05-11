@@ -15,7 +15,7 @@ except ImportError:
 
 def _require_xgb() -> None:
     if not _HAS_XGB:
-        raise RuntimeError("xgboost not available — install to use this model")
+        raise RuntimeError("xgboost not available - install to use this model")
 
 
 class XGBoostForecaster(BaseForecaster):

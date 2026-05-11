@@ -21,7 +21,7 @@ from ._calendar import (
     resolve_weekend_mask,
 )
 
-# Component name → (granularity predicate, emitter).
+# Component name -> (granularity predicate, emitter).
 # Emitters receive ``(df, date_series, cfg)`` and mutate df in-place.
 #
 # This registry is the single source of truth for temporal feature names.
@@ -73,7 +73,7 @@ def _emit_quarter_cos(df, d, _):
 def _emit_year(df, d, _):
     df["year"] = d.dt.year
 
-# ``*_since_start`` needs group_keys — handled in the orchestrator below.
+# ``*_since_start`` needs group_keys - handled in the orchestrator below.
 
 _COMPONENTS: dict[str, tuple] = {
     "day_of_week":       (is_daily,             _emit_day_of_week),
@@ -109,7 +109,20 @@ def add_temporal_features(
     d = df[date_col]
     components = cfg.get("components", []) or []
 
+    # Known component names -- the trend feature is registered separately
+    # (it needs group_keys), but it is recognised here so a config typo
+    # like ``period_since_start`` warns instead of silently producing
+    # nothing.
+    _TREND_FEATURE = "periods_since_start"
+    known_names = set(_COMPONENTS.keys()) | {_TREND_FEATURE}
     for name in components:
+        if name not in known_names:
+            import logging as _logging
+            _logging.getLogger(__name__).warning(
+                "temporal_features: unknown component %r ignored "
+                "(known: %s)", name, sorted(known_names),
+            )
+            continue
         entry = _COMPONENTS.get(name)
         if entry is None:
             continue
@@ -118,11 +131,27 @@ def add_temporal_features(
             continue
         emit(df, d, cfg)
 
-    # Per-pair trend feature. Expressed in periods, not days, so the name is
-    # correct at any granularity. Requires group_keys to scope per pair.
-    if "periods_since_start" in components and group_keys:
+    # Per-pair trend feature. DATE-ANCHORED, NOT cumcount-based. The
+    # value at any calendar date is identical regardless of input row
+    # order, so train and inference produce the same number for the
+    # same date even if the panel is sorted differently.
+    #
+    # ``(date - pair_min_date) / period_unit`` -- for daily data this is
+    # "days since the pair's first observation". The divisor mirrors
+    # ``period_offset`` granularity semantics so the feature stays
+    # meaningful at any granularity.
+    if _TREND_FEATURE in components and group_keys:
+        granularity_unit = (granularity or "D").strip().upper()[0]
+        period_days_map = {"D": 1, "W": 7, "M": 30, "Q": 90, "Y": 365}
+        period_days = period_days_map.get(granularity_unit, 1)
+        date_series = pd.to_datetime(df[date_col], errors="coerce")
+        pair_min = (
+            df.assign(_d=date_series)
+            .groupby(group_keys, sort=False)["_d"].transform("min")
+        )
+        days_since = (date_series - pair_min).dt.days
         df["periods_since_start"] = (
-            df.groupby(group_keys).cumcount().astype(int)
+            (days_since // max(1, period_days)).fillna(0).astype(int)
         )
 
     return df

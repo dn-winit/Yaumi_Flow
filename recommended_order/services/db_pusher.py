@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 import pyodbc
@@ -55,6 +55,31 @@ _COL_MAP = {
 _REASON_STATUS_MAX = 100
 _REASON_EXPLANATION_MAX = 500
 
+# Pre-built SQL fragments. Both the column list and placeholder block are
+# fully determined by the schema, so we assemble them once at import and
+# slot the configured table name in at runtime. Saves the per-push string
+# work and matches the pattern used in sales_supervision/services/db_saver.py.
+_INSERT_COLS = ", ".join(f"[{c}]" for c in _DB_COLUMNS)
+_INSERT_PLACEHOLDERS = ", ".join("?" for _ in _DB_COLUMNS)
+_INSERT_SQL_TPL = f"INSERT INTO {{table}} ({_INSERT_COLS}) VALUES ({_INSERT_PLACEHOLDERS})"
+# DELETE for a date is unconditional on route_code; the runtime appends
+# the route filter when one is supplied.
+_DELETE_SQL_BASE = "DELETE FROM {table} WHERE [trx_date] >= ? AND [trx_date] < DATEADD(day, 1, ?)"
+_DELETE_ROUTE_SUFFIX = " AND [route_code] = ?"
+
+
+def _dataframe_to_records(df: pd.DataFrame, cols: List[str]) -> List[tuple]:
+    """Project ``df`` to the ordered ``cols`` and emit a list of plain
+    Python tuples suitable for ``cursor.executemany``. ``NaN`` becomes
+    ``None`` (so SQL Server stores NULL) and numpy scalars are unboxed
+    via ``.item()`` so pyodbc's parameter binder doesn't see numpy
+    types it cannot serialise.
+    """
+    return [
+        tuple(None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row)
+        for row in df[cols].values.tolist()
+    ]
+
 
 class DbPusher:
     """Pushes recommendation data to yf_recommended_orders."""
@@ -68,7 +93,12 @@ class DbPusher:
         return bool(self._db.host and self._db.username and self._s.recommendation_table)
 
     def _connect(self) -> pyodbc.Connection:
-        return pyodbc.connect(self._db.aiml_connection_string, autocommit=False)
+        """Open a transaction-mode connection with the configured query
+        timeout already applied. Centralised so every caller gets the
+        same shape -- no per-call ``conn.timeout =`` reminders."""
+        conn = pyodbc.connect(self._db.aiml_connection_string, autocommit=False)
+        conn.timeout = self._db.query_timeout
+        return conn
 
     def push_dataframe(self, df: pd.DataFrame, date: str, route_code: str) -> Dict[str, Any]:
         """Push a DataFrame directly (called after generation)."""
@@ -96,90 +126,107 @@ class DbPusher:
         table = self._s.recommendation_table
         t0 = time.time()
 
-        # 1. Rename the structural columns (PascalCase -> snake_case).
+        db_df = self._project_to_schema(df)
+
+        insert_sql = _INSERT_SQL_TPL.format(table=table)
+        # DELETE matches by date (and optional route) so a re-run is
+        # idempotent: same key set lands the same rows. DELETE + chunked
+        # INSERT live in one transaction so a partial INSERT failure
+        # rolls the DELETE back too -- never any orphan gaps.
+        delete_sql = _DELETE_SQL_BASE.format(table=table)
+        delete_params: List[Any] = [date, date]
+        if route_code:
+            delete_sql += _DELETE_ROUTE_SUFFIX
+            delete_params.append(route_code)
+
+        records = _dataframe_to_records(db_df, _DB_COLUMNS)
+        chunk = self._db.executemany_chunk_size
+
+        last_error: Optional[str] = None
+        for attempt in range(1, self._db.retry_attempts + 1):
+            conn: Optional[pyodbc.Connection] = None
+            try:
+                conn = self._connect()
+                cursor = conn.cursor()
+                cursor.fast_executemany = True
+                cursor.execute(delete_sql, delete_params)
+                for i in range(0, len(records), chunk):
+                    cursor.executemany(insert_sql, records[i : i + chunk])
+                conn.commit()
+
+                duration = round(time.time() - t0, 2)
+                logger.info("Pushed %d recs to %s for %s in %.1fs", len(records), table, date, duration)
+                return {"success": True, "table": table, "rows": len(records), "duration_seconds": duration}
+            except (pyodbc.ProgrammingError, pyodbc.DataError, pyodbc.IntegrityError) as exc:
+                # Bad SQL / bad data -- retrying is futile and the upstream
+                # caller deserves a fast, accurate failure response.
+                last_error = f"{type(exc).__name__}: {exc}"
+                logger.error("Push fatal error for %s/%s (no retry): %s",
+                             date, route_code or "ALL", exc)
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                break
+            except Exception as exc:
+                last_error = str(exc)
+                logger.warning(
+                    "Push attempt %d/%d failed for %s/%s (transient): %s",
+                    attempt, self._db.retry_attempts, date, route_code or "ALL", exc,
+                )
+                if conn is not None:
+                    try:
+                        conn.rollback()
+                    except Exception:
+                        pass
+                if attempt < self._db.retry_attempts:
+                    time.sleep(self._db.retry_delay * attempt)
+            finally:
+                if conn is not None:
+                    try:
+                        conn.close()
+                    except Exception as close_exc:
+                        logger.warning("conn.close() failed: %s", close_exc)
+
+        return {"success": False, "error": last_error or "All push attempts failed"}
+
+    def _project_to_schema(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Translate the engine's CSV shape into the DB column shape.
+
+        Three independent rewrites: (1) PascalCase -> snake_case via the
+        rename map, (2) explainability columns folded into the single
+        ``reason_*`` slot the schema exposes, (3) any structural column
+        the engine didn't emit is back-filled with NULL so a legacy CSV
+        from a pre-explainability run still pushes cleanly.
+        """
         rename = {k: v for k, v in _COL_MAP.items() if k in df.columns}
-        db_df = df.rename(columns=rename).copy()
-        db_df["generated_by"] = "API"
+        out = df.rename(columns=rename).copy()
+        out["generated_by"] = "API"
 
-        # 2. Compose the reason_* columns from the explainability fields the
-        # engine emits. We cannot rely on the rename map for these because:
-        #   * Source -> reason_status is a 1:1 string copy (truncate-safe)
-        #   * WhyItem + WhyQuantity collapse into reason_explanation
-        #     (the DB only has one explanation slot; concatenating preserves
-        #     both signals in a single sentence the UI / auditor can read)
-        #   * Confidence is 0..1 float in the engine but reason_confidence
-        #     is INT in the schema -> rescale to 0..100 percent.
-        # Each derivation defends against a missing source column so a
-        # legacy CSV (from a pre-explainability run) still pushes cleanly.
+        # Source -> reason_status: 1:1 string copy (defensive truncation).
         if "Source" in df.columns:
-            db_df["reason_status"] = df["Source"].astype(str).str.slice(0, _REASON_STATUS_MAX)
+            out["reason_status"] = df["Source"].astype(str).str.slice(0, _REASON_STATUS_MAX)
         else:
-            db_df["reason_status"] = None
+            out["reason_status"] = None
 
+        # WhyItem + WhyQuantity collapse into reason_explanation. The DB
+        # only has one explanation slot; concatenating preserves both
+        # signals in a single sentence the UI / auditor can read.
         why_item = df["WhyItem"].astype(str) if "WhyItem" in df.columns else pd.Series([""] * len(df))
         why_qty = df["WhyQuantity"].astype(str) if "WhyQuantity" in df.columns else pd.Series([""] * len(df))
         composed = (why_item.fillna("") + " | " + why_qty.fillna("")).str.strip(" |")
-        db_df["reason_explanation"] = composed.str.slice(0, _REASON_EXPLANATION_MAX)
+        out["reason_explanation"] = composed.str.slice(0, _REASON_EXPLANATION_MAX)
 
+        # Confidence is 0..1 float in the engine; reason_confidence is INT
+        # 0..100 in the schema -> rescale.
         if "Confidence" in df.columns:
             conf = pd.to_numeric(df["Confidence"], errors="coerce").fillna(0.0)
-            db_df["reason_confidence"] = (conf.clip(0.0, 1.0) * 100).round().astype(int)
+            out["reason_confidence"] = (conf.clip(0.0, 1.0) * 100).round().astype(int)
         else:
-            db_df["reason_confidence"] = 0
+            out["reason_confidence"] = 0
 
-        # 3. Backfill any structural column the engine didn't emit. This only
-        # bites when the upstream schema is intentionally smaller (e.g. a
-        # recovery push from an old CSV); a current run hits every column.
         for col in _DB_COLUMNS:
-            if col not in db_df.columns:
-                db_df[col] = None
-
-        placeholders = ", ".join("?" for _ in _DB_COLUMNS)
-        col_list = ", ".join(f"[{c}]" for c in _DB_COLUMNS)
-        insert_sql = f"INSERT INTO {table} ({col_list}) VALUES ({placeholders})"
-
-        # 4. DELETE matches by date (and optional route) so a re-run is
-        # idempotent: same key set lands the same rows. The transaction
-        # below makes DELETE+INSERT atomic.
-        delete_sql = f"DELETE FROM {table} WHERE [trx_date] >= ? AND [trx_date] < DATEADD(day, 1, ?)"
-        delete_params = [date, date]
-        if route_code:
-            delete_sql += " AND [route_code] = ?"
-            delete_params.append(route_code)
-
-        records = [
-            tuple(None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row)
-            for row in db_df[_DB_COLUMNS].values.tolist()
-        ]
-
-        conn: Optional[pyodbc.Connection] = None
-        try:
-            conn = self._connect()
-            conn.timeout = self._db.query_timeout  # pyodbc query timeout lives on the connection
-            cursor = conn.cursor()
-            cursor.fast_executemany = True
-            # DELETE + chunked INSERT in one transaction so a partial
-            # INSERT failure rolls the DELETE back too -- no orphaned
-            # gaps, idempotent on retry.
-            cursor.execute(delete_sql, delete_params)
-            for i in range(0, len(records), 1000):
-                cursor.executemany(insert_sql, records[i : i + 1000])
-            conn.commit()
-
-            duration = round(time.time() - t0, 2)
-            logger.info("Pushed %d recs to %s for %s in %.1fs", len(records), table, date, duration)
-            return {"success": True, "table": table, "rows": len(records), "duration_seconds": duration}
-        except Exception as exc:
-            logger.error("Push failed for %s/%s: %s", date, route_code or "ALL", exc)
-            if conn is not None:
-                try:
-                    conn.rollback()
-                except Exception:
-                    pass
-            return {"success": False, "error": str(exc)}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception:
-                    pass
+            if col not in out.columns:
+                out[col] = None
+        return out

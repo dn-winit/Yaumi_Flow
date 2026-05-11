@@ -1,7 +1,7 @@
 """
 Salary-cycle features.
 
-Pay dates are fully config-driven — the module never assumes a cycle. A
+Pay dates are fully config-driven - the module never assumes a cycle. A
 user with no pay rules configured gets no features. Everything below is
 vectorized via ``searchsorted`` on a pre-computed timeline of pay dates.
 
@@ -21,7 +21,7 @@ Emitted columns (only those whose ``features`` flag is True):
 
   - ``days_since_last_payday``
   - ``days_to_next_payday``
-  - ``in_payday_window``  (any rule's window — union)
+  - ``in_payday_window``  (any rule's window - union)
 
 Daily grain only. At coarser grains the concept collapses because every
 period contains at least one payday.
@@ -78,7 +78,7 @@ def add_salary_cycle_features(
         df["days_to_next_payday"] = out
 
     if features.get("in_payday_window"):
-        # Each rule's own window — union across rules.
+        # Each rule's own window - union across rules.
         in_win = np.zeros(len(d64), dtype=bool)
         for rule in rules:
             win = int(rule.get("window_days", 0))

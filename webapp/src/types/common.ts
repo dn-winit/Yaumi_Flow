@@ -11,6 +11,14 @@ export interface DataSummary {
   last_updated: string | null;
 }
 
+export interface TrainingOverview {
+  trained_at?: string | null;
+  test_date_start?: string | null;
+  test_date_end?: string | null;
+  test_routes?: number | null;
+  test_items?: number | null;
+}
+
 export interface ForecastSummary {
   // Nullable: 0% / 0 pairs is rendered as "—" by callers, so the API
   // returns null until artifacts that back these numbers exist (avoids
@@ -22,6 +30,7 @@ export interface ForecastSummary {
   future_forecast_count: number;
   last_forecast_date: string | null;
   training_summary_exists: boolean;
+  training_overview?: TrainingOverview | null;
 }
 
 export interface RecommendationSummary {

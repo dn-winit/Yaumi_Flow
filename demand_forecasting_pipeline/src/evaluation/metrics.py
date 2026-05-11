@@ -16,13 +16,84 @@ _EPS = 1e-9
 # Per-class miss tolerance for composite accuracy. SBC (Syntetos-Boylan-
 # Croston) buckets get progressively wider tolerances as items become
 # inherently harder to predict. Mirrored in webapp/src/lib/format.ts.
-TOLERANCE_BY_CLASS: dict[str, float] = {
+#
+# These values are the production defaults. Pass an override dict to
+# ``composite_summary(..., tolerance_by_class=...)`` to substitute the
+# values from ``config.yaml: evaluation.composite_accuracy.tolerance_by_class``.
+DEFAULT_TOLERANCE_BY_CLASS: dict[str, float] = {
     "smooth":       0.10,
     "intermittent": 0.20,
     "erratic":      0.30,
     "lumpy":        0.40,
 }
 DEFAULT_TOLERANCE = 0.20  # unknown / missing class
+
+# Backward-compat alias retained so callers that imported the old name
+# (UI tile aggregator, drift module) keep working without coordinated
+# updates. New callers should pass tolerances through the function arg.
+TOLERANCE_BY_CLASS = DEFAULT_TOLERANCE_BY_CLASS
+
+
+def composite_kwargs_from_cfg(cfg: dict | None) -> dict:
+    """Resolve the kwargs to pass to ``composite_summary`` from a pipeline
+    config dict. Returns an empty dict if the config has no overrides
+    (caller falls through to the module defaults). Centralises the YAML
+    contract so every caller reads the same shape."""
+    if not cfg:
+        return {}
+    block = (cfg.get("evaluation") or {}).get("composite_accuracy") or {}
+    out: dict = {}
+    tol_map = block.get("tolerance_by_class")
+    if isinstance(tol_map, dict) and tol_map:
+        out["tolerance_by_class"] = {
+            str(k).strip().lower(): float(v) for k, v in tol_map.items()
+        }
+    if "default" in block:
+        out["default_tolerance"] = float(block["default"])
+    return out
+
+
+# Per-process kwargs cache keyed by YAML path. The YAML is parsed once
+# per path; subsequent calls are an O(1) dict lookup. Cleared automatically
+# when the process restarts -- the typical config-edit workflow already
+# bounces the service, so an explicit invalidation hook would be dead
+# code right now.
+_COMPOSITE_KWARGS_CACHE: dict[str, dict] = {}
+
+
+def composite_kwargs_from_yaml(path: str | None) -> dict:
+    """Resolve composite-accuracy kwargs from the pipeline YAML at
+    ``path``, cached per-process.
+
+    Single source of truth so drift / live accuracy / summary endpoint
+    all score under the SAME tolerance configuration as the
+    training-time baseline they're being compared against. Without
+    this, every serving-time scorer silently falls back to the module
+    defaults (``DEFAULT_TOLERANCE_BY_CLASS``) and a config-driven
+    retraining run would invisibly diverge from the drift comparison.
+
+    Returns an empty dict on missing path or any load/parse error so
+    callers fall through to the module defaults rather than crashing.
+    """
+    if not path:
+        return {}
+    cached = _COMPOSITE_KWARGS_CACHE.get(path)
+    if cached is not None:
+        return cached
+    try:
+        # Local import keeps metrics.py free of a top-level dependency
+        # on the file-loader -- this helper is only exercised by serving
+        # paths, not by the metric primitives themselves.
+        from demand_forecasting_pipeline.src.utils.config_loader import load_config
+        kwargs = composite_kwargs_from_cfg(load_config(path))
+    except Exception as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "composite_kwargs_from_yaml: load failed for %s: %s", path, exc,
+        )
+        kwargs = {}
+    _COMPOSITE_KWARGS_CACHE[path] = kwargs
+    return kwargs
 
 
 def mae(y_true: np.ndarray, y_pred: np.ndarray) -> float:
@@ -59,7 +130,7 @@ def bias(y_true: np.ndarray, y_pred: np.ndarray) -> float:
     """Mean signed error (``predicted - actual``).
 
     WARNING: this metric is *best near zero*, not *lower is better*. Do not
-    use it as ``models.selection_metric`` — minimizing it would push
+    use it as ``models.selection_metric`` - minimizing it would push
     predictions toward large negative values.
     """
     y_true = np.asarray(y_true, dtype=float)
@@ -86,6 +157,9 @@ def composite_summary(
     actual: np.ndarray,
     predicted: np.ndarray,
     demand_class: Optional[Sequence[str]] = None,
+    *,
+    tolerance_by_class: Optional[dict[str, float]] = None,
+    default_tolerance: Optional[float] = None,
 ) -> dict:
     """Class-aware accuracy -- the headline business metric.
 
@@ -108,6 +182,15 @@ def composite_summary(
           "tolerance_by_class": dict[str, float],
         }
     """
+    # Resolve tolerance source. Caller passes a config-driven override
+    # dict via ``tolerance_by_class`` and an optional ``default_tolerance``;
+    # both fall through to the module defaults so legacy callers stay
+    # working unchanged.
+    tol_map = dict(DEFAULT_TOLERANCE_BY_CLASS)
+    if tolerance_by_class:
+        tol_map.update({str(k).strip().lower(): float(v) for k, v in tolerance_by_class.items()})
+    tol_default = float(default_tolerance) if default_tolerance is not None else DEFAULT_TOLERANCE
+
     actual = np.asarray(actual, dtype=float)
     predicted = np.asarray(predicted, dtype=float)
     total_actual = float(np.nansum(actual))
@@ -124,19 +207,19 @@ def composite_summary(
             "scored_actual": 0.0,
             "scored_abs_err": 0.0,
             "method": "composite",
-            "tolerance_by_class": dict(TOLERANCE_BY_CLASS),
+            "tolerance_by_class": dict(tol_map),
         }
 
     a = actual[mask]
     p = predicted[mask]
 
     if demand_class is None:
-        tol = np.full(a.shape, DEFAULT_TOLERANCE, dtype=float)
+        tol = np.full(a.shape, tol_default, dtype=float)
     else:
         cls_arr = np.asarray(demand_class, dtype=object)
         cls_arr = cls_arr[mask]
         tol = np.array(
-            [TOLERANCE_BY_CLASS.get(str(c).strip().lower(), DEFAULT_TOLERANCE) for c in cls_arr],
+            [tol_map.get(str(c).strip().lower(), tol_default) for c in cls_arr],
             dtype=float,
         )
 
@@ -155,7 +238,7 @@ def composite_summary(
         "scored_actual": scored_actual,
         "scored_abs_err": abs_err_sum,  # raw, pre-tolerance
         "method": "composite",
-        "tolerance_by_class": dict(TOLERANCE_BY_CLASS),
+        "tolerance_by_class": dict(tol_map),
     }
 
 

@@ -4,5 +4,8 @@
   "last_auto_retrain": null,
   "next_scheduled": null,
   "auto_inference_after_train": true,
-  "history": []
+  "history": [],
+  "baseline_accuracy_pct": 72.65,
+  "baseline_source": "initialized",
+  "baseline_set_at": "2026-05-07T00:02:26.946772+00:00"
 }

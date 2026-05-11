@@ -364,7 +364,7 @@ class RecommendationEngine:
         duration = time.time() - t0
         try:
             sink = get_metrics_csv_sink(
-                get_settings().shared_data_dir, self._c.clamps,
+                get_settings().file_storage_dir, self._c.clamps,
             )
             sink.append(gen_metrics_payload)
         except Exception as exc:  # pragma: no cover -- non-critical
@@ -499,7 +499,7 @@ class RecommendationEngine:
                 tier=tier,
                 van_load=int(cand.van_qty),
                 priority_score=float(cand.priority_score),
-                avg_quantity_per_visit=int(round(cand.avg_qty)),
+                avg_quantity_per_visit=int(np.ceil(cand.avg_qty)),
                 days_since_last_purchase=int(cand.days_since),
                 purchase_cycle_days=float(cand.cycle_days),
                 frequency_percent=float(cand.frequency_pct),

@@ -7,8 +7,8 @@ import BarChart from "@/components/charts/BarChart";
 import ContextStrip from "@/components/ui/ContextStrip";
 import DatePicker from "@/components/ui/DatePicker";
 import RouteGrid, { type RouteStat } from "@/components/ui/RouteGrid";
-import { useFutureForecast, useForecastRouteSummary } from "@/hooks/useForecast";
-import { useItemCatalog, useFilterDimensions } from "@/hooks/useDataImport";
+import { useVanLoadPageView, useForecastRouteSummary } from "@/hooks/useForecast";
+import { useFilterDimensions } from "@/hooks/useDataImport";
 import { useFilterOptions } from "@/hooks/useRecommendedOrder";
 import { useWorkflow, useWorkflowNavigate } from "@/pages/Workflow/workflowContext";
 import VanLoadSummary from "./VanLoadSummary";
@@ -19,13 +19,13 @@ import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
 import InfoPanel from "@/components/ui/InfoPanel";
 import { VAN_LOAD_INFO } from "@/config/module-info";
 import { ROUTES } from "@/config/routes";
-import { toNum, pickDate, fmtNum } from "@/lib/format";
+import { fmtNum } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 import type { Row } from "@/types/common";
 import type { FilterDimensionOption } from "@/types/data-import";
 
 export default function VanLoadTab() {
-  // Workflow-aware navigate preserves ?route=…&date=… across step jumps.
+  // Workflow-aware navigate preserves ?route=...&date=... across step jumps.
   const navigate = useWorkflowNavigate();
   // Route + date live in shared workflow context so picks carry into Visit.
   const { date, setDate, routeCode, setRouteCode } = useWorkflow();
@@ -43,95 +43,34 @@ export default function VanLoadTab() {
   const dims = useFilterDimensions(undefined, pickerVisible);
   const filterOpts = useFilterOptions(date, pickerVisible);
 
-  const warehouses = dims.data?.warehouses ?? [];
   const routes = dims.data?.routes ?? [];
 
-  // Forecast only fires once a route is chosen; the picker grid itself has
-  // no per-route data dependency.
-  const params = useMemo(() => {
-    const p: Record<string, unknown> = {};
-    if (routeCode) p.route_code = routeCode;
-    return p;
-  }, [routeCode]);
-  const forecast = useFutureForecast(params, Boolean(routeCode));
-  const catalog = useItemCatalog();
+  // One backend fetch carries the summary, the chart, and the table.
+  // Server has already aggregated, sorted, filtered, and substituted
+  // canonical fields, so the page binds and renders -- no client-side
+  // compute. Tile == chart == table by construction.
+  const pageView = useVanLoadPageView(routeCode || undefined, date, Boolean(routeCode));
+  const view = pageView.data;
 
-  // Price + name lookups built once from the catalog and reused across rows.
-  const { priceMap, nameMap } = useMemo(() => {
-    const p: Record<string, number> = {};
-    const n: Record<string, string> = {};
-    (catalog.data?.items ?? []).forEach((it) => {
-      p[it.ItemCode] = it.last_price || it.avg_price || 0;
-      n[it.ItemCode] = it.ItemName;
-    });
-    return { priceMap: p, nameMap: n };
-  }, [catalog.data]);
-
-  const allRows = useMemo<Row[]>(() => {
-    const rows = (forecast.data?.data ?? []) as Row[];
-    return rows.map((r) => {
-      const code = String(r.ItemCode ?? "").trim();
-      return {
-        ...r,
-        AvgUnitPrice: r.AvgUnitPrice ?? priceMap[code] ?? null,
-        ItemName: r.ItemName ?? r.item_name ?? nameMap[code] ?? "",
-      };
-    });
-  }, [forecast.data, priceMap, nameMap]);
-
-  // Only positive-prediction rows count as "load this": prediction == 0
-  // means the model said "skip", so showing it as a van item would be
-  // misleading.
-  const dateRows = useMemo(
-    () =>
-      allRows.filter((r) => {
-        if (pickDate(r) !== date) return false;
-        const p = toNum(r.prediction) ?? 0;
-        return p > 0;
-      }),
-    [allRows, date]
-  );
-
-  const topItems = useMemo(() => {
-    return [...dateRows]
-      .sort((a, b) => (toNum(b.prediction) ?? 0) - (toNum(a.prediction) ?? 0))
-      .slice(0, 10)
-      .map((r) => ({
-        ...r,
-        item: String(r.ItemCode ?? "-"),
-        predicted: Number((toNum(r.prediction) ?? 0).toFixed(1)),
-      }));
-  }, [dateRows]);
-
-  // ---- Route picker grid (no route selected yet) ----
-  if (!routeCode) {
-    return (
-      <VanLoadRouteGrid
-        routes={routes}
-        journeyCounts={filterOpts.data?.journey_counts}
-        loading={dims.loading || filterOpts.loading}
-        date={date}
-        onSelect={setRouteCode}
-      />
-    );
-  }
-
-  return (
+  return !routeCode ? (
+    <VanLoadRouteGrid
+      routes={routes}
+      journeyCounts={filterOpts.data?.journey_counts}
+      loading={dims.loading || filterOpts.loading}
+      date={date}
+      onDateChange={setDate}
+      onSelect={setRouteCode}
+    />
+  ) : (
     <div className="space-y-6">
-      {/* Page header carries the live scope: route is fixed once picked,
-          date is editable inline (peek at any past day's van load).
-          Actions ordered left-to-right: navigation back -> page drawers
-          -> info help. Items count lives in the summary tile below, not
-          duplicated here. */}
+      {/* Page header carries the live scope: route + date are both fixed
+          once the supervisor enters the detail view. The date was
+          picked on the route-picker page, so it shows here as a read-
+          only label. Use "Back to routes" to change either. */}
       <ContextStrip
         items={[
           { label: "Route", value: routeCode },
-          {
-            label: "Date",
-            value: (
-              <DatePicker value={date} onChange={setDate} className="min-w-[150px]" />
-            ),
-          },
+          { label: "Date",  value: fmtDate(date) },
         ]}
         actions={
           <>
@@ -149,12 +88,7 @@ export default function VanLoadTab() {
         }
       />
 
-      {forecast.loading ? (
-        // Layout-shaped skeleton -- matches the height of the real
-        // content (summary row + chart card + table card) so the page
-        // doesn't jump when data arrives. ``animate-pulse`` is the
-        // standard subtle shimmer; the real content fades in via the
-        // ``animate-fade-in`` class on the data branch below.
+      {pageView.loading ? (
         <div className="space-y-6">
           <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-4">
             {[0, 1, 2, 3].map((i) => (
@@ -164,12 +98,15 @@ export default function VanLoadTab() {
           <Skeleton className="h-72" />
           <Skeleton className="h-64" />
         </div>
-      ) : dateRows.length === 0 ? (
+      ) : !view || !view.available || view.table_rows.length === 0 ? (
         <Card>
           <EmptyState
             title="No forecast for this date"
-            message={`Nothing forecast for route ${routeCode} on ${fmtDate(date)}.`}
-            icon="📅"
+            message={
+              view?.message ||
+              `Nothing forecast for route ${routeCode} on ${fmtDate(date)}.`
+            }
+            icon="cal"
             action={
               <span className="text-body text-text-tertiary">
                 Run a fresh forecast from the Pipeline page.
@@ -179,40 +116,66 @@ export default function VanLoadTab() {
         </Card>
       ) : (
         <div className="space-y-6 animate-fade-in">
-          <VanLoadSummary rows={dateRows} />
+          <VanLoadSummary summary={view.summary} />
 
           <Card
-            title="Top 10 items by van load"
+            title={`Top ${view.chart_top_n.length} items by van load`}
             actions={
               <span className="text-body text-text-tertiary">click a bar for details</span>
             }
           >
-            {topItems.length === 0 ? (
-              <EmptyState title="No items to chart" icon="📊" />
+            {view.chart_top_n.length === 0 ? (
+              <EmptyState title="No items to chart" icon="chart" />
             ) : (
               <BarChart
-                data={topItems}
+                data={view.chart_top_n.map((b) => ({
+                  ...b,
+                  item: b.item_code,
+                  predicted: b.predicted,
+                }))}
                 xKey="item"
                 yKey="predicted"
                 height={300}
-                onBarClick={(p) => setExplainRow(p as Row)}
+                onBarClick={(p) => {
+                  // Build a minimal Row for the modal from the bar's item
+                  // code by looking up the matching table row -- table
+                  // and chart are derived from the same load_df on the
+                  // server, so the lookup always succeeds.
+                  const code = String((p as { item_code?: string }).item_code ?? "");
+                  const row = view.table_rows.find((r) => r.item_code === code);
+                  if (!row) return;
+                  setExplainRow({
+                    ItemCode: row.item_code,
+                    ItemName: row.item_name,
+                    RouteCode: routeCode,
+                    TrxDate: date,
+                    prediction: row.units_to_load,
+                    p_demand: row.p_demand,
+                    demand_class: row.demand_class,
+                    class: row.demand_class,
+                    lower_bound: row.lower_bound,
+                    upper_bound: row.upper_bound,
+                    ...row.explain,
+                  } as unknown as Row);
+                }}
               />
             )}
           </Card>
 
           <Card
             title="Van load items"
-            actions={<span className="text-body text-text-tertiary">{dateRows.length} items</span>}
+            actions={
+              <span className="text-body text-text-tertiary">
+                {view.table_rows.length} items
+              </span>
+            }
           >
-            <VanLoadTable rows={dateRows} />
+            <VanLoadTable rows={view.table_rows} routeCode={routeCode} date={date} />
           </Card>
 
-          {/* Forward CTA: physically advances the supervisor into the
-              Visit step. The route + date scope is already in context
-              so Visit lands directly in its pre-init view. */}
           <div className="flex justify-end">
             <Button variant="primary" size="md" onClick={() => navigate(ROUTES.workflowVisit)}>
-              Continue to Visit →
+              Continue to Visit
             </Button>
           </div>
         </div>
@@ -222,6 +185,7 @@ export default function VanLoadTab() {
         open={accuracyOpen}
         onClose={() => setAccuracyOpen(false)}
         routeCode={routeCode}
+        endDate={date}
       />
       <ForecastDrawer
         open={forecastOpen}
@@ -247,17 +211,23 @@ function VanLoadRouteGrid({
   journeyCounts,
   loading,
   date,
+  onDateChange,
   onSelect,
 }: {
   routes: FilterDimensionOption[];
   journeyCounts?: Record<string, number>;
   loading: boolean;
   date: string;
+  onDateChange: (date: string) => void;
   onSelect: (route: string) => void;
 }) {
   const summaryQ = useForecastRouteSummary(date);
 
-  // Build the per-route stat map once -- shared across all warehouse groups.
+  // Build the per-route stat map once. The numbers come from
+  // /predictions/forecast/route-summary (server-aggregated, reconciled),
+  // joined with route metadata + journey counts. The grouping below
+  // is the only client-side transform -- pure presentation, no business
+  // calculation.
   const stats = useMemo<Record<string, RouteStat>>(() => {
     const out: Record<string, RouteStat> = {};
     const forecastByRoute: Record<string, { skus: number; qty: number }> = {};
@@ -303,13 +273,25 @@ function VanLoadRouteGrid({
       .map(([code, g]) => ({ code, name: g.name, routes: g.routes }));
   }, [routes]);
 
+  const header = (
+    <div className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-default bg-surface-raised px-4 py-3">
+      <div className="flex items-center gap-3">
+        <span className="text-caption font-semibold uppercase tracking-wider text-text-tertiary">
+          Plan date
+        </span>
+        <DatePicker value={date} onChange={onDateChange} className="min-w-[180px]" />
+      </div>
+      <p className="text-body text-text-secondary">
+        Showing the van load for <strong>{fmtDate(date)}</strong>. Change the
+        date to see another day&apos;s plan.
+      </p>
+    </div>
+  );
+
   if (loading || summaryQ.loading) {
-    // Skeleton-shaped picker -- two warehouse blocks, each with a row
-    // of route tiles. Same primitive the main view uses; no spinner so
-    // refresh stays smooth across both branches.
     return (
       <div className="space-y-6">
-        <Skeleton className="h-5 w-3/5" />
+        {header}
         {[0, 1].map((g) => (
           <div key={g} className="space-y-2">
             <Skeleton className="h-5 w-1/4" />
@@ -326,20 +308,18 @@ function VanLoadRouteGrid({
 
   if (groups.length === 0) {
     return (
-      <Card>
-        <EmptyState
-          title="No routes available"
-          icon="🛣️"
-        />
-      </Card>
+      <div className="space-y-6">
+        {header}
+        <Card>
+          <EmptyState title="No routes available" icon="route" />
+        </Card>
+      </div>
     );
   }
 
   return (
     <div className="space-y-6">
-      <p className="text-body text-text-secondary">
-        Pick a route for <strong>{fmtDate(date)}</strong> to see today's van load.
-      </p>
+      {header}
       {groups.map((g) => (
         <div key={g.code} className="space-y-2">
           <div className="flex items-baseline justify-between">

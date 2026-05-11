@@ -1,5 +1,5 @@
 """
-Data-quality report — one artifact per training run.
+Data-quality report - one artifact per training run.
 
 The report captures:
 
@@ -23,9 +23,8 @@ from typing import Any
 
 import pandas as pd
 
+from .flags import FLAG_COLUMNS as _FLAG_COLUMNS
 from .validator import ValidationReport
-
-_FLAG_COLUMNS = ("suspicious_zero", "is_new_launch", "is_likely_eol")
 
 
 @dataclass

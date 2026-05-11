@@ -55,6 +55,12 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
         name="Daily Incremental Import",
         replace_existing=True,
         misfire_grace_time=3600,
+        # ``coalesce`` collapses a backlog of missed slots into one fire on
+        # recovery (we never want a year of catch-up runs after an outage);
+        # ``max_instances=1`` prevents the same job from racing itself if
+        # a cron skews and the prior run is still writing CSVs.
+        coalesce=True,
+        max_instances=1,
     )
     _scheduler.start()
     logger.info(

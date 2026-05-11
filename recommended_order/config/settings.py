@@ -12,6 +12,32 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+_MODULE_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = _MODULE_ROOT.parent
+
+
+def _data_root() -> Path:
+    """Resolve the unified on-disk data root. ``YF_DATA_ROOT`` env var
+    moves every service's filesystem layout in lockstep; defaults to
+    ``<project>/data`` for fresh checkouts."""
+    raw = os.getenv("YF_DATA_ROOT", "").strip()
+    return Path(raw).resolve() if raw else _PROJECT_ROOT / "data"
+
+
+def _read_allow_origins() -> list[str]:
+    """Read shared ``YF_ALLOW_ORIGINS`` (comma/semicolon or JSON list)."""
+    import json
+    raw = os.getenv("YF_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:3000"]
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+    return [s.strip() for s in raw.replace(";", ",").split(",") if s.strip()]
+
 
 class DatabaseSettings(BaseSettings):
     """Database connection settings -- all from env vars."""
@@ -30,6 +56,15 @@ class DatabaseSettings(BaseSettings):
     # retry. Larger than the supervision query budget because pushes are
     # expected to handle thousands of rows in a single executemany.
     query_timeout: int = Field(default=300, ge=10)
+    # Bulk push is server-triggered (no human waiting), so a transient
+    # warehouse blip should retry rather than fail the run -- mirrors
+    # the demand-forecast pusher's retry envelope.
+    retry_attempts: int = Field(default=3, ge=1)
+    retry_delay: int = Field(default=2, ge=1)
+    # Rows per ``cursor.executemany`` batch. Large enough to amortise the
+    # round-trip cost, small enough that a transient failure inside one
+    # batch leaves a bounded amount of pending work to roll back.
+    executemany_chunk_size: int = Field(default=1000, ge=1)
 
     @property
     def aiml_connection_string(self) -> str:
@@ -51,10 +86,16 @@ class SchedulerSettings(BaseSettings):
 
     enabled: bool = Field(default=True)
     timezone: str = Field(default="Asia/Dubai")
+    # Daily schedule (Asia/Dubai). The 04:30 slot is not arbitrary --
+    # it leaves room for upstream crons:
+    #   03:00  data_import        (writes 7 mirror CSVs in parallel)
+    #   03:30  reconciliation     (df pipeline; writes reconciled DB cols + cascade)
+    #   04:30  generation         (this) -- forced ``dm.refresh()`` at start
+    #                              picks up any cascade-late mirror updates
+    # Override per environment via ``RO_SCHEDULER_GENERATION_HOUR`` /
+    # ``..._MINUTE``.
     generation_hour: int = Field(default=4, ge=0, le=23)
-    generation_minute: int = Field(default=0, ge=0, le=59)
-    cache_refresh_hour: int = Field(default=3, ge=0, le=23)
-    cache_refresh_minute: int = Field(default=0, ge=0, le=59)
+    generation_minute: int = Field(default=30, ge=0, le=59)
     max_retries: int = Field(default=3, ge=1)
     retry_delay_seconds: int = Field(default=60, ge=10)
 
@@ -74,12 +115,28 @@ class Settings(BaseSettings):
     host: str = Field(default="0.0.0.0")
     port: int = Field(default=8001, ge=1024, le=65535)
 
+    # How many routes to generate in parallel inside one /generate or
+    # cron-fired pass. The engine is mostly numpy/pandas (GIL releases)
+    # so threads give a real win. Cap at the configured route count to
+    # avoid spawning idle workers on small fleets.
+    generation_concurrency: int = Field(default=4, ge=1, le=32,
+                                        description="Threads for per-route generation")
+
     # Canonical recommendation store -- one CSV per (date, route).
     # DB replication happens orthogonally through DbPusher when configured.
-    file_storage_dir: str = Field(default="recommended_order/output", description="Dir for file-based storage")
+    # File-based storage now lives under the unified data root. Recs are
+    # DB-canonical (yf_recommended_orders); the local CSVs are a transient
+    # working copy for the push pipeline. Same env var moves every service.
+    file_storage_dir: str = Field(
+        default_factory=lambda: str(_data_root() / "recommendations"),
+        description="Dir for file-based recommendation snapshots (transient pre-DB)",
+    )
 
     # Shared data directory (CSVs owned by data_import) -- single source of truth
-    shared_data_dir: str = Field(default="data", description="Project-root data/ folder written by data_import")
+    shared_data_dir: str = Field(
+        default_factory=lambda: str(_data_root() / "imports"),
+        description="Unified imports/ mirror written by data_import (DB-canonical CSVs)",
+    )
     customer_data_file: str = Field(default="customer_data.csv")
     journey_plan_file: str = Field(default="journey_plan.csv")
     demand_forecast_file: str = Field(default="demand_forecast.csv")
@@ -97,6 +154,9 @@ class Settings(BaseSettings):
 
     # Demand filter (applied to rows read from demand_forecast.csv)
     demand_probability_threshold: float = Field(default=0.99, ge=0.0, le=1.0)
+
+    # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var.
+    allow_origins: list[str] = Field(default_factory=_read_allow_origins)
 
     # Sub-settings
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)

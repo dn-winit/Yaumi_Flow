@@ -1,5 +1,5 @@
 """
-Panel builder — aggregates raw transactions to period grain and fills gaps.
+Panel builder - aggregates raw transactions to period grain and fills gaps.
 
 Causal columns can be aggregated with any pandas-compatible reduction
 (``sum``, ``mean``, ``max``, ...) or ``vwap`` (volume-weighted average using
@@ -80,10 +80,15 @@ def aggregate_to_period(df, group_keys, date_col, target_col, meta_cols, freq, c
 
 
 def fill_missing_periods(df, group_keys, date_col, target_col, freq, fill_value=0.0,
-                         add_activity_flag=False, keep_nan_cols=None):
+                         add_activity_flag=False):
+    """Reindex each pair onto a regular period grid; fill the target with
+    ``fill_value`` for the inserted rows. Causal/meta columns left over
+    from the source frame stay NaN by construction (only the target is
+    explicitly filled), which is the correct behaviour for vwap-style
+    causals: a missing period had no transactions, hence no price.
+    """
     out = []
     alias = period_alias(freq)
-    keep_nan = set(keep_nan_cols or [])
     for keys, g in df.groupby(group_keys):
         g = g.sort_values(date_col)
         idx = pd.date_range(g[date_col].min(), g[date_col].max(), freq=alias)
@@ -112,7 +117,6 @@ def build_panel(raw, group_keys, date_col, target_col, meta_cols, freq,
     filled = fill_missing_periods(
         agg[keep_cols], group_keys, date_col, target_col, freq,
         fill_value=fill_value, add_activity_flag=activity_flag,
-        keep_nan_cols=causal_names,
     )
     if meta_cols:
         meta_present = [c for c in meta_cols if c in agg.columns]

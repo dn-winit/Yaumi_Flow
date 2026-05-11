@@ -4,12 +4,12 @@ Per-pair outlier treatment + negative clipping.
 Split into three functions so training (fit + apply) and inference (load +
 apply) share one code path:
 
-  :func:`fit_outlier_bounds`   — compute per-pair IQR bounds from a source
+  :func:`fit_outlier_bounds`   - compute per-pair IQR bounds from a source
                                   (usually the train window). Training only.
-  :func:`apply_outlier_bounds` — clip a panel using pre-fit bounds. Used at
+  :func:`apply_outlier_bounds` - clip a panel using pre-fit bounds. Used at
                                   both training (immediately after fit) and
                                   inference (with bounds loaded from disk).
-  :func:`per_pair_outlier_treatment` — thin wrapper that fits + applies.
+  :func:`per_pair_outlier_treatment` - thin wrapper that fits + applies.
                                   Preserved as the training call site's one-
                                   liner.
 
@@ -55,7 +55,7 @@ def fit_outlier_bounds(
 ) -> pd.DataFrame:
     """Compute per-pair IQR bounds. Returns a DataFrame keyed by ``group_keys``
     with ``bound_lo`` and ``bound_hi`` columns. Pairs with insufficient
-    non-zero observations are omitted — the apply step leaves them untouched.
+    non-zero observations are omitted - the apply step leaves them untouched.
     """
     if not cfg.get("enabled", False) or source_df is None or source_df.empty:
         return pd.DataFrame(columns=group_keys + [_BOUND_LO, _BOUND_HI])

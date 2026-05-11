@@ -6,11 +6,25 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from typing import Any, Dict, List, Optional
 
 from llm_analytics.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+def _log_usage(provider: str, model: str, usage: Dict[str, Any], elapsed_ms: float) -> None:
+    """Emit one structured log line per LLM call so cost + latency are
+    observable. Provider responses use different field names; we
+    normalise to ``input_tokens`` / ``output_tokens``."""
+    logger.info(
+        "llm_call provider=%s model=%s input_tokens=%s output_tokens=%s elapsed_ms=%.0f",
+        provider, model,
+        usage.get("input_tokens", "-"),
+        usage.get("output_tokens", "-"),
+        elapsed_ms,
+    )
 
 
 class LLMClient:
@@ -37,7 +51,9 @@ class LLMClient:
                 self._client = OpenAI(api_key=self._s.api_key, timeout=self._s.timeout)
             elif provider == "anthropic":
                 import anthropic
-                self._client = anthropic.Anthropic(api_key=self._s.api_key)
+                self._client = anthropic.Anthropic(
+                    api_key=self._s.api_key, timeout=self._s.timeout,
+                )
             self.is_available = True
             logger.info("LLM client initialized: provider=%s, model=%s", provider, self._s.model)
         except Exception as exc:
@@ -62,6 +78,7 @@ class LLMClient:
 
     def _chat_openai_compat(self, system: str, user: str, attempt: int) -> Dict[str, Any]:
         """OpenAI-compatible API (Groq, OpenAI)."""
+        t0 = time.monotonic()
         response = self._client.chat.completions.create(
             model=self._s.model,
             messages=[
@@ -74,11 +91,19 @@ class LLMClient:
             seed=self._s.seed + attempt,
             response_format={"type": "json_object"},
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        u = getattr(response, "usage", None)
+        usage = {
+            "input_tokens":  getattr(u, "prompt_tokens", None),
+            "output_tokens": getattr(u, "completion_tokens", None),
+        } if u else {}
+        _log_usage(self._s.provider, self._s.model, usage, elapsed_ms)
         raw = response.choices[0].message.content
         return self._parse_json(raw)
 
     def _chat_anthropic(self, system: str, user: str, attempt: int) -> Dict[str, Any]:
         """Anthropic Messages API."""
+        t0 = time.monotonic()
         response = self._client.messages.create(
             model=self._s.model,
             max_tokens=self._s.max_tokens,
@@ -87,6 +112,13 @@ class LLMClient:
             temperature=self._s.temperature,
             top_p=self._s.top_p,
         )
+        elapsed_ms = (time.monotonic() - t0) * 1000.0
+        u = getattr(response, "usage", None)
+        usage = {
+            "input_tokens":  getattr(u, "input_tokens", None),
+            "output_tokens": getattr(u, "output_tokens", None),
+        } if u else {}
+        _log_usage(self._s.provider, self._s.model, usage, elapsed_ms)
         raw = response.content[0].text
         return self._parse_json(raw)
 

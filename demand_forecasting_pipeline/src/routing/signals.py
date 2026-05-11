@@ -4,7 +4,7 @@ Build the per-pair signal frame consumed by the routing engine.
 Everything here is sourced from artifacts already produced earlier in the
 pipeline (``classify_dataset`` output, ``compute_pair_explainability``
 output, and panel-level flags), so this function does no heavy computation
-— just alignment and reshaping.
+- just alignment and reshaping.
 
 Lifecycle signals (``is_new_launch``, ``is_likely_eol``) are computed as
 pair-level state at the *end of the panel* (the train-window end). This is
@@ -21,7 +21,7 @@ from __future__ import annotations
 import pandas as pd
 
 # Panel-level row counts that DO aggregate cleanly (counts of flagged rows).
-# Boolean lifecycle flags are handled separately below — see module docstring.
+# Boolean lifecycle flags are handled separately below - see module docstring.
 _COUNT_REDUCTIONS = {
     "suspicious_zero": "sum",  # becomes suspicious_zero_rows
 }
@@ -48,11 +48,11 @@ def build_pair_signals(
       - ``mean_qty``, ``min_qty``, ``max_qty``, ``range_qty``, ``std_qty``,
         ``sum_qty``, ``nonzero_mean``, ``nonzero_median``, ``nonzero_min``,
         ``nonzero_std``, ``avg_gap_days``
-      - ``is_new_launch`` (bool) — pair's first non-zero sale lies within
+      - ``is_new_launch`` (bool) - pair's first non-zero sale lies within
         the last ``new_launch_periods`` panel periods. Pairs with no
         non-zero sales at all are flagged ``True`` (they are by definition
         not yet launched).
-      - ``is_likely_eol`` (bool) — pair's silent tail (rows after the last
+      - ``is_likely_eol`` (bool) - pair's silent tail (rows after the last
         non-zero sale) is at least ``eol_silent_periods`` long. Pairs with
         no non-zero sales at all are NOT flagged EOL (a never-launched pair
         is not end-of-life).
@@ -62,7 +62,7 @@ def build_pair_signals(
         ``n_val_rows``, ``n_val_nonzero``,
         ``n_test_rows``, ``n_test_nonzero``
 
-    Missing columns are simply absent from the output — rules that reference
+    Missing columns are simply absent from the output - rules that reference
     an absent signal are no-ops for every pair (and logged once by the
     router at startup).
     """
@@ -120,8 +120,8 @@ def _pair_lifecycle_state(
     granularity), so the result is granularity-correct without needing a freq.
 
     ``is_likely_eol`` asks: how many panel rows fall strictly after the pair's
-    last non-zero sale? If that silent-tail length is ≥ ``eol_silent_periods``,
-    the pair is flagged. Pairs with no non-zero sales at all are not EOL —
+    last non-zero sale? If that silent-tail length is >= ``eol_silent_periods``,
+    the pair is flagged. Pairs with no non-zero sales at all are not EOL -
     they are pre-launch.
     """
     p = panel[group_keys + [date_col, target_col]].copy()
@@ -140,7 +140,7 @@ def _pair_lifecycle_state(
     out["last_nz_idx"] = last_nz_idx
 
     # Periods elapsed since the pair's first non-zero sale (inclusive).
-    # Pairs with no sales at all have NaN here → still treated as "launching".
+    # Pairs with no sales at all have NaN here -> still treated as "launching".
     out["periods_since_first_sale"] = out["pair_periods"] - out["first_nz_idx"]
     out["is_new_launch"] = (
         out["first_nz_idx"].isna()
@@ -148,7 +148,7 @@ def _pair_lifecycle_state(
     )
 
     # Silent-tail length = periods after last non-zero sale.
-    # NaN last_nz_idx (pair never sold) → not EOL, just unborn.
+    # NaN last_nz_idx (pair never sold) -> not EOL, just unborn.
     out["silent_tail"] = out["pair_periods"] - out["last_nz_idx"] - 1
     out["is_likely_eol"] = (
         out["last_nz_idx"].notna()

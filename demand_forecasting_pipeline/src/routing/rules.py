@@ -4,12 +4,12 @@ Rule data model + vectorized condition evaluation.
 A rule has a ``when`` block (conditions), optional ``allow`` / ``exclude`` /
 ``prefer`` lists for model pool manipulation, and optional modifiers
 (``skip_hp_tuning``, ``hp_trials_multiplier``). The engine evaluates every
-rule's ``when`` as a boolean mask over the full signal frame in one pass —
+rule's ``when`` as a boolean mask over the full signal frame in one pass -
 no per-pair Python iteration.
 
 Supported condition operators
 -----------------------------
-Scalar equality is implicit:   ``class: smooth``       → ``class == "smooth"``
+Scalar equality is implicit:   ``class: smooth``       -> ``class == "smooth"``
 Mapping form explicit operators:
   ``lt``, ``lte``, ``gt``, ``gte``, ``eq``, ``ne``
   ``in`` (value in list), ``not_in``
@@ -94,7 +94,7 @@ def evaluate_condition(signals: pd.DataFrame, when: dict) -> pd.Series:
     """Return a boolean mask of rows matching ``when``.
 
     If ``when`` references a column that isn't in ``signals``, the rule cannot
-    fire and the mask is all-False (caller decides whether to warn — we just
+    fire and the mask is all-False (caller decides whether to warn - we just
     report ``False`` rather than raise so missing optional signals don't
     crash the pipeline)."""
     if not when:

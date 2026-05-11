@@ -1,5 +1,3 @@
-import React from "react";
-
 type LoadingSize = "sm" | "md" | "lg";
 
 interface LoadingProps {

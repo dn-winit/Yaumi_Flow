@@ -8,9 +8,10 @@ multiplier to every source (Sprint-3), we:
        (``SafetyClamps.feedback_window_days``) -- every row carries the
        generator that produced it (``Source``) thanks to the Sprint-1 CSV
        schema persistence.
-    2. Read every ``session_*.json`` saved in the same window from
-       ``sales_supervision/data/sessions/``. Sessions hold the *actual* driver
-       outcome: visited? sold? how many units?
+    2. Read every visit landed in the supervision tables
+       (``yf_supervision_customers`` + ``yf_supervision_items``) within
+       the same window. The DB is the single source of truth for actuals
+       -- supersedes the legacy ``session_*.json`` files (removed).
     3. Inner-join on ``(route_code, date, customer_code, item_code)``. Rows
        where the customer wasn't visited are dropped (a no-show is a routing
        problem, not a recommendation failure).
@@ -40,12 +41,15 @@ import tempfile
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from recommended_order.config.constants import SafetyClamps
+
+if TYPE_CHECKING:
+    from sales_supervision.services.feedback_loader import SessionDbLoader
 
 logger = logging.getLogger(__name__)
 
@@ -156,14 +160,14 @@ def _load_recs_in_window(
 
 
 def _load_sessions_in_window(
-    sessions_dir: Path, window_days: int, today: datetime,
+    db_loader: Optional["SessionDbLoader"], window_days: int, today: datetime,
 ) -> pd.DataFrame:
-    """Read every ``session_*.json`` whose ``date`` is within the window into
-    a long frame of item-level outcomes.
+    """Read every supervision visit whose date is within the window into
+    a long frame of item-level outcomes, sourced from the supervision
+    tables (single source of truth for actuals).
 
-    Schema fault tolerance (Sprint-4, edge case): session files with missing
-    keys / wrong types are skipped with a warning -- one bad file must not
-    crash the whole feedback pass.
+    Cold-start / unreachable DB: returns an empty frame with the expected
+    columns; the rest of the pipeline collapses to multiplier=1.0.
     """
     cols = [
         "route_code", "date", "session_id",
@@ -171,69 +175,17 @@ def _load_sessions_in_window(
         "actual_qty", "was_sold", "was_edited",
         "visited",
     ]
-    if not sessions_dir.exists():
+    if db_loader is None or not db_loader.available:
         return pd.DataFrame(columns=cols)
-    dates = set(_iter_dates_in_window(today, window_days))
 
-    rows: List[Dict[str, Any]] = []
-    for f in sessions_dir.glob("session_*.json"):
-        try:
-            session = json.loads(f.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Skipping malformed session %s: %s", f.name, exc)
-            continue
-        try:
-            route = str(session.get("routeCode", "")).strip()
-            date_str = str(session.get("date", "")).strip()
-            sid = str(session.get("sessionId", f.stem))
-            customers = session.get("customers") or {}
-            if not route or not date_str or date_str not in dates:
-                continue
-            if not isinstance(customers, dict):
-                logger.warning("Session %s has non-dict customers; skipping", f.name)
-                continue
-            for cust_code, cust in customers.items():
-                if not isinstance(cust, dict):
-                    continue
-                visited = bool(cust.get("visited", False))
-                items = cust.get("items") or []
-                if not visited:
-                    # Keep one sentinel row so we know this customer was
-                    # planned but not visited -- ``was_visited==False`` rows
-                    # are filtered out of attribution below.
-                    rows.append({
-                        "route_code": route, "date": date_str, "session_id": sid,
-                        "customer_code": str(cust_code), "item_code": "",
-                        "actual_qty": 0, "was_sold": False, "was_edited": False,
-                        "visited": False,
-                    })
-                    continue
-                if not isinstance(items, list):
-                    continue
-                for it in items:
-                    if not isinstance(it, dict):
-                        continue
-                    item_code = str(it.get("itemCode", "")).strip()
-                    if not item_code:
-                        continue
-                    try:
-                        act_qty = int(it.get("actualQuantity", 0) or 0)
-                    except (TypeError, ValueError):
-                        act_qty = 0
-                    rows.append({
-                        "route_code": route, "date": date_str, "session_id": sid,
-                        "customer_code": str(cust_code), "item_code": item_code,
-                        "actual_qty": act_qty,
-                        "was_sold": bool(it.get("wasSold", act_qty > 0)),
-                        "was_edited": bool(it.get("wasEdited", False)),
-                        "visited": True,
-                    })
-        except Exception as exc:
-            logger.warning("Skipping malformed session %s: %s", f.name, exc)
-            continue
-    if not rows:
+    dates = _iter_dates_in_window(today, window_days)
+    if not dates:
         return pd.DataFrame(columns=cols)
-    return pd.DataFrame(rows, columns=cols)
+    try:
+        return db_loader.load_visits_in_window(start_date=dates[0], end_date=dates[-1])
+    except Exception as exc:
+        logger.warning("Could not load supervision visits from DB: %s", exc)
+        return pd.DataFrame(columns=cols)
 
 
 def _build_attribution(
@@ -270,7 +222,13 @@ def _build_attribution(
     r = r[keep_cols].copy()
     for k in ("route_code", "date", "customer_code", "item_code", "source"):
         r[k] = r[k].astype(str).str.strip()
-    r["recommended_qty"] = pd.to_numeric(r["recommended_qty"], errors="coerce").fillna(0).astype(int)
+    # Ceil to next whole unit -- match the quantity contract used end-to-
+    # end (engine outputs, van_load, supervision). ``.astype(int)`` alone
+    # would truncate, drifting feedback attribution from what the rep
+    # actually saw on the truck.
+    r["recommended_qty"] = np.ceil(
+        pd.to_numeric(r["recommended_qty"], errors="coerce").fillna(0)
+    ).astype(int)
     r["confidence"] = pd.to_numeric(r["confidence"], errors="coerce").fillna(0.0)
 
     if sessions.empty:
@@ -304,7 +262,7 @@ def _build_attribution(
     attr = attr.merge(items,
                       on=["route_code", "date", "customer_code", "item_code"],
                       how="left")
-    attr["actual_qty"] = attr["actual_qty"].fillna(0).astype(int)
+    attr["actual_qty"] = np.ceil(attr["actual_qty"].fillna(0)).astype(int)
     attr["was_sold"] = attr["was_sold"].fillna(False).astype(bool)
     attr["session_id"] = attr["session_id"].fillna("")
 
@@ -494,17 +452,21 @@ def _shrinkage_multipliers(
 def compute_feedback_adjustments(
     *,
     file_storage_dir: str,
-    sessions_dir: str,
-    shared_data_dir: str,
+    db_loader: Optional["SessionDbLoader"],
     clamps: SafetyClamps,
     today: Optional[datetime] = None,
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
-    """Full pipeline: read recs + sessions, attribute, filter adversarial,
-    compute shrinkage multipliers, EMA-smooth against previous run, persist.
+    """Full pipeline: read recs + supervision visits, attribute, filter
+    adversarial, compute shrinkage multipliers, EMA-smooth against previous
+    run, persist.
+
+    The persisted multipliers JSON lives alongside the per-route rec
+    snapshots under ``file_storage_dir`` -- it's recommended_order working
+    state, not part of the DB-mirror ``imports/`` tree.
 
     Returns:
         ``(adjustments, confidence)`` -- both keyed by route then source.
-        Empty dicts on cold start. Safe to call with no sessions / no recs.
+        Empty dicts on cold start. Safe to call with no visits / no recs.
 
     Honours ``SafetyClamps.feedback_enabled`` (caller usually checks too).
     Window is clamped to [feedback_window_min_days, feedback_window_max_days].
@@ -516,16 +478,16 @@ def compute_feedback_adjustments(
     )
 
     recs = _load_recs_in_window(Path(file_storage_dir), window, today_dt)
-    sessions = _load_sessions_in_window(Path(sessions_dir), window, today_dt)
+    sessions = _load_sessions_in_window(db_loader, window, today_dt)
     attr = _build_attribution(recs, sessions)
     attr = _filter_adversarial_sessions(attr, clamps)
 
-    previous = load_persisted_multipliers(shared_data_dir, clamps)
+    previous = load_persisted_multipliers(file_storage_dir, clamps)
     adjustments, confidence, payload = _shrinkage_multipliers(
         attr, previous, clamps,
     )
     try:
-        save_persisted_multipliers(payload, shared_data_dir, clamps)
+        save_persisted_multipliers(payload, file_storage_dir, clamps)
     except Exception as exc:  # pragma: no cover -- non-critical
         logger.warning("Could not persist feedback multipliers: %s", exc)
 

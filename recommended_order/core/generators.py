@@ -316,7 +316,8 @@ def gen_peer_cross_sell(
         median_qty = float(_weighted_median(qtys, weights))
         if median_qty <= 0:
             continue
-        qty = min(van_qty, max(1, int(round(median_qty))))
+        # Quantity ceil so a 17.4 median reads as 18, never 17.
+        qty = min(van_qty, max(1, int(np.ceil(median_qty))))
         n_peer_buyers = int(buyers_mask.sum())
         score_val = float(scores[j])
 
@@ -450,7 +451,7 @@ def gen_basket_complement(
         van_qty = int(van_items.get(item, 0))
         if van_qty <= 0:
             continue
-        qty = min(van_qty, int(round(median_qty)))
+        qty = min(van_qty, int(np.ceil(median_qty)))
         if qty <= 0:
             continue
         anchor_label = item_names.get(anchor_code, anchor_code)

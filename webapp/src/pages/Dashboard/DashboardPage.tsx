@@ -9,7 +9,6 @@ import { CHART_COLOR } from "@/components/charts/theme";
 import { useSalesOverview, useBusinessKpis } from "@/hooks/useDataImport";
 import { useToast } from "@/hooks/useToast";
 import {
-  fmtNum,
   fmtCurrency,
   DEFAULT_LOOKBACK,
   DASHBOARD_TOP_N,
@@ -72,8 +71,8 @@ export default function DashboardPage() {
   return (
     <div className="space-y-6">
       <PageHeader
-        title="Performance Dashboard"
-        subtitle="Track sales, volume, and forecast performance at a glance."
+        title="Sales performance & forecast impact"
+        subtitle="What actually sold across the business, and how our forecast performed against it."
         actions={
           <>
             {k?.anchor_date && (
@@ -99,15 +98,18 @@ export default function DashboardPage() {
       />
 
       {kpis.loading ? (
-        <KpiRow>
-          {[1, 2, 3, 4].map((i) => (
-            <div key={i} className="bg-surface-sunken rounded-lg p-4 border-l-3 border-neutral-200">
-              <Skeleton className="h-3 w-20 mb-2" />
-              <Skeleton className="h-6 w-28 mb-1" />
-              <Skeleton className="h-3 w-24" />
-            </div>
-          ))}
-        </KpiRow>
+        <div className="space-y-3">
+          <Skeleton className="h-3 w-44" />
+          <KpiRow>
+            {[1, 2, 3].map((i) => (
+              <div key={i} className="bg-surface-sunken rounded-lg p-4 border-l-3 border-brand-200">
+                <Skeleton className="h-3 w-20 mb-2" />
+                <Skeleton className="h-6 w-28 mb-1" />
+                <Skeleton className="h-3 w-24" />
+              </div>
+            ))}
+          </KpiRow>
+        </div>
       ) : (
         <DashboardKpis k={k} />
       )}
@@ -127,7 +129,7 @@ export default function DashboardPage() {
           }
         >
           {sales.loading ? (
-            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
+            <Skeleton className="h-[240px] rounded-lg" />
           ) : (
             <HorizontalBarChart
               data={categoryBars}
@@ -148,7 +150,7 @@ export default function DashboardPage() {
           }
         >
           {sales.loading ? (
-            <div className="animate-pulse bg-surface-sunken rounded-lg h-[240px]" />
+            <Skeleton className="h-[240px] rounded-lg" />
           ) : (
             <HorizontalBarChart
               data={topRouteRevenueBars}

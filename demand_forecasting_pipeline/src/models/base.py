@@ -11,7 +11,7 @@ class BaseForecaster(ABC):
     kind = "ml"  # ml | stat
 
     def __init__(self, params=None):
-        self.params = params or {}
+        self.params = dict(params or {})
         self.fitted_ = False
 
     @abstractmethod
@@ -22,6 +22,21 @@ class BaseForecaster(ABC):
     def predict(self, test_df, group_keys, date_col, target_col, feature_cols):
         ...
 
+    # ------------------------------------------------------------------
+    # sklearn-compatible parameter accessors. Keeping these on the base
+    # class means every model in the registry round-trips its params
+    # through pickle uniformly, and external tools that expect the
+    # sklearn estimator protocol (clone, deep-copy, hyperparameter
+    # search outside Optuna) work without per-model adapters.
+    # ------------------------------------------------------------------
+
+    def get_params(self, deep: bool = True) -> dict:
+        return dict(self.params)
+
+    def set_params(self, **params) -> "BaseForecaster":
+        self.params.update(params)
+        return self
+
 
 class StatForecaster(BaseForecaster):
     """Base for per-pair statistical forecasters (naive, moving-average,
@@ -30,7 +45,7 @@ class StatForecaster(BaseForecaster):
     ``fit`` materializes a per-pair history; ``predict`` dispatches to
     :meth:`_predict_pair` once per pair and assigns the resulting forecast
     array to every test row of that pair. Subclasses implement either
-    ``_predict_one`` (single-step forecast — replicated across the horizon
+    ``_predict_one`` (single-step forecast - replicated across the horizon
     by the default ``_predict_pair``) or override ``_predict_pair`` directly
     when they produce genuine multi-step forecasts (ETS).
 

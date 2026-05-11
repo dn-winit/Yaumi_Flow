@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import { supervisionApi } from "@/api/supervision";
 import { analyticsApi } from "@/api/analytics";
 import Badge from "@/components/ui/Badge";
@@ -16,25 +16,46 @@ interface CustomerItem {
   itemCode: string;
   itemName?: string;
   recommendedQty: number;
-  tier?: string;
-  source?: string;
-  whyItem?: string;
-  whyQuantity?: string;
-  purchaseCycleDays?: number;
-  daysSinceLastPurchase?: number;
-  frequencyPercent?: number;
-  trendFactor?: number;
-  // Raw PascalCase rec row (Signals / WhyItem / WhyQuantity / Confidence
-  // / Source / VanLoad / etc.) -- fed straight to RecommendationModal so
-  // the click-to-explain popup uses the same explainability surface as
-  // the rest of the workflow.
-  raw?: Record<string, unknown>;
+  // Original PascalCase rec from recommended_order. Used both for the
+  // click-to-explain popup (RecommendationModal reads PascalCase) and
+  // as the source for the analytics-API payloads below -- no parallel
+  // camelCase shadow lives on this interface.
+  rec: Record<string, unknown>;
 }
 
 interface VisitScore {
   score: number;
   coverage: number;
   accuracy: number;
+}
+
+interface RedistributionEntry {
+  from: string;
+  to: string;
+  itemCode: string;
+  quantity: number;
+}
+
+interface AlsoBoughtEntry {
+  item_code: string;
+  qty: number;
+}
+
+interface InitialVisit {
+  score: VisitScore;
+  actualSales: Record<string, number>;
+  totalActual: number;
+  totalRecommended: number;
+  // Visit-time signals carried alongside actuals so the drill-in view
+  // renders the same context an auto-fired ``process_visit`` produced,
+  // even after a drill-out / drill-in round trip.
+  redistributions?: RedistributionEntry[];
+  alsoBought?: AlsoBoughtEntry[];
+  // Previously-saved LLM payloads (JSON strings). When present, the
+  // briefing / customer-review modals open them directly instead of
+  // re-calling the analytics service.
+  preVisitBriefing?: string | null;
+  customerAnalysis?: string | null;
 }
 
 interface Props {
@@ -44,15 +65,27 @@ interface Props {
   customerCode: string;
   customerName: string;
   items: CustomerItem[];
-  /** True when YaumiLive shows an invoice today, even if the supervisor hasn't
-   *  clicked "Visit" in this session yet. Drives the small green dot on the row. */
+  /** Server-pre-computed unit total for the customer's plan. Same
+   *  number ``Session.summary().customer_tiles[*].total_units`` emits,
+   *  passed down so the briefing header never re-sums recommendedQty. */
+  totalUnits: number;
+  /** True when YaumiLive shows an invoice today. Drives the green dot.
+   *  The parent auto-fires the visit processing as soon as this flips,
+   *  so this component never needs to drive the work itself. */
   liveVisited?: boolean;
-  onVisitComplete: (result: Record<string, unknown>) => void;
+  /**
+   * Visit data once auto-processing has landed (or been hydrated from
+   * the supervision tables). Presence of this prop is the single
+   * "this customer has been visited" signal the component reads.
+   */
+  initialVisit?: InitialVisit;
   onRequestAnalysis: (payload: {
+    sessionId: string;
     customerCode: string;
     customerName: string;
     items: { itemCode: string; itemName?: string; recommendedQuantity: number; actualQuantity: number }[];
     score: VisitScore;
+    initialAnalysis?: string | null;
   }) => void;
 }
 
@@ -70,76 +103,73 @@ export default function CustomerVisit({
   customerCode,
   customerName,
   items,
+  totalUnits,
   liveVisited = false,
-  onVisitComplete,
+  initialVisit,
   onRequestAnalysis,
 }: Props) {
-  const [loading, setLoading] = useState(false);
-  const [visitResult, setVisitResult] = useState<Record<string, unknown> | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  // ``initialVisit`` is the single source of truth: present = visited
+  // (auto-fired or hydrated), absent = unvisited. Kept as a constant
+  // dictionary so the render path doesn't need separate state.
+  const visited = !!initialVisit;
+  const score = initialVisit?.score;
+  const actuals = (initialVisit?.actualSales ?? {}) as Record<string, number>;
+  const redistributions = initialVisit?.redistributions ?? [];
+  const alsoBought = initialVisit?.alsoBought ?? [];
 
-  const [briefing, setBriefing] = useState<Record<string, unknown> | null>(null);
+  // Hydrate the briefing from a previously-saved JSON payload when
+  // present so re-opening an already-visited customer renders the same
+  // briefing without re-calling the LLM.
+  const initialBriefing = useMemo<Record<string, unknown> | null>(() => {
+    if (!initialVisit?.preVisitBriefing) return null;
+    try {
+      const parsed = JSON.parse(initialVisit.preVisitBriefing);
+      return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+    } catch {
+      return null;
+    }
+  }, [initialVisit?.preVisitBriefing]);
+
+  const [briefing, setBriefing] = useState<Record<string, unknown> | null>(initialBriefing);
   const [briefingOpen, setBriefingOpen] = useState(false);
   const [briefingLoading, setBriefingLoading] = useState(false);
 
-  const score = visitResult?.score as VisitScore | undefined;
-  const visited = !!score;
-
-  // Actuals are authored by the backend (pulled live from YaumiLive) and
-  // returned in the visit payload. Missing keys mean "zero sold for that item".
-  const actuals = (visitResult?.actualSales ?? {}) as Record<string, number>;
-
-  const redistributions = (visitResult?.redistributions ?? []) as {
-    from: string; to: string; itemCode: string; quantity: number;
-  }[];
-
-  // Items the customer bought today that were NOT on their plan --
-  // awareness-only, doesn't affect score.
-  const alsoBought = (visitResult?.alsoBought ?? []) as { item_code: string; qty: number }[];
-
-  const handleVisit = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const res = await supervisionApi.processVisit(sessionId, customerCode);
-      const v = res.visit as unknown as Record<string, unknown>;
-      if (v.error) {
-        setError(String(v.error));
-        return;
-      }
-      setVisitResult(v);
-      onVisitComplete(v);
-    } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to process visit");
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const handleBriefing = async () => {
-    setBriefingLoading(true);
     setBriefingOpen(true);
+    // Already hydrated from saved data -- nothing to fetch.
+    if (briefing) return;
+    setBriefingLoading(true);
     try {
       const res = await analyticsApi.preVisitBriefing({
         customer_code: customerCode,
         customer_name: customerName,
         route_code: routeCode,
         date,
+        // Briefing analyzer accepts both PascalCase and camelCase for
+        // these fields (see llm_analytics/core/analyzer.py); pass the
+        // PascalCase rec verbatim so we don't have to maintain a second
+        // shape on the frontend.
         items: items.map((i) => ({
           itemCode: i.itemCode,
           itemName: i.itemName,
           recommendedQty: i.recommendedQty,
-          tier: i.tier,
-          source: i.source,
-          whyItem: i.whyItem,
-          whyQuantity: i.whyQuantity,
-          purchaseCycleDays: i.purchaseCycleDays,
-          daysSinceLastPurchase: i.daysSinceLastPurchase,
-          frequencyPercent: i.frequencyPercent,
-          trendFactor: i.trendFactor,
+          tier: i.rec.Tier,
+          source: i.rec.Source,
+          whyItem: i.rec.WhyItem,
+          whyQuantity: i.rec.WhyQuantity,
+          purchaseCycleDays: i.rec.PurchaseCycleDays,
+          daysSinceLastPurchase: i.rec.DaysSinceLastPurchase,
+          frequencyPercent: i.rec.FrequencyPercent,
+          trendFactor: i.rec.TrendFactor,
         })),
       });
-      setBriefing(res.data);
+      const payload = (res.data ?? {}) as Record<string, unknown>;
+      setBriefing(payload);
+      // Persist the structured briefing so re-opening the customer
+      // hydrates from the saved row instead of re-calling the LLM.
+      // Fire-and-forget: the server queues the DB write, we don't
+      // block the UI on it.
+      void supervisionApi.saveBriefing(sessionId, customerCode, JSON.stringify(payload));
     } catch {
       setBriefing({ briefing: "Briefing unavailable. Please try again.", key_items: [], heads_up: "" });
     } finally {
@@ -149,6 +179,7 @@ export default function CustomerVisit({
 
   const handleAiClick = () => {
     onRequestAnalysis({
+      sessionId,
       customerCode,
       customerName,
       items: items.map((i) => ({
@@ -158,6 +189,7 @@ export default function CustomerVisit({
         actualQuantity: actuals[i.itemCode] ?? 0,
       })),
       score: score ?? { score: 0, coverage: 0, accuracy: 0 },
+      initialAnalysis: initialVisit?.customerAnalysis ?? null,
     });
   };
 
@@ -209,24 +241,15 @@ export default function CustomerVisit({
               {items.map((it) => {
                 const actual = visited ? (actuals[it.itemCode] ?? 0) : null;
                 const delta = actual != null ? actual - it.recommendedQty : null;
-                // Build the row the explainability modal expects. Start
-                // from the raw PascalCase rec record (carries Signals,
-                // WhyItem, WhyQuantity, Confidence, etc.) and overlay the
-                // session-level customer/route/date so the modal header
-                // is fully populated even if the upstream rec was sparse.
-                const explainRow: Row = {
-                  ...(it.raw ?? {}),
-                  CustomerCode: customerCode,
-                  CustomerName: customerName,
-                  RouteCode: routeCode,
-                  TrxDate: date,
-                };
+                // The rec already carries CustomerCode / CustomerName /
+                // RouteCode / TrxDate from the engine; the modal reads
+                // them straight off the row, no overlay needed.
                 return (
                   <tr key={it.itemCode}>
                     <td className="px-2 py-2 font-medium text-text-primary">{it.itemCode}</td>
                     <td className="px-2 py-2 text-text-secondary">{it.itemName ?? "-"}</td>
                     <td className="px-2 py-2 text-right">
-                      <RecommendedValue row={explainRow} value={it.recommendedQty} />
+                      <RecommendedValue row={it.rec as Row} value={it.recommendedQty} />
                     </td>
                     <td className="px-2 py-2 text-right">
                       {actual == null ? (
@@ -255,31 +278,18 @@ export default function CustomerVisit({
 
           {!visited && (
             <div className="space-y-2">
-              <div className="flex items-center flex-wrap gap-3">
-                <Button
-                  variant={briefing ? "secondary" : "primary"}
-                  size="sm"
-                  loading={briefingLoading}
-                  onClick={handleBriefing}
-                >
-                  {briefing ? "Briefing read ✓" : "Read briefing"}
-                </Button>
-                <Button
-                  variant="primary"
-                  size="sm"
-                  loading={loading}
-                  disabled={!briefing}
-                  onClick={handleVisit}
-                >
-                  Mark visited
-                </Button>
-              </div>
-              {!briefing && !briefingLoading && (
-                <p className="text-caption text-text-tertiary">
-                  Read the briefing first — it unlocks visit recording.
-                </p>
-              )}
-              {error && <p className="text-caption text-danger-600">{error}</p>}
+              <Button
+                variant={briefing ? "secondary" : "primary"}
+                size="sm"
+                loading={briefingLoading}
+                onClick={handleBriefing}
+              >
+                {briefing ? "Briefing read ✓" : "Read briefing"}
+              </Button>
+              <p className="text-caption text-text-tertiary">
+                Actuals + score appear automatically as soon as the rep
+                invoices this customer.
+              </p>
             </div>
           )}
 
@@ -358,7 +368,7 @@ export default function CustomerVisit({
               <span className="text-body text-text-tertiary">Date</span>
               <Badge variant="neutral">{fmtDate(date)}</Badge>
               <span className="ml-auto text-body text-text-tertiary">
-                {fmtNum(items.length)} items · {fmtNum(items.reduce((n, i) => n + i.recommendedQty, 0))} units
+                {fmtNum(items.length)} items - {fmtNum(totalUnits)} units
               </span>
             </div>
 

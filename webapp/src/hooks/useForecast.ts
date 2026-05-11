@@ -11,15 +11,6 @@ export function useForecastSummary() {
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useTestPredictions(params?: Record<string, unknown>) {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["test-predictions", params ?? {}],
-    queryFn: () => forecastApi.getTestPredictions(params),
-    ...tier("dashboard"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
-
 export function useForecastRouteSummary(date?: string, enabled = true) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["forecast-route-summary", date ?? ""],
@@ -30,38 +21,67 @@ export function useForecastRouteSummary(date?: string, enabled = true) {
   return { data, loading: isLoading, error: error ? String(error) : null };
 }
 
-export function useFutureForecast(params?: Record<string, unknown>, enabled = true) {
+/**
+ * VanLoad route-detail page-view: one fetch carries the summary tiles,
+ * the top-N chart, and the table -- all pre-computed, pre-sorted, with
+ * one canonical field per concept. The page binds directly; no client-
+ * side aggregation, sort, or field substitution.
+ */
+export function useVanLoadPageView(
+  routeCode: string | undefined,
+  date: string | undefined,
+  enabled = true,
+  topN: number = 10,
+) {
+  const ready = enabled && Boolean(routeCode) && Boolean(date);
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["future-forecast", params ?? {}],
-    queryFn: () => forecastApi.getFutureForecast(params),
-    enabled,
+    queryKey: ["van-load-page-view", routeCode ?? "", date ?? "", topN],
+    queryFn: () => forecastApi.getVanLoadPageView(routeCode!, date!, topN),
+    enabled: ready,
     ...tier("windowed"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useModelMetrics(demandClass?: string) {
+/**
+ * Upcoming-plan drawer page-view: one fetch carries the horizon tiles,
+ * the daily chart series (with band on single-SKU views), and the
+ * line-item table. Server picks ``show_band`` and rounds wire bytes to
+ * match the route-summary contract; the drawer binds and renders.
+ */
+export function useForecastDrawerPageView(
+  routeCode: string | undefined,
+  itemCodes: string[] | undefined,
+  fromDate: string | undefined,
+  enabled = true,
+) {
+  const ready = enabled && Boolean(routeCode) && Boolean(fromDate);
+  const itemKey = (itemCodes ?? []).slice().sort().join("|");
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["model-metrics", demandClass ?? ""],
-    queryFn: () => forecastApi.getModelMetrics(demandClass),
-    ...tier("static"),
+    queryKey: [
+      "forecast-drawer-page-view",
+      routeCode ?? "",
+      fromDate ?? "",
+      itemKey,
+    ],
+    queryFn: () =>
+      forecastApi.getForecastDrawerPageView(routeCode, itemCodes, fromDate),
+    enabled: ready,
+    ...tier("windowed"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useClassSummary() {
+/**
+ * Resolved Pipeline page payload -- one fetch with per-step status,
+ * formatted metric / detail strings, cascade summary, and the global
+ * ``any_running`` flag pre-computed server-side. The page renders the
+ * response verbatim; no client-side resolution.
+ */
+export function useResolvedPipelineStatus() {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["class-summary"],
-    queryFn: () => forecastApi.getClassSummary(),
-    ...tier("static"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
-
-export function usePipelineStatus() {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["pipeline-status"],
-    queryFn: () => forecastApi.getAllPipelineStatus(),
+    queryKey: ["pipeline-resolved-status"],
+    queryFn: () => forecastApi.getResolvedPipelineStatus(),
     ...tier("pipeline"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
@@ -100,19 +120,53 @@ export function useUpdateRetrainConfig() {
   return mutation;
 }
 
+/**
+ * Per-day series + return metrics for the AccuracyDrawer's past-performance
+ * chart. Three plottable lines (original van load, reconciled load, actually
+ * sold) for the given route over the lookback window ending at ``endDate``.
+ */
+export function useReconciliationPastPerformance(
+  routeCode: string | undefined,
+  endDate: string | undefined,
+  lookbackDays: number,
+  enabled = true,
+  filters?: { item_codes?: string[]; category_codes?: string[] },
+) {
+  const ready = enabled && Boolean(routeCode) && Boolean(endDate);
+  const itemKey = (filters?.item_codes ?? []).slice().sort().join("|");
+  const catKey = (filters?.category_codes ?? []).slice().sort().join("|");
+  const { data, isLoading, error, refetch } = useQuery({
+    queryKey: ["reconciliation-past-performance", routeCode ?? "", endDate ?? "", lookbackDays, itemKey, catKey],
+    queryFn: () =>
+      forecastApi.getReconciliationPastPerformance(routeCode!, endDate!, lookbackDays, filters),
+    enabled: ready,
+    ...tier("windowed"),
+  });
+  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
+}
+
 export function useTriggerPipeline() {
   const qc = useQueryClient();
+  // Trigger mutations invalidate the resolved-status query (which the
+  // Pipeline page binds to) so the strip refreshes the moment a run
+  // starts. There is no longer a raw ``pipeline-status`` consumer.
+  const onSuccess = () =>
+    qc.invalidateQueries({ queryKey: ["pipeline-resolved-status"] });
   const train = useMutation({
     mutationFn: () => forecastApi.triggerTraining(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pipeline-status"] }),
+    onSuccess,
   });
   const inference = useMutation({
     mutationFn: () => forecastApi.triggerInference(),
-    onSuccess: () => qc.invalidateQueries({ queryKey: ["pipeline-status"] }),
+    onSuccess,
   });
+  // ``mutateAsync`` so callers can await the response and inspect
+  // ``success``/``message`` -- the server returns 200 with
+  // ``{success: false}`` for guard / preflight failures, so the toast
+  // wording must follow the payload, not the HTTP status.
   return {
-    triggerTrain: () => train.mutate(),
-    triggerInference: () => inference.mutate(),
+    triggerTrain: () => train.mutateAsync(),
+    triggerInference: () => inference.mutateAsync(),
     loading: train.isPending || inference.isPending,
     error: train.error || inference.error ? String(train.error || inference.error) : null,
   };

@@ -25,3 +25,17 @@ export function useUnplannedVisits(sessionId: string) {
     updatedAt: dataUpdatedAt,
   };
 }
+
+/**
+ * Saved visits for a (route, date), used to hydrate already-visited
+ * customers on mount. The query fires once per (route, date); a
+ * fresh visit completion invalidates this key so the hydration view
+ * stays in sync with the live state.
+ */
+export function useSavedVisits(routeCode: string, date: string) {
+  return useQuery({
+    queryKey: ["supervision-saved-visits", routeCode, date],
+    queryFn: () => supervisionApi.getSavedVisits(routeCode, date),
+    enabled: !!routeCode && !!date,
+  });
+}

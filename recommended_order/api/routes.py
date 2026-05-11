@@ -5,6 +5,7 @@ API routes for the recommended order service.
 from __future__ import annotations
 
 import logging
+import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -66,9 +67,6 @@ def summary(
     store: RecommendationStore = Depends(get_store),
 ):
     """Aggregated KPI summary for dashboard."""
-    from pathlib import Path
-    import re
-
     settings = get_settings()
     routes_configured = len(settings.route_codes)
 
@@ -232,26 +230,32 @@ def _corpus_field_distributions(
 def _load_feedback_adjustments(
     dm: DataManager, clamps: SafetyClamps,
 ) -> tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
-    """Sprint-4: read stored recs + supervision sessions in the rolling
+    """Sprint-4: read stored recs + supervision visits in the rolling
     window, compute per-(route, source) shrinkage multipliers + confidence,
     EMA-smooth against the persisted file, and return both.
 
     Opt-in via ``SafetyClamps.feedback_enabled``; cold-start safe
-    (returns empty dicts when no sessions exist).
+    (returns empty dicts when no visits exist or the supervision DB is
+    unreachable).
     """
     if not clamps.feedback_enabled:
         return {}, {}
+    db_loader = None
     try:
-        from sales_supervision.config.settings import get_settings as _ss
-        sessions_dir = str(Path(_ss().storage_dir) / "sessions")
+        # Lazy import keeps recommended_order's startup independent of
+        # the supervision module being importable in every deployment.
+        from sales_supervision.services.feedback_loader import SessionDbLoader
+        db_loader = SessionDbLoader()
+        if not db_loader.available:
+            logger.info("feedback disabled: supervision DB not configured")
+            return {}, {}
     except Exception as exc:
-        logger.info("feedback disabled: could not locate sessions dir (%s)", exc)
+        logger.info("feedback disabled: could not init supervision loader (%s)", exc)
         return {}, {}
     ro_settings = get_settings()
     return compute_feedback_adjustments(
         file_storage_dir=ro_settings.file_storage_dir,
-        sessions_dir=sessions_dir,
-        shared_data_dir=ro_settings.shared_data_dir,
+        db_loader=db_loader,
         clamps=clamps,
     )
 
@@ -428,17 +432,20 @@ def _generate_routes(
     adj, conf = _load_feedback_adjustments(dm, clamps)
     engine.set_feedback_adjustments(adj, confidence=conf)
 
-    details: List[Dict[str, Any]] = []
-    total_records = 0
-    generated_routes = 0
+    # Per-route generation is independent: same engine, distinct DataManager
+    # slices, distinct store keys, distinct DB rows. Run in a thread pool so
+    # cold-path latency scales sub-linearly with the route count. The engine
+    # is mostly numpy/pandas under the hood; the GIL releases on those calls
+    # so threads give a real wall-clock win.
+    workers = max(1, int(get_settings().generation_concurrency))
 
-    for rc in to_generate:
+    def _one(rc: str) -> Dict[str, Any]:
         try:
             van_items = dm.get_van_items(rc, target_date)
             journey_custs = dm.get_journey_customers(rc, target_date)
             if not van_items or not journey_custs:
-                details.append({"route": rc, "status": "skipped", "reason": "no van items or journey customers"})
-                continue
+                return {"route": rc, "status": "skipped",
+                        "reason": "no van items or journey customers", "records": 0}
 
             df = engine.generate(
                 customer_df=dm.get_customer_data(rc),
@@ -452,22 +459,29 @@ def _generate_routes(
             )
 
             if df.empty:
-                details.append({"route": rc, "status": "empty", "records": 0})
-                continue
+                return {"route": rc, "status": "empty", "records": 0}
 
             save_result = store.save(df, target_date, rc)
             saved = int(save_result.get("records_saved", 0))
-            total_records += saved
-            generated_routes += 1
 
             if pusher.available:
                 pusher.push_dataframe(df, target_date, rc)
 
-            details.append({"route": rc, "status": "generated", "records": saved})
-
+            return {"route": rc, "status": "generated", "records": saved}
         except Exception as exc:
             logger.error("Failed to generate for route %s: %s", rc, exc, exc_info=True)
-            details.append({"route": rc, "status": "error", "error": str(exc)})
+            return {"route": rc, "status": "error", "error": str(exc), "records": 0}
+
+    details: List[Dict[str, Any]] = []
+    if workers <= 1 or len(to_generate) <= 1:
+        details = [_one(rc) for rc in to_generate]
+    else:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            details = list(pool.map(_one, to_generate))
+
+    total_records = sum(int(d.get("records", 0)) for d in details)
+    generated_routes = sum(1 for d in details if d.get("status") == "generated")
 
     return {
         "routes_requested": len(to_generate),

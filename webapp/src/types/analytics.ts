@@ -2,7 +2,6 @@ export interface AnalysisResponse {
   success: boolean;
   analysis_type: string;
   data: Record<string, unknown>;
-  cached: boolean;
 }
 
 export interface CacheStatsResponse {

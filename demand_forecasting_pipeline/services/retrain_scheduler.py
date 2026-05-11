@@ -17,67 +17,89 @@ import os
 import tempfile
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Optional
 
 import httpx
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.src.evaluation.metrics import composite_summary
+from demand_forecasting_pipeline.observability import (
+    DRIFT_PCT,
+    LAST_TRAIN_AGE_SECONDS,
+)
+from demand_forecasting_pipeline.src.evaluation.metrics import (
+    composite_kwargs_from_yaml,
+    composite_summary,
+)
 
 logger = logging.getLogger(__name__)
 
+def _utcnow() -> datetime:
+    """All persisted timestamps in this module are UTC, ISO-8601, with
+    timezone offset. Centralised so the offset never accidentally goes
+    naive again (Python 3.12 deprecated ``datetime.utcnow``)."""
+    return datetime.now(timezone.utc)
+
 # Window resolution for "recent" accuracy. data_import is the canonical
 # authority on what counts as a working day, so we ask it for the
-# trailing-7-working-days span instead of guessing on calendar weeks.
-# Short timeout: this is on a 5-min-cached UI hot path and we always
-# have the calendar fallback ready.
-_LOOKBACK_PATH = "/api/v1/data/eda/lookback-window"
-_LOOKBACK_QUERY = "last_7_working_days"
-_LOOKBACK_TIMEOUT_SECONDS = 5.0
+# trailing-N-working-days span instead of guessing on calendar weeks.
+# All three knobs (path, query name, timeout) are env-overridable via
+# Settings so a deployment can point at a different upstream without
+# code changes. Short timeout: this is on a cached UI hot path and we
+# always have the calendar fallback ready.
 
 # ---------------------------------------------------------------------------
 #  AutoRetrainConfig -- thread-safe JSON persistence
 # ---------------------------------------------------------------------------
 
-
 class AutoRetrainConfig:
     """Loads / saves the retrain config JSON with atomic writes and a lock."""
-
-    _DEFAULT: Dict[str, Any] = {
-        "enabled": False,
-        "frequency_days": 14,
-        "last_auto_retrain": None,
-        "next_scheduled": None,
-        "auto_inference_after_train": True,
-        "history": [],
-    }
-
-    _MAX_HISTORY = 10
 
     def __init__(self, path: Optional[str] = None, settings: Optional[Settings] = None) -> None:
         s = settings or get_settings()
         self._path = Path(path or s.retrain_config_path)
         self._lock = threading.Lock()
-        self._data: Dict[str, Any] = {}
+        self._data: dict[str, Any] = {}
+        # Settings-driven defaults so deployments can adjust frequency
+        # and history bounds without code changes.
+        self._max_history: int = int(s.retrain_history_max)
+        self._rotation_eps: float = float(s.baseline_rotation_convergence_pp)
+        self._default_frequency_days: int = int(s.retrain_default_frequency_days)
+        self._defaults: dict[str, Any] = {
+            "enabled": False,
+            "frequency_days": self._default_frequency_days,
+            "last_auto_retrain": None,
+            "next_scheduled": None,
+            "auto_inference_after_train": True,
+            "history": [],
+            # Baseline tracking. ``baseline_accuracy_pct`` is the
+            # reference against which "current" accuracy is compared
+            # for drift; initialised on the first read
+            # (``baseline_source='initialized'``) and later refreshed
+            # to a rolling median of recent_accuracy values
+            # (``baseline_source='rolling_median_30d'``).
+            "baseline_accuracy_pct": None,
+            "baseline_source": None,
+            "baseline_set_at": None,
+        }
         self.load()
 
     # -- persistence --------------------------------------------------------
 
-    def load(self) -> Dict[str, Any]:
+    def load(self) -> dict[str, Any]:
         with self._lock:
             if self._path.exists():
                 try:
                     self._data = json.loads(self._path.read_text(encoding="utf-8"))
                 except (json.JSONDecodeError, OSError) as exc:
                     logger.warning("Failed to read retrain config, using defaults: %s", exc)
-                    self._data = dict(self._DEFAULT)
+                    self._data = dict(self._defaults)
             else:
-                self._data = dict(self._DEFAULT)
+                self._data = dict(self._defaults)
             # Fill missing keys with defaults
-            for k, v in self._DEFAULT.items():
+            for k, v in self._defaults.items():
                 self._data.setdefault(k, v)
             return dict(self._data)
 
@@ -103,7 +125,7 @@ class AutoRetrainConfig:
                     pass
                 raise
 
-    def get(self) -> Dict[str, Any]:
+    def get(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._data)
 
@@ -111,17 +133,19 @@ class AutoRetrainConfig:
 
     def _compute_next_scheduled(self) -> Optional[str]:
         last = self._data.get("last_auto_retrain")
-        freq = self._data.get("frequency_days", 14)
+        freq = self._data.get("frequency_days", self._default_frequency_days)
         if not self._data.get("enabled"):
             return None
         if last:
             try:
                 dt = datetime.fromisoformat(str(last))
+                if dt.tzinfo is None:
+                    dt = dt.replace(tzinfo=timezone.utc)
                 return (dt + timedelta(days=freq)).isoformat()
             except (ValueError, TypeError):
                 pass
         # No previous run -- schedule from now
-        return (datetime.now() + timedelta(days=freq)).isoformat()
+        return (_utcnow() + timedelta(days=freq)).isoformat()
 
     # -- queries ------------------------------------------------------------
 
@@ -133,9 +157,76 @@ class AutoRetrainConfig:
             if not ns:
                 return True  # never run & enabled -> due now
             try:
-                return datetime.now() >= datetime.fromisoformat(str(ns))
+                scheduled = datetime.fromisoformat(str(ns))
+                if scheduled.tzinfo is None:
+                    scheduled = scheduled.replace(tzinfo=timezone.utc)
+                return _utcnow() >= scheduled
             except (ValueError, TypeError):
                 return False
+
+    # -- baseline ----------------------------------------------------------
+
+    def update_baseline(self, accuracy_pct: float, source: str) -> None:
+        """Persist a new baseline. Idempotent: callers can invoke this
+        unconditionally; only the new value (and a timestamp) are
+        written. ``source`` is stored so consumers can tell whether the
+        baseline came from a rolling median or a cold-start initialization.
+        """
+        with self._lock:
+            self._data["baseline_accuracy_pct"] = float(accuracy_pct)
+            self._data["baseline_source"] = source
+            self._data["baseline_set_at"] = _utcnow().isoformat()
+        self.save()
+
+    def baseline(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "value": self._data.get("baseline_accuracy_pct"),
+                "source": self._data.get("baseline_source"),
+                "set_at": self._data.get("baseline_set_at"),
+            }
+
+    def history(self) -> list[dict[str, Any]]:
+        with self._lock:
+            return list(self._data.get("history", []))
+
+    def rotate_baseline_if_eligible(
+        self, *, window: int, min_history: int,
+    ) -> Optional[dict[str, Any]]:
+        """Rotate the persisted baseline to a rolling median when enough
+        successful runs are on record.
+
+        Returns the new baseline dict on rotation, ``None`` otherwise.
+        Idempotent within a tick: the rotation only fires when the
+        median of the trailing ``window`` ``accuracy_after`` values
+        differs from the current baseline by more than 0.01pp, so a
+        flat history doesn't churn the persisted file.
+
+        Median (not mean) so a single failed run with degenerate accuracy
+        can't drag the reference; window-bounded so the baseline tracks
+        the model's actual behaviour over time rather than freezing on
+        the day-1 ``initialized`` value.
+        """
+        with self._lock:
+            history = list(self._data.get("history", []))
+        scored = [
+            float(h["accuracy_after"]) for h in history[:window]
+            if isinstance(h.get("accuracy_after"), (int, float))
+            and h.get("status") == "success"
+        ]
+        if len(scored) < min_history:
+            return None
+        scored_sorted = sorted(scored)
+        n = len(scored_sorted)
+        median = (
+            scored_sorted[n // 2] if n % 2
+            else (scored_sorted[n // 2 - 1] + scored_sorted[n // 2]) / 2.0
+        )
+        current = self.baseline().get("value")
+        if current is not None and abs(float(current) - median) < self._rotation_eps:
+            return None
+        self.update_baseline(median, source="rolling_median_30d")
+        return self.baseline()
 
     # -- mutations ----------------------------------------------------------
 
@@ -144,7 +235,7 @@ class AutoRetrainConfig:
         enabled: Optional[bool] = None,
         frequency_days: Optional[int] = None,
         auto_inference_after_train: Optional[bool] = None,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         with self._lock:
             if enabled is not None:
                 self._data["enabled"] = enabled
@@ -156,42 +247,51 @@ class AutoRetrainConfig:
         self.save()
         return self.get()
 
-    def record_run(self, entry: Dict[str, Any]) -> None:
+    def record_run(self, entry: dict[str, Any]) -> None:
         with self._lock:
-            history: List[Dict[str, Any]] = self._data.get("history", [])
+            history: list[dict[str, Any]] = self._data.get("history", [])
             history.insert(0, entry)
-            self._data["history"] = history[: self._MAX_HISTORY]
-            self._data["last_auto_retrain"] = entry.get("date", datetime.now().isoformat())
+            self._data["history"] = history[: self._max_history]
+            self._data["last_auto_retrain"] = entry.get("date", _utcnow().isoformat())
             self._data["next_scheduled"] = self._compute_next_scheduled()
         self.save()
-
 
 # ---------------------------------------------------------------------------
 #  Drift detection (live: predicted vs YaumiLive actuals)
 # ---------------------------------------------------------------------------
 
-_NO_DRIFT: Dict[str, Any] = {
+_NO_DRIFT: dict[str, Any] = {
     "status": "stable",
+    # ``recent_accuracy`` is the apples-to-apples number: raw model
+    # forecast vs invoiced actuals, scored under the SAME composite
+    # function the training-time baseline uses. ``delta`` is therefore a
+    # pure model-quality signal -- not contaminated by the reconciliation
+    # lift that the operational tile sees.
     "recent_accuracy": None,
     "baseline_accuracy": None,
     "delta": None,
     "source": "unavailable",
+    # Operational lens on the same window: V5_b reconciled van-load vs
+    # invoiced actuals. Always None on the test_set fallback path -- test
+    # predictions don't have a van-load to reconcile against.
+    "recent_reconciled_accuracy": None,
+    # Sample size that fed the recent score (cells where actual > 0 AND
+    # predicted > 0). Surfaced so the UI can render "n cells scored".
+    "rows_compared": None,
 }
 
-# Drift result cache — avoids hammering YaumiLive on every UI page load.
+# Drift result cache - avoids hammering YaumiLive on every UI page load.
 # The Step Functions drift job calls compute_drift_status with
 # ``bypass_cache=True``, so this TTL only applies to interactive API calls.
-_drift_cache: Dict[str, Any] = {}
+_drift_cache: dict[str, Any] = {}
 _drift_cache_ts: float = 0.0
-_DRIFT_CACHE_TTL = 5 * 60  # seconds
-
 
 def compute_drift_status(
     artifact_svc: Any,
     accuracy_svc: Any = None,
     settings: Optional[Settings] = None,
     bypass_cache: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Compare live post-training accuracy against the training-time baseline.
 
     **Primary (live)**: queries the last 7 working days of predictions vs
@@ -213,20 +313,26 @@ def compute_drift_status(
     """
     global _drift_cache, _drift_cache_ts
 
-    if not bypass_cache and _drift_cache and (time.time() - _drift_cache_ts) < _DRIFT_CACHE_TTL:
+    s = settings or get_settings()
+    if (
+        not bypass_cache
+        and _drift_cache
+        and (time.time() - _drift_cache_ts) < s.drift_cache_ttl_seconds
+    ):
         return dict(_drift_cache)
 
-    s = settings or get_settings()
     warn = s.drift_warn_threshold
     alert = s.drift_alert_threshold
 
     # Baseline accuracy = training-time WAPE over the test split. Computed
     # inline so this module does not import from the API layer (services must
-    # not depend on routes — the dependency runs the other direction).
+    # not depend on routes - the dependency runs the other direction).
     baseline_acc = _training_baseline_accuracy(artifact_svc)
 
     # --- Primary: live accuracy from YaumiLive ---
     recent_acc: Optional[float] = None
+    recent_reconciled: Optional[float] = None
+    rows_compared: Optional[int] = None
     source = "unavailable"
 
     if accuracy_svc is not None and getattr(accuracy_svc, "available", False):
@@ -238,27 +344,47 @@ def compute_drift_status(
             # artefact (rows beyond the cap silently skip the WAPE
             # numerator).
             result = accuracy_svc.get_comparison(start_date=start, end_date=end, limit=None)
-            if result.get("success") and result.get("summary"):
-                live_acc = result["summary"].get("accuracy_pct")
+            summary = result.get("summary") or {}
+            if result.get("success") and summary:
+                # ``model_accuracy_pct`` is the raw model forecast scored
+                # under the same composite function as the baseline -- the
+                # ONLY honest input to the recent-vs-baseline delta.
+                # ``reconciled_accuracy_pct`` rides alongside as the
+                # operational lens for the UI to surface separately.
                 # ``None`` is "no data scored" (no overlapping rows in the
                 # window). A real 0.0 is "model missed everything" -- a
                 # genuine signal we must NOT suppress, otherwise drift
                 # silently falls through to the test-set fallback when
                 # the model is at its worst.
+                live_acc = summary.get("model_accuracy_pct")
                 if live_acc is not None:
-                    recent_acc = round(live_acc, 2)
+                    recent_acc = round(float(live_acc), 2)
+                    recon = summary.get("reconciled_accuracy_pct")
+                    recent_reconciled = round(float(recon), 2) if recon is not None else None
+                    rc = summary.get("rows_compared")
+                    rows_compared = int(rc) if rc is not None else None
                     source = "live"
         except Exception as exc:
             logger.warning("Drift: live comparison failed, falling back to test-set: %s", exc)
 
     # --- Fallback: test-set split ---
+    # No reconciliation in this path -- test predictions don't have a
+    # van-load. ``recent_reconciled_accuracy`` stays None so the UI knows
+    # to hide that row.
     if recent_acc is None:
         recent_acc = _test_set_recent_accuracy(artifact_svc)
         if recent_acc is not None:
             source = "test_set"
 
     if baseline_acc is None or recent_acc is None:
-        result = {**_NO_DRIFT, "recent_accuracy": recent_acc, "baseline_accuracy": baseline_acc, "source": source}
+        result = {
+            **_NO_DRIFT,
+            "recent_accuracy": recent_acc,
+            "baseline_accuracy": baseline_acc,
+            "source": source,
+            "recent_reconciled_accuracy": recent_reconciled,
+            "rows_compared": rows_compared,
+        }
         _drift_cache, _drift_cache_ts = result, time.time()
         return result
 
@@ -272,26 +398,30 @@ def compute_drift_status(
         "baseline_accuracy": baseline_acc,
         "delta": delta,
         "source": source,
+        "recent_reconciled_accuracy": recent_reconciled,
+        "rows_compared": rows_compared,
     }
+    DRIFT_PCT.set(float(delta) if delta is not None else 0.0)
     _drift_cache, _drift_cache_ts = result, time.time()
     return result
-
 
 def _recent_window(settings: Settings) -> tuple[str, str]:
     """Resolve the (start_date, end_date) for the "recent" drift window.
 
-    Asks data_import for the trailing 7 working-day span so drift aligns
-    with the dashboard's reporting period. Falls back to 7 calendar days
-    when ``DF_DATA_IMPORT_URL`` is unset or the service is unreachable --
-    drift never silently fails because of a downstream config gap.
+    Asks data_import for the trailing N working-day span so drift aligns
+    with the dashboard's reporting period. Falls back to a calendar-day
+    window when DF_DATA_IMPORT_URL is unset or the service is unreachable
+    so drift never silently fails because of a downstream config gap.
+    Both the lookup endpoint and the calendar fallback length come from
+    Settings.
     """
     base = (settings.data_import_url or "").rstrip("/")
     if base:
         try:
             resp = httpx.get(
-                f"{base}{_LOOKBACK_PATH}",
-                params={"lookback": _LOOKBACK_QUERY},
-                timeout=_LOOKBACK_TIMEOUT_SECONDS,
+                f"{base}{settings.lookback_endpoint_path}",
+                params={"lookback": settings.lookback_query},
+                timeout=settings.lookback_timeout_seconds,
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -300,54 +430,78 @@ def _recent_window(settings: Settings) -> tuple[str, str]:
             if payload.get("available") and start and end:
                 return start, end
         except Exception as exc:
-            logger.warning("Drift: lookback-window fetch failed, using 7 calendar days: %s", exc)
-    now = datetime.now()
+            logger.warning(
+                "Drift: lookback-window fetch failed, using %d calendar days: %s",
+                settings.drift_fallback_lookback_days, exc,
+            )
+    now = _utcnow()
     return (
-        (now - timedelta(days=7)).strftime("%Y-%m-%d"),
+        (now - timedelta(days=settings.drift_fallback_lookback_days)).strftime("%Y-%m-%d"),
         now.strftime("%Y-%m-%d"),
     )
 
-
 def _composite_accuracy(
-    actual: pd.Series, pred: pd.Series, demand_class: Optional[pd.Series] = None,
+    actual: pd.Series,
+    pred: pd.Series,
+    demand_class: Optional[pd.Series] = None,
+    *,
+    settings: Optional[Settings] = None,
 ) -> Optional[float]:
-    """Coerce to float, run :func:`composite_summary`, return accuracy_pct
-    or None when nothing scored."""
+    """Coerce to float, run :func:`composite_summary` under the SAME
+    config-driven tolerances training used, return accuracy_pct or None
+    when nothing scored.
+
+    ``settings`` is taken from ``get_settings()`` when not supplied; the
+    optional kwarg keeps the function unit-testable without monkey
+    patching the settings module."""
     a = pd.to_numeric(actual, errors="coerce").fillna(0).to_numpy()
     p = pd.to_numeric(pred, errors="coerce").fillna(0).to_numpy()
     cls = demand_class.astype(str).to_numpy() if demand_class is not None else None
-    stats = composite_summary(a, p, cls)
+    s = settings or get_settings()
+    kwargs = composite_kwargs_from_yaml(s.pipeline_config)
+    stats = composite_summary(a, p, cls, **kwargs)
     return stats["accuracy_pct"] if stats["rows_compared"] > 0 else None
 
 
 def _training_baseline_accuracy(svc: Any) -> Optional[float]:
-    """Composite accuracy over the full held-out test set."""
+    """Composite accuracy over the full held-out test set.
+
+    Column resolution lives on ``ArtifactService`` so this code path and
+    the summary endpoint share one schema-discipline implementation --
+    a future artifact rename only needs to update the resolver, not
+    every caller."""
     try:
-        test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
+        test_df, _ = svc.get_test_predictions(
+            limit=int(get_settings().summary_test_predictions_limit), offset=0,
+        )
     except Exception as exc:
         logger.warning("Drift: baseline fetch failed: %s", exc)
         return None
     if test_df.empty:
         return None
-    actual_col = getattr(svc, "target_col", "") or ""
-    if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
+    pred_col = svc.resolve_prediction_column(test_df)
+    actual_col = svc.resolve_actual_column(test_df)
+    if pred_col is None or actual_col is None:
         return None
     cls = test_df["class"] if "class" in test_df.columns else None
-    return _composite_accuracy(test_df[actual_col], test_df["prediction"], cls)
+    return _composite_accuracy(test_df[actual_col], test_df[pred_col], cls)
 
 
 def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
     """Composite accuracy on the last 7 days of test_predictions.csv --
-    fallback when the live DB is unreachable."""
+    fallback when the live DB is unreachable. Shares column resolution
+    with the baseline path via ``ArtifactService``."""
     try:
-        test_df, _ = svc.get_test_predictions(limit=50_000, offset=0)
+        test_df, _ = svc.get_test_predictions(
+            limit=int(get_settings().summary_test_predictions_limit), offset=0,
+        )
     except Exception:
         return None
     if test_df.empty:
         return None
-
-    actual_col = getattr(svc, "target_col", "") or ""
-    if not actual_col or actual_col not in test_df.columns or "prediction" not in test_df.columns:
+    pred_col = svc.resolve_prediction_column(test_df)
+    actual_col = svc.resolve_actual_column(test_df)
+    if pred_col is None or actual_col is None:
         return None
 
     if "TrxDate" in test_df.columns:
@@ -357,15 +511,14 @@ def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
             test_df = test_df[dates >= (max_date - pd.Timedelta(days=7))]
 
     cls = test_df["class"] if "class" in test_df.columns else None
-    return _composite_accuracy(test_df[actual_col], test_df["prediction"], cls)
+    return _composite_accuracy(test_df[actual_col], test_df[pred_col], cls)
 # ---------------------------------------------------------------------------
 #  Scheduler job: check_and_retrain
 # ---------------------------------------------------------------------------
 
 # Module-level state to track an in-progress auto-retrain
-_auto_retrain_pending: Dict[str, Any] = {}
+_auto_retrain_pending: dict[str, Any] = {}
 _pending_lock = threading.Lock()
-
 
 def check_and_retrain(
     config: AutoRetrainConfig,
@@ -378,14 +531,54 @@ def check_and_retrain(
 
     global _auto_retrain_pending
 
+    # Refresh the Prometheus gauge so the metric stays fresh between
+    # interactive API calls.
+    update_last_train_age(artifact_service)
+
+    # Lazy baseline init: on first tick (or whenever a previous deployment
+    # left the baseline unset) seed it from the current recent_accuracy
+    # so drift starts measuring as soon as the service has data. The
+    # ``initialized`` source label tells consumers this is a cold-start
+    # baseline (vs the eventual ``rolling_median_30d``).
+    persisted_baseline = config.baseline()
+    if persisted_baseline.get("value") is None:
+        try:
+            from demand_forecasting_pipeline.api.routes.summary import forecast_summary
+            current = forecast_summary(artifact_service).accuracy_pct
+            if current is not None:
+                config.update_baseline(float(current), source="initialized")
+                logger.info(
+                    "auto_retrain: baseline initialized at %.2f%% (source=initialized)",
+                    current,
+                )
+        except Exception as exc:
+            logger.warning("auto_retrain: baseline initialization deferred: %s", exc)
+    else:
+        # Rotation: once enough successful retrain runs are on record,
+        # promote the baseline from ``initialized`` to a rolling median
+        # of the trailing window. Idempotent and bounded -- only fires
+        # when the median actually moves.
+        try:
+            rotated = config.rotate_baseline_if_eligible(
+                window=int(s.baseline_history_window),
+                min_history=int(s.baseline_min_history),
+            )
+            if rotated is not None:
+                logger.info(
+                    "auto_retrain: baseline rotated to %.2f%% (source=%s, set_at=%s)",
+                    rotated.get("value"), rotated.get("source"), rotated.get("set_at"),
+                )
+        except Exception as exc:
+            logger.warning("auto_retrain: baseline rotation skipped: %s", exc)
+
     # 1. Check if a previous auto-retrain completed and record it
     with _pending_lock:
         if _auto_retrain_pending:
             train_status = pipeline_service.get_status("train")
             st = train_status.get("status", "")
             if st in ("success", "failed"):
-                entry: Dict[str, Any] = {
-                    "date": _auto_retrain_pending.get("started_at", datetime.now().isoformat()),
+                entry: dict[str, Any] = {
+                    "date": _auto_retrain_pending.get("started_at", _utcnow().isoformat()),
                     "trigger": "scheduled",
                     "accuracy_before": _auto_retrain_pending.get("accuracy_before"),
                     "accuracy_after": None,
@@ -449,8 +642,103 @@ def check_and_retrain(
     if result.get("success"):
         with _pending_lock:
             _auto_retrain_pending = {
-                "started_at": datetime.now().isoformat(),
+                "started_at": _utcnow().isoformat(),
                 "accuracy_before": accuracy_before,
             }
     else:
         logger.warning("Auto-retrain: failed to start training: %s", result.get("message"))
+
+# ---------------------------------------------------------------------------
+#  APScheduler -- replaces the old hand-rolled retrain loop in api/app.py
+# ---------------------------------------------------------------------------
+
+def start_scheduler(
+    *,
+    interval_hours: int,
+    job: Callable[[], None],
+    logger: Any | None = None,
+) -> Any:
+    """Build and start a ``BackgroundScheduler`` that runs ``job`` every
+    ``interval_hours``. Returns the scheduler so the caller can shut it
+    down on app exit.
+
+    APScheduler computes the next run time from a fixed wall-clock anchor,
+    not from accumulated ``sleep`` durations -- so a slow job iteration
+    no longer pushes every subsequent invocation later. ``misfire_grace_time``
+    is generous (1 hour) so a short outage doesn't drop the next tick.
+
+    Failure modes:
+      * Scheduler thread dies -> APScheduler restarts the executor.
+      * Job raises -> APScheduler logs and continues with the next tick.
+      * Import-time fallback: if APScheduler isn't installed, we emit a
+        warning and return a no-op stub. The service still boots; drift
+        detection still works on demand via the API.
+    """
+    log = logger if logger is not None else logging.getLogger(__name__)
+    try:
+        from apscheduler.schedulers.background import BackgroundScheduler
+        from apscheduler.triggers.interval import IntervalTrigger
+    except ImportError:
+        log.warning(
+            "APScheduler not installed -- auto-retrain check disabled. "
+            "Install apscheduler>=3.10 to enable scheduled drift checks."
+        )
+        return None
+
+    scheduler = BackgroundScheduler(timezone="UTC", daemon=True)
+    scheduler.add_job(
+        _safe_run(job, log),
+        trigger=IntervalTrigger(hours=int(interval_hours)),
+        id="auto_retrain_check",
+        replace_existing=True,
+        misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
+    )
+    scheduler.start()
+    return scheduler
+
+def stop_scheduler(scheduler: Any) -> None:
+    """Best-effort scheduler shutdown. Tolerates ``None`` so callers can
+    pass through the value returned by ``start_scheduler`` without
+    branching on the import-fallback path."""
+    if scheduler is None:
+        return
+    try:
+        scheduler.shutdown(wait=False)
+    except Exception as exc:  # pragma: no cover -- shutdown best-effort
+        logger.warning("retrain_scheduler shutdown failed: %s", exc)
+
+def _safe_run(job: Callable[[], None], log: Any) -> Callable[[], None]:
+    """Wrap ``job`` so APScheduler never sees an unhandled exception
+    (which would otherwise be logged but silently re-arm); we record
+    a structured warning so ops monitoring sees the failure."""
+
+    def _runner() -> None:
+        try:
+            job()
+        except Exception as exc:  # noqa: BLE001
+            log.warning("auto_retrain_job_failed", error=repr(exc))
+
+    return _runner
+
+def update_last_train_age(artifact_svc: Any) -> None:
+    """Refresh the ``df_last_train_age_seconds`` Prometheus gauge.
+
+    Called from the retrain check tick so the metric stays fresh
+    without a separate poller. Safe to call at any time -- silently
+    skips when the artifact summary isn't available.
+    """
+    try:
+        summary = artifact_svc.get_training_summary() or {}
+        meta = summary.get("metadata") or {}
+        ts = meta.get("trained_at")
+        if not ts:
+            return
+        trained_at = datetime.fromisoformat(str(ts))
+        if trained_at.tzinfo is None:
+            trained_at = trained_at.replace(tzinfo=timezone.utc)
+        age = (_utcnow() - trained_at).total_seconds()
+        LAST_TRAIN_AGE_SECONDS.set(max(0.0, age))
+    except Exception:
+        pass

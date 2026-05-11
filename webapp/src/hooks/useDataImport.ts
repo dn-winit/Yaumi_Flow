@@ -36,45 +36,32 @@ export function useBusinessKpis(lookback?: string, filters?: Partial<DashboardFi
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useForecastRows(
-  lookback?: string,
-  filters?: Partial<DashboardFilters>,
-  enabled = true,
-) {
-  const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-forecast-rows", lookback ?? "default", filterKey(filters)],
-    queryFn: () => dataImportApi.getForecastRows(lookback, filters),
-    enabled,
-    ...tier("dashboard"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null, refetch };
-}
-
 export function useFilterDimensions(filters?: Partial<DashboardFilters>, enabled = true) {
-  // Item selections don't shrink the upstream dropdowns, so we exclude
-  // them from the cache key to avoid pointless refetches. ``enabled``
-  // lets a caller defer the fetch until the dropdowns are actually
-  // about to render -- keeps refresh latency tight on pages that don't
-  // immediately need the picker (e.g. workflow refreshed with a route
-  // already in the URL).
-  const upstream = {
+  // Pass the full selection vector (including ``item_codes``) so the
+  // backend can return ``trimmed_selections`` -- the cleaned-up codes
+  // the FilterBar applies when an upstream change invalidates a
+  // downstream pick. ``enabled`` lets callers defer the fetch until
+  // the dropdowns actually need to render.
+  const selections = {
     warehouse_codes: filters?.warehouse_codes,
     route_codes: filters?.route_codes,
     category_codes: filters?.category_codes,
+    item_codes: filters?.item_codes,
   };
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-filter-dimensions", filterKey(upstream)],
-    queryFn: () => dataImportApi.getFilterDimensions(upstream),
+    queryKey: ["eda-filter-dimensions", filterKey(selections)],
+    queryFn: () => dataImportApi.getFilterDimensions(selections),
     enabled,
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useItemCatalog() {
+export function useItemCatalog(enabled = true) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["eda-items"],
     queryFn: () => dataImportApi.getItemCatalog(),
+    enabled,
     ...tier("static"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };

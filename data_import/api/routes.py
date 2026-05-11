@@ -14,7 +14,6 @@ from data_import.api.schemas import (
     DataSummaryResponse,
     DatasetInfo,
     FilterDimensionsResponse,
-    ForecastRowsResponse,
     HealthResponse,
     ImportAllRequest,
     ImportAllResponse,
@@ -24,6 +23,7 @@ from data_import.api.schemas import (
     ItemStatsResponse,
     LiveCustomerSalesResponse,
     LiveRouteSalesResponse,
+    LiveVanCompositionResponse,
     LookbackWindowResponse,
     SalesOverviewResponse,
     StatusResponse,
@@ -49,7 +49,9 @@ def import_dataset(
     """
     result: dict = {}
     try:
-        result = importer.import_dataset(req.dataset, req.mode)
+        result = importer.import_dataset(
+            req.dataset, req.mode, lookback_days=req.lookback_days,
+        )
         return ImportResponse(**result)
     finally:
         if result.get("new_rows", 0) > 0:
@@ -65,7 +67,7 @@ def import_all(
     """Import all datasets. Same try/finally invariant as /import."""
     results: dict = {}
     try:
-        results = importer.import_all(req.mode)
+        results = importer.import_all(req.mode, lookback_days=req.lookback_days)
         success = all(r.get("success", False) for r in results.values())
         return ImportAllResponse(success=success, results=results)
     finally:
@@ -190,15 +192,21 @@ def eda_filter_dimensions(
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
     category_codes: List[str] = Query(default=[], alias="category_codes"),
+    item_codes: List[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Cascading filter options for the dashboard FilterBar.
 
     Each downstream dimension is the set of unique values present in the
     sales slice that already matches every upstream selection. Items are
-    filtered by all three upstream levels.
+    filtered by all three upstream levels. ``trimmed_selections`` returns
+    the same input vector with any codes no longer present in the
+    cascaded option sets dropped, so the FilterBar applies the cleaned
+    selection without re-validating client-side.
     """
-    return svc.get_filter_dimensions(warehouse_codes, route_codes, category_codes)
+    return svc.get_filter_dimensions(
+        warehouse_codes, route_codes, category_codes, item_codes,
+    )
 
 
 # ------------------------------------------------------------------
@@ -228,6 +236,19 @@ def eda_live_customer_sales(
     return svc.get_live_customer_sales(route_code, date, customer_code)
 
 
+@router.get("/eda/live-van-composition", response_model=LiveVanCompositionResponse)
+def eda_live_van_composition(
+    route_code: str = Query(..., description="Route code"),
+    date: str = Query(..., description="YYYY-MM-DD"),
+    svc: EdaService = Depends(get_eda_service),
+):
+    """Reconstructed van state for one (route, date): per item -- past
+    leftover, today's allocation, total van load, sold, bad/good returns,
+    leftover-now, and end-of-day closing if posted. 60-s cached.
+    """
+    return svc.get_live_van_composition(route_code, date)
+
+
 @router.get("/eda/item-stats", response_model=ItemStatsResponse)
 def eda_item_stats(
     item_code: str = Query(..., description="Item code to compute rolling stats for"),
@@ -236,26 +257,5 @@ def eda_item_stats(
 ):
     """Rolling averages (last week / 4 weeks / 3 months / 6 months) for a given item."""
     return svc.get_item_stats(item_code, route_code)
-
-
-@router.get("/eda/forecast-rows", response_model=ForecastRowsResponse)
-def eda_forecast_rows(
-    lookback: str = Query(
-        default="last_30_working_days",
-        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
-    ),
-    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
-    route_codes: List[str] = Query(default=[], alias="route_codes"),
-    category_codes: List[str] = Query(default=[], alias="category_codes"),
-    item_codes: List[str] = Query(default=[], alias="item_codes"),
-    svc: EdaService = Depends(get_eda_service),
-):
-    """Per-(date, route, item) forecast vs actual rows for the VanLoad
-    Past-analysis drawer. Same merge as /eda/business-kpis -- one shared
-    compute path so the drawer numbers always reconcile with the dashboard.
-    """
-    return svc.get_forecast_rows(
-        lookback, warehouse_codes, route_codes, category_codes, item_codes,
-    )
 
 

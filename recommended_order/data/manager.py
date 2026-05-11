@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -191,18 +192,24 @@ class DataManager:
         return df
 
     def get_van_items(self, route_code: str, target_date: str) -> Dict[str, int]:
-        """Return {ItemCode: predicted_quantity} for a route on a date.
+        """Return ``{ItemCode: van_load_quantity}`` for one (route, date).
 
-        For the date the supervisor is planning, include predictions from
-        BOTH the Forecast split (forward-horizon model output) and the Test
-        split (training holdout that happens to cover the same date with
-        a *different* set of items — the model emits one or the other per
-        (route, date, item) pair, never both, so the union is non-overlapping).
-        Picking only the Forecast split here arbitrarily drops the test-split
-        items, including the daily staples that drive most of the basket;
-        the result is recommendations for ~half the items the route actually
-        carries. Union, then take the per-item max predicted qty so a pair
-        present in both splits doesn't get double-counted.
+        ``van_load_quantity`` is the rep's **complete physical capacity
+        for the day** = ``opening_stock`` (yesterday's closing + today's
+        depot allocation) + ``recommended_load`` (the V5_b fresh-issuance
+        the engine adds on top). Both numbers come from the same
+        canonical reconciliation engine ``enrich_with_load`` so the
+        recommendation engine and the van-load tile see the same total
+        no matter which path computed it.
+
+        Without ``opening_stock`` in the sum, an item already covered by
+        leftover stock (``recommended_load == 0``) would be invisible to
+        the recommendation engine -- the rep has physical units to sell
+        but nothing would get recommended.
+
+        The forecast frame unions the Forecast and Test splits and takes
+        the per-item max so pairs covered by both never double-count.
+        The helper handles engine fallback internally.
         """
         demand = self.get_demand_data(route_code)
         if demand.empty:
@@ -213,15 +220,85 @@ class DataManager:
         if same_day.empty:
             return {}
 
-        van = (
-            same_day.groupby("ItemCode")["Predicted"]
-            .max()
-            .clip(lower=0)
-            .round()
-            .astype(int)
-            .to_dict()
+        # Prefer the DB-mirrored counterfactual values straight from the
+        # CSV. ``RecommendedLoad`` and ``OpeningStock`` are written by
+        # the reconciliation refresh cron after a full forward
+        # simulation per (route, item) -- ``OpeningStock`` reflects our
+        # policy's accumulated leftover walked across the multi-day
+        # horizon, NOT a fresh day-1-zero recompute. Re-running
+        # ``enrich_with_load`` here on a single-day slice would reset
+        # the simulation to day 1 and silently produce opening = 0 for
+        # every row, which would understate van capacity.
+        #
+        # Fallback (cold install, or refresh hasn't run yet): inline
+        # enrich on the day's slice. Degraded -- opening will be 0 --
+        # but no worse than the column-absent path that already lived
+        # here.
+        has_recload  = "RecommendedLoad" in same_day.columns
+        has_opening  = "OpeningStock"    in same_day.columns
+        if has_recload and has_opening:
+            per_item = (
+                same_day.groupby("ItemCode", as_index=False)
+                .agg({"RecommendedLoad": "max", "OpeningStock": "max"})
+            )
+            out: Dict[str, int] = {}
+            for r in per_item.itertuples(index=False):
+                fresh   = float(getattr(r, "RecommendedLoad") or 0.0)
+                opening = float(getattr(r, "OpeningStock")    or 0.0)
+                total = max(0.0, fresh + opening)
+                if total > 0:
+                    # Ceil so a 35.28-unit truck capacity reads as 36,
+                    # not 35. Matches the DB-canonical contract that
+                    # quantity columns round to the next whole unit and
+                    # the load_lower_bound / load_upper_bound rounding
+                    # in the engine, so forecast (FLOAT) and rec (INT)
+                    # surfaces align byte-for-byte.
+                    out[str(r.ItemCode)] = int(math.ceil(total))
+            return out
+
+        # ---- Degraded fallback: inline enrich (refresh hasn't run) ----
+        agg_map = {"Predicted": "max"}
+        for col in ("LowerBound", "UpperBound"):
+            if col in same_day.columns:
+                agg_map[col] = "max"
+        if "DemandClass" in same_day.columns:
+            agg_map["DemandClass"] = "first"
+        per_item = (
+            same_day.groupby("ItemCode", as_index=False)
+            .agg(agg_map)
+            .assign(RouteCode=str(route_code), TrxDate=target_dt)
         )
-        return {k: v for k, v in van.items() if v > 0}
+        enriched = self.reconcile_demand_frame(per_item)
+        load_col = "RecommendedLoad" if "RecommendedLoad" in enriched.columns else "Predicted"
+        has_opening_col = "opening_stock" in enriched.columns
+        out: Dict[str, int] = {}
+        for r in enriched.itertuples(index=False):
+            fresh = float(getattr(r, load_col) or 0.0)
+            opening = float(getattr(r, "opening_stock", 0.0) or 0.0) if has_opening_col else 0.0
+            total = max(0.0, fresh + opening)
+            if total > 0:
+                out[str(r.ItemCode)] = int(math.ceil(total))
+        return out
+
+    # ------------------------------------------------------------------
+    # Bulk reconciliation -- thin wrapper around the single canonical
+    # helper. Engine fallback, closing-stock caching, and the V5_b
+    # formula all live there. This module just hands off the frame.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def reconcile_demand_frame(df: pd.DataFrame) -> pd.DataFrame:
+        """Return a copy of ``df`` with a ``RecommendedLoad`` column.
+
+        ``df`` must carry ``RouteCode``, ``ItemCode``, ``TrxDate`` and
+        ``Predicted``. The helper fills ``RecommendedLoad`` with the
+        clipped raw forecast if the engine can't load, so callers never
+        need a separate fallback path.
+        """
+        if df is None or df.empty:
+            return df
+        from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
+        return enrich_with_load(df, output_col="RecommendedLoad")
 
     def get_item_names(self, route_code: Optional[str] = None) -> Dict[str, str]:
         """Return {ItemCode: ItemName} lookup.

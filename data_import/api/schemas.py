@@ -12,10 +12,24 @@ from pydantic import BaseModel, Field
 class ImportRequest(BaseModel):
     dataset: str = Field(description="customer_data | journey_plan | sales_recent | demand_forecast")
     mode: str = Field(default="incremental", description="incremental | full")
+    lookback_days: Optional[int] = Field(
+        default=None,
+        ge=1,
+        le=730,
+        description=(
+            "Optional refresh window for incremental mode. When set, the "
+            "importer re-pulls the last N days regardless of CSV state, "
+            "then dedup-merges (last-write-wins on numeric aggregates). "
+            "Use after a producer overwrites existing rows -- pure-append "
+            "incremental (`trx_date > max_csv_date`) would miss those "
+            "UPDATEs. Ignored when ``mode=full``."
+        ),
+    )
 
 
 class ImportAllRequest(BaseModel):
     mode: str = Field(default="incremental", description="incremental | full")
+    lookback_days: Optional[int] = Field(default=None, ge=1, le=730)
 
 
 class ImportResponse(BaseModel):
@@ -114,13 +128,15 @@ class BusinessKpisResponse(_AvailableEnvelope):
     lost_opportunity: Optional[Dict[str, Any]] = None
 
 
-class ForecastRowsResponse(_AvailableEnvelope):
-    lookback: Optional[str] = None
-    anchor_date: Optional[str] = None
-    working_days: Optional[int] = None
-    covered_routes: Optional[int] = None
-    covered_days: Optional[int] = None
-    rows: List[Dict[str, Any]] = Field(default_factory=list)
+class TrimmedFilterSelections(BaseModel):
+    """The input selection vector with codes that no longer exist in the
+    cascaded option sets dropped. Frontend applies it verbatim so a
+    stale code never lingers and silently filters results to nothing.
+    """
+    warehouse_codes: List[str] = Field(default_factory=list)
+    route_codes: List[str] = Field(default_factory=list)
+    category_codes: List[str] = Field(default_factory=list)
+    item_codes: List[str] = Field(default_factory=list)
 
 
 class FilterDimensionsResponse(BaseModel):
@@ -128,6 +144,9 @@ class FilterDimensionsResponse(BaseModel):
     routes: List[Dict[str, Any]] = Field(default_factory=list)
     categories: List[Dict[str, Any]] = Field(default_factory=list)
     items: List[Dict[str, Any]] = Field(default_factory=list)
+    trimmed_selections: TrimmedFilterSelections = Field(
+        default_factory=TrimmedFilterSelections,
+    )
 
 
 class ItemCatalogResponse(BaseModel):
@@ -156,4 +175,13 @@ class LiveCustomerSalesResponse(_AvailableEnvelope):
     customer_code: Optional[str] = None
     date: Optional[str] = None
     items: List[Dict[str, Any]] = Field(default_factory=list)
+    fetched_at: Optional[str] = None
+
+
+class LiveVanCompositionResponse(_AvailableEnvelope):
+    """Per-item van composition for one (route, date)."""
+    route_code: Optional[str] = None
+    date: Optional[str] = None
+    items: List[Dict[str, Any]] = Field(default_factory=list)
+    totals: Dict[str, Any] = Field(default_factory=dict)
     fetched_at: Optional[str] = None

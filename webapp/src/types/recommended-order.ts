@@ -13,9 +13,15 @@ export interface RecommendationItem {
   DaysSinceLastPurchase: number;
   PurchaseCycleDays: number;
   FrequencyPercent: number;
-  PatternQuality: number;
   PurchaseCount: number;
   TrendFactor?: number;
+  /** Narrative explanation for "why this item" (engine-generated). Rendered in RecommendationModal. */
+  WhyItem?: string;
+  /** Narrative explanation for "how we sized it" (engine-generated). Rendered in RecommendationModal. */
+  WhyQuantity?: string;
+  /** [0, 1] strength of signals behind the suggestion. Rendered in RecommendationModal as a percentage badge. */
+  Confidence?: number;
+  /** Legacy fields surfaced when WhyItem/WhyQuantity not yet populated. */
   ReasonStatus?: string;
   ReasonExplanation?: string;
 }
@@ -106,12 +112,24 @@ export interface AdoptionSummary {
   skus_recommended: number;
   skus_adopted: number;
   skus_bought: number;
+  // Server-derived metrics. Were re-computed on every render in the
+  // legacy drawer; lifted to backend so tile values, the highlights
+  // strip, and the chart subtitle all read from one source.
+  pick_accuracy_pct: number | null;
+  perfect_pick_pct: number | null;
+  days_with_recs: number;
+  active_days: number;
+  best_day: { date: string; pct: number } | null;
 }
 export interface AdoptionDailyPoint {
   date: string;
   recommended: number;
   adopted: number;
-  adoption_pct: number;
+  /** ``null`` on working days where no recommendations were generated.
+   *  The chart breaks at those points (legitimate gaps in the rep's
+   *  schedule); a real zero (recommended > 0 but adopted = 0) plots
+   *  as 0.0. */
+  adoption_pct: number | null;
 }
 export interface AdoptionItemRow {
   item_code: string;

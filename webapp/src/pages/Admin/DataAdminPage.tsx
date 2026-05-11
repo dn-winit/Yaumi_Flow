@@ -5,7 +5,9 @@ import {
 } from "@/hooks/useDataImport";
 import Loading from "@/components/ui/Loading";
 import Card from "@/components/ui/Card";
+import Alert from "@/components/ui/Alert";
 import PageHeader from "@/components/layout/PageHeader";
+import { fmtDuration } from "@/lib/format";
 import DatasetStatusTable from "./DatasetStatusTable";
 import ImportActions from "./ImportActions";
 
@@ -40,29 +42,13 @@ export default function DataAdminPage() {
     <div className="space-y-6">
       <PageHeader title="Data Management" />
 
-      {error && (
-        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
-          {error}
-        </div>
-      )}
-
-      {importDataset.error && (
-        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
-          Import error: {importDataset.error}
-        </div>
-      )}
-
-      {importAll.error && (
-        <div className="bg-danger-50 border border-danger-100 rounded-lg p-4 text-body text-danger-700">
-          Import all error: {importAll.error}
-        </div>
-      )}
-
+      {error && <Alert variant="error">{error}</Alert>}
+      {importDataset.error && <Alert variant="error">Import error: {importDataset.error}</Alert>}
+      {importAll.error && <Alert variant="error">Import all error: {importAll.error}</Alert>}
       {importDataset.result && (
-        <div className="bg-success-50 border border-success-100 rounded-lg p-4 text-body text-success-700">
-          {importDataset.result.message} -- {importDataset.result.new_rows} new
-          rows ({importDataset.result.duration_seconds.toFixed(1)}s)
-        </div>
+        <Alert variant="success">
+          {importDataset.result.message} -- {importDataset.result.new_rows} new rows ({fmtDuration(importDataset.result.duration_seconds)})
+        </Alert>
       )}
 
       <Card title="Import Actions">

@@ -1,12 +1,17 @@
 """
-Scheduled jobs -- daily recommendation generation and data refresh.
+Scheduled jobs -- daily recommendation generation.
 
-Flow (runs at ``RO_SCHEDULER_GENERATION_HOUR``, default 04:00 Asia/Dubai):
-    1. Refresh cached data from source DBs (journey plan, demand forecast, customers).
-    2. For every route on today's journey plan, generate + save + DB-push recs.
-    3. Retry up to ``max_retries`` with backoff on transient failures.
+One cron, runs at ``RO_SCHEDULER_GENERATION_HOUR`` (default 04:30 Asia/Dubai):
+    1. Force a CSV re-read (covers any cascade-failed reconciliation refresh)
+    2. For every route on today's journey plan, generate + save + DB-push recs
+    3. Retry up to ``max_retries`` with backoff on transient failures
 
-If the cron job fails or is missed, the API also auto-generates on first
+We deliberately do NOT keep a separate cache-refresh cron: the in-process
+``DataManager.refresh()`` invoked at the start of generation, plus the
+mtime-keyed ``ensure_fresh()`` that every endpoint calls, cover every
+case the old 03:20 refresh job did.
+
+If the cron fails or is missed, the API also auto-generates on first
 ``POST /get`` for a date -- so the UI never sees empty data.
 """
 
@@ -50,6 +55,13 @@ def _run_daily_generation(settings: Settings) -> dict:
 
     today = _today_in_tz(settings.scheduler.timezone)
     dm = get_data_manager()
+    # Force a CSV re-read before generation. The 03:30 reconciliation
+    # cascades a data_import refresh that updates demand_forecast.csv;
+    # if that cascade failed silently, mtime-based ``ensure_fresh``
+    # would no-op and we'd consume yesterday's reconciled values. An
+    # explicit ``refresh()`` is idempotent (~100 ms) and guarantees we
+    # see whatever is on disk right now, regardless of cascade health.
+    dm.refresh()
     routes = _routes_for_today(dm, today) or dm.get_route_codes()
 
     if not routes:
@@ -90,46 +102,18 @@ def _generate_daily(settings: Settings | None = None) -> None:
     logger.error("[cron] Daily generation FAILED after %d attempts: %s", sc.max_retries, last_error)
 
 
-def _refresh_data() -> None:
-    """Reload data from the shared CSVs (03:00 Dubai).
-
-    data_import owns the database refresh; this job only re-reads the CSVs
-    once they're current so the in-memory frames pick up the new rows.
-    """
-    from recommended_order.api.dependencies import get_data_manager
-
-    logger.info("[cron] Data refresh starting")
-    result = get_data_manager().refresh()
-    # Sprint-1: drop cached per-route calibration so next generate recomputes
-    try:
-        from recommended_order.core.calibration import invalidate_cache
-        invalidate_cache()
-    except Exception:  # pragma: no cover -- non-fatal
-        logger.debug("calibration cache invalidate failed", exc_info=True)
-    if result["success"]:
-        logger.info("[cron] Data refresh done: %s", result["data"])
-    else:
-        logger.error("[cron] Data refresh errors: %s", result["errors"])
-
-
 def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
-    """Start the background scheduler with configured jobs."""
+    """Start the background scheduler with the daily generation job."""
     global _scheduler
     settings = settings or get_settings()
     sc = settings.scheduler
 
     _scheduler = BackgroundScheduler(timezone=sc.timezone)
 
-    # Data refresh first (default 03:30), then generation (default 04:00)
-    _scheduler.add_job(
-        _refresh_data,
-        CronTrigger(hour=sc.cache_refresh_hour, minute=sc.cache_refresh_minute, timezone=sc.timezone),
-        id="daily_data_refresh",
-        name="Daily Data Refresh",
-        replace_existing=True,
-        misfire_grace_time=3600,
-    )
-
+    # Single cron: daily generation. The forced ``dm.refresh()`` inside
+    # ``_run_daily_generation`` makes a separate "data refresh" cron
+    # redundant -- the same call covers it and runs in the same context
+    # as the generation it serves.
     _scheduler.add_job(
         _generate_daily,
         CronTrigger(hour=sc.generation_hour, minute=sc.generation_minute, timezone=sc.timezone),
@@ -137,12 +121,13 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
         name="Daily Recommendation Generation",
         replace_existing=True,
         misfire_grace_time=3600,
+        coalesce=True,
+        max_instances=1,
     )
 
     _scheduler.start()
     logger.info(
-        "Scheduler started -- refresh %02d:%02d, generation %02d:%02d (%s), retries=%d",
-        sc.cache_refresh_hour, sc.cache_refresh_minute,
+        "Scheduler started -- generation %02d:%02d (%s), retries=%d",
         sc.generation_hour, sc.generation_minute,
         sc.timezone, sc.max_retries,
     )

@@ -80,7 +80,14 @@ class PlanningService:
         ]
 
         journey = self._dm.get_journey_plan(route_code=route_code)
-        demand = self._dm.get_demand_data(route_code=route_code)
+        # Reconciled van load -- the planning roll-up reports what the
+        # rep should *load*, not the raw model "what will sell". Single
+        # canonical engine via ``reconcile_demand_frame``; falls back to
+        # raw Predicted if the engine cannot load.
+        demand = self._dm.reconcile_demand_frame(
+            self._dm.get_demand_data(route_code=route_code)
+        )
+        load_col = "RecommendedLoad" if "RecommendedLoad" in demand.columns else "Predicted"
         prices = self._dm.get_item_prices()
 
         daily: List[Dict[str, Any]] = []
@@ -100,14 +107,14 @@ class PlanningService:
                 else 0
             )
 
-            qty = float(fc["Predicted"].sum()) if "Predicted" in fc.columns and not fc.empty else 0.0
+            qty = float(fc[load_col].sum()) if load_col in fc.columns and not fc.empty else 0.0
             revenue = 0.0
-            if not fc.empty and "Predicted" in fc.columns and "ItemCode" in fc.columns:
+            if not fc.empty and load_col in fc.columns and "ItemCode" in fc.columns:
                 for code, group in fc.groupby("ItemCode"):
                     price = prices.get(str(code))
                     if price is None:
                         continue
-                    revenue += float(group["Predicted"].sum()) * price
+                    revenue += float(group[load_col].sum()) * price
 
             daily.append({
                 "date": day,

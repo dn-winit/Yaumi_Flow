@@ -1,11 +1,18 @@
 import os
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from ..utils.config_loader import ensure_dirs, load_config, resolve_dtypes
+from ..utils.config_loader import (
+    ensure_dirs,
+    load_config,
+    resolve_dtypes,
+    resolve_recursive_iterations,
+)
 from ..utils.logger import get_logger
+from ._metadata import build_training_metadata
 from ..utils.io_utils import (
     ceil_int_columns, save_json, save_pickle, save_dataframe, pair_mask,
 )
@@ -29,15 +36,17 @@ from ..feature_engineering.builder import build_features
 from ..models.registry import build_model, is_available
 from ..models.ensemble import weighted_average_ensemble, weights_from_metric
 from ..tuning.optuna_tuner import tune_model
-from ..evaluation.metrics import compute_all, composite_summary
+from ..evaluation.metrics import (
+    compute_all, composite_summary, composite_kwargs_from_cfg,
+)
+from ..data_processing.flags import FLAG_COLUMNS as _FLAG_COLUMNS
 from ..routing import Route, Router, build_pair_signals
 
 
 # Flag columns must never leak into the feature matrix. They encode
 # train-time labels whose inference-time values would be either stale
 # (lifecycle flags) or trivially zero (suspicious_zero), and either would
-# bias the model.
-_FLAG_COLUMNS = ("suspicious_zero", "is_new_launch", "is_likely_eol")
+# bias the model. Single source of truth: ``data_processing/flags.py``.
 META_FEATURE_EXCLUDE = {"class", *_FLAG_COLUMNS}
 
 # Definitional seasonal cycle lengths per pandas freq letter. These are
@@ -76,7 +85,7 @@ def _inject_granularity_aware_defaults(
 
 def _reset_artifact_dirs(cfg: dict) -> int:
     """Delete every artifact file from the previous run so a fresh training
-    pass never inherits leftovers — old class pickles whose classes no
+    pass never inherits leftovers - old class pickles whose classes no
     longer exist, prediction CSVs with stale schema columns, outlier bounds
     fit on a different config, etc.
 
@@ -95,7 +104,7 @@ def _reset_artifact_dirs(cfg: dict) -> int:
                 removed += 1
             except OSError:
                 # Best-effort: a file held open by another process (rare
-                # — usually only an open log handle) is skipped, not fatal.
+                # - usually only an open log handle) is skipped, not fatal.
                 pass
     return removed
 
@@ -177,7 +186,7 @@ def _per_pair_evaluate(
 
     If ``pair_routes`` is supplied, the candidate pool per pair is restricted
     to that pair's route-allowed models (and the ensemble component always
-    stays eligible — it's not listed in routes but gets composed of already
+    stays eligible - it's not listed in routes but gets composed of already
     allowed models).
     """
     from ..utils.io_utils import ensure_tuple
@@ -221,11 +230,43 @@ def run_training(config_path, on_step=None):
         on_step: optional ``(step_name, status) -> None`` callback fired after
             each major stage completes, so the caller can report live progress.
     """
-    _step = on_step or (lambda *_: None)
-
     cfg = load_config(config_path)
     ensure_dirs(cfg)
     logger = get_logger("train", cfg["paths"]["logs_dir"], cfg["project"]["log_level"])
+
+    # Per-pipeline-run id used by ``step_timer`` so every step's structured
+    # log line + Prometheus histogram observation share a correlation id.
+    import time as _time
+    import uuid as _uuid
+    from demand_forecasting_pipeline.observability import (
+        PIPELINE_STEP_DURATION,
+    )
+    run_id = _uuid.uuid4().hex[:12]
+    _step_starts: dict[str, float] = {}
+
+    def _step(step: str, status: str) -> None:
+        """Emit progress + observe step duration in the Prometheus histogram.
+
+        Called by the existing pipeline at ``running``/``completed``/
+        ``failed`` boundaries; we layer the metric observation on top so
+        ``df_pipeline_step_duration_seconds`` actually populates in
+        production. The user-supplied ``on_step`` callback (UI progress)
+        fires afterwards so its semantics stay unchanged.
+        """
+        if status == "running":
+            _step_starts[step] = _time.perf_counter()
+        elif status in ("completed", "failed"):
+            t0 = _step_starts.pop(step, None)
+            if t0 is not None:
+                PIPELINE_STEP_DURATION.labels(
+                    step=step, status=status,
+                ).observe(_time.perf_counter() - t0)
+            logger.info(
+                "step_%s pipeline=train step=%s run_id=%s",
+                status, step, run_id,
+            )
+        if on_step is not None:
+            on_step(step, status)
 
     # Clear every artifact file from any previous run before writing new ones.
     # Training is the sole producer of these files; stale leftovers (old
@@ -330,11 +371,16 @@ def run_training(config_path, on_step=None):
 
     logger.info("Step 9: per-pair outlier treatment (flag-aware, bounds from train window)")
     outlier_cfg = cfg["cleaning"].get("per_pair_outlier", {}) or {}
+    # Snapshot the panel BEFORE outlier clipping so the data-quality report
+    # describes what actually entered the classifier (the audit trail), not
+    # the post-clip distribution. The two-line copy is cheap; correctness is
+    # the win.
+    panel_pre_clip = agg.copy()
     outlier_bounds = fit_outlier_bounds(train_window, group_keys, target_col, outlier_cfg)
     agg = apply_outlier_bounds(
         agg, outlier_bounds, group_keys, target_col, outlier_cfg, classes=classes_df,
     )
-    # Persist bounds so inference clips the same rows to the same values —
+    # Persist bounds so inference clips the same rows to the same values -
     # otherwise inference's features would systematically differ from the
     # ones the model was trained on.
     if outlier_bounds is not None and not outlier_bounds.empty:
@@ -358,6 +404,35 @@ def run_training(config_path, on_step=None):
     horizon = int(cfg.get("inference", {}).get("forecast_horizon", 0))
     full_range_end = agg[date_col].max() + period_offset(freq, horizon)
     full_date_range = build_date_range(agg[date_col].min(), full_range_end, freq)
+
+    # Compute the target encoding ONCE from the train window and freeze it
+    # to disk. Inference loads this artifact verbatim so encoded values are
+    # stable across runs and match the matrix the model was fit on. Without
+    # persistence the encoding silently drifts as new history accumulates
+    # between retrains.
+    te_cfg = cfg["feature_engineering"].get("target_encoding", {}) or {}
+    te_artifact: tuple[pd.DataFrame, float] | None = None
+    if te_cfg.get("enabled", False):
+        from ..feature_engineering.target_encoding import (
+            compute_target_encoding, save_target_encoding,
+        )
+        te_smoothing = int(te_cfg.get("smoothing", 10))
+        te_df_frozen, te_global_mean = compute_target_encoding(
+            train_window, group_keys, target_col, te_smoothing,
+        )
+        te_artifact = (te_df_frozen, te_global_mean)
+        save_target_encoding(
+            os.path.join(cfg["paths"]["artifacts_dir"], "target_encoding.json"),
+            encoding_df=te_df_frozen,
+            global_mean=te_global_mean,
+            group_keys=group_keys,
+            smoothing=te_smoothing,
+        )
+        logger.info(
+            "target_encoding: persisted %d pair entries (global_mean=%.4f, smoothing=%d)",
+            len(te_df_frozen), te_global_mean, te_smoothing,
+        )
+
     feats = build_features(
         agg, group_keys, date_col, target_col, classes_df, cfg["feature_engineering"],
         holiday_cfg=cfg.get("holidays"),
@@ -365,7 +440,7 @@ def run_training(config_path, on_step=None):
         salary_cycle_cfg=cfg.get("salary_cycle"),
         granularity=freq,
         full_date_range=full_date_range,
-        target_encoding_source=train_window,
+        target_encoding_artifact=te_artifact,
         forecast_horizon=horizon,
     )
 
@@ -401,16 +476,89 @@ def run_training(config_path, on_step=None):
     )
 
     # Pair-level lifecycle signals (used by routing) are computed at the
-    # train-window edge — same threshold the lifecycle row-flagger uses, so
+    # train-window edge - same threshold the lifecycle row-flagger uses, so
     # the two views stay in lockstep.
+    # Lifecycle signals (is_new_launch / is_likely_eol) MUST be computed
+    # against train-window-only data: the lifecycle helper uses the
+    # panel's max date as the reference for "silent tail" and "periods
+    # since first sale". If we passed the full ``agg`` (which includes
+    # the val + test horizons), test-window silence would inflate the
+    # silent-tail length and the launch-anchor would shift forward,
+    # flipping legit-active pairs to ``is_likely_eol`` and established
+    # pairs to ``is_new_launch``. Both signals drive routing rules, so
+    # the leakage would silently mis-route those pairs to MA/naive at
+    # inference time.
     pair_signals = build_pair_signals(
-        agg, group_keys, expl,
+        train_window, group_keys, expl,
         date_col=date_col,
         target_col=target_col,
         new_launch_periods=int(lifecycle_cfg.get("new_launch_periods", 0)),
         eol_silent_periods=int(lifecycle_cfg.get("eol_silent_periods", 0)),
         split_audit_df=split_audit,
     )
+    # Pattern-aware signals (trend / seasonality / near-boundary) merged
+    # in so the new routing rules in config.yaml can fire. Computed on
+    # train_window only to avoid leakage; thresholds + windows all
+    # config-driven via the ``treatment`` block.
+    treatment_cfg = cfg.get("treatment") or {}
+    if treatment_cfg:
+        from ..routing.pair_treatment import compute_pattern_signals
+        try:
+            pattern_signals = compute_pattern_signals(
+                train_window,
+                group_keys=group_keys,
+                date_col=date_col,
+                target_col=target_col,
+                granularity=freq,
+                recent_window_periods=int(treatment_cfg.get(
+                    "recent_window_periods",
+                    cfg.get("explainability", {}).get("recent_window_periods", 28),
+                )),
+                growing_threshold=float(
+                    (treatment_cfg.get("trend") or {}).get("growing_threshold", 0.10)
+                ),
+                declining_threshold=float(
+                    (treatment_cfg.get("trend") or {}).get("declining_threshold", -0.10)
+                ),
+                seasonal_lag=(treatment_cfg.get("seasonal") or {}).get("lag"),
+                adi_threshold=float(classification_cfg["adi_intermittent_threshold"]),
+                cv2_threshold=float(classification_cfg["cv2_erratic_threshold"]),
+                adi_boundary_tolerance=float(
+                    (treatment_cfg.get("boundary") or {}).get("adi_tolerance", 0.10)
+                ),
+                cv2_boundary_tolerance=float(
+                    (treatment_cfg.get("boundary") or {}).get("cv2_tolerance", 0.05)
+                ),
+                classes_df=classes_df,
+            )
+            pair_signals = pair_signals.merge(
+                pattern_signals, on=group_keys, how="left",
+            )
+            # Defaults for pairs missing from the pattern frame (defensive):
+            for col, default in (
+                ("trend_slope", 0.0),
+                ("trend_direction", "stable"),
+                ("seasonal_strength", 0.0),
+                ("near_class_boundary", False),
+            ):
+                if col in pair_signals.columns:
+                    pair_signals[col] = pair_signals[col].fillna(default)
+            logger.info(
+                "Pattern signals: %d declining, %d growing, %d strongly seasonal, %d near-boundary",
+                int((pair_signals["trend_direction"] == "declining").sum())
+                if "trend_direction" in pair_signals.columns else 0,
+                int((pair_signals["trend_direction"] == "growing").sum())
+                if "trend_direction" in pair_signals.columns else 0,
+                int((pair_signals["seasonal_strength"] >= 0.40).sum())
+                if "seasonal_strength" in pair_signals.columns else 0,
+                int(pair_signals["near_class_boundary"].sum())
+                if "near_class_boundary" in pair_signals.columns else 0,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Pattern signals failed (%s); routing falls back to "
+                "lifecycle/classification signals only.", exc,
+            )
     enabled = cfg["models"]["enabled"]
     router = Router.from_config(
         cfg.get("routing"),
@@ -424,17 +572,22 @@ def run_training(config_path, on_step=None):
         sum(1 for r in pair_routes.values() if r.fired_rules),
     )
 
-    # Data-quality report — built once with everything known at this point:
+    # Data-quality report - built once with everything known at this point:
     # raw stats, validation report, post-processing panel stats, flag counts,
     # and split-balance summary.
+    # Use the pre-clip snapshot so the report's target stats describe
+    # what was actually fed to the classifier and feature engineer; the
+    # post-clip ``agg`` would silently deflate zero/extreme counts.
     dq_report = build_data_quality_report(
-        raw=raw, panel=agg,
+        raw=raw, panel=panel_pre_clip,
         group_keys=group_keys, target_col=target_col, date_col=date_col,
         validation=validation_report,
         raw_path=raw_path,
         pairs_dropped_inactive=pairs_dropped_inactive,
     )
     dq_report.post_processing["split_balance"] = split_summary
+    # Free the snapshot now that the report has consumed it.
+    del panel_pre_clip
     save_json(dq_report.as_dict(), os.path.join(cfg["paths"]["artifacts_dir"], "data_quality.json"))
     logger.info(
         "data_quality report saved: %d pairs, %d flagged rows",
@@ -456,12 +609,17 @@ def run_training(config_path, on_step=None):
     feature_cols_by_class: dict[str, list[str]] = {}
 
     # Route-driven coverage: union of models any pair in the class asked for.
-    # Any class menu item that's not in this coverage won't be fit — nothing
+    # Any class menu item that's not in this coverage won't be fit - nothing
     # will ever select it, so the fit would be wasted work.
-    pair_to_class = dict(zip(
-        map(tuple, classes_df.reset_index()[group_keys].itertuples(index=False, name=None)),
-        classes_df["class"].tolist(),
-    ))
+    # Pair (route, item) tuple -> class string. ``set_index`` preserves
+    # tuple keys natively when the index is a MultiIndex on group_keys,
+    # which avoids itertuples + zip overhead at fleet scale.
+    pair_to_class = (
+        classes_df.reset_index()
+        .set_index(group_keys)["class"]
+        .astype(str)
+        .to_dict()
+    )
     route_coverage_by_class = Router.class_model_coverage(pair_routes, pair_to_class)
 
     # Route-driven HP tuning budget, aggregated at class level. HP tuning in
@@ -478,8 +636,12 @@ def run_training(config_path, on_step=None):
         if not class_routes:
             return False, 1.0
         skip_votes = sum(1 for r in class_routes if r.skip_hp_tuning)
-        multipliers = sorted(r.hp_trials_multiplier for r in class_routes)
-        median_mult = multipliers[len(multipliers) // 2]
+        # statistics.median averages the middle two for even-length
+        # lists; the previous indexing picked the upper middle, biasing
+        # tuning effort upward when the class was evenly split between
+        # 1.0x and 1.5x multipliers.
+        from statistics import median as _median
+        median_mult = _median(r.hp_trials_multiplier for r in class_routes)
         return skip_votes > len(class_routes) / 2, float(median_mult)
 
     artifacts = {
@@ -494,7 +656,7 @@ def run_training(config_path, on_step=None):
             "feature_cols": [],
             "per_class_feature_cols": {},
             "meta_cols": [c for c in (meta_cols or []) if c in feats.columns],
-            # Thresholds used for this run's classification — persisted so
+            # Thresholds used for this run's classification - persisted so
             # any ``pair_classes.csv`` can be audited against the exact
             # cut-points that produced it.
             "classification_thresholds": {
@@ -507,10 +669,23 @@ def run_training(config_path, on_step=None):
         },
     }
     test_pred_records = []
-    metrics_records = []
+    metrics_records: list[dict] = []
+    # Captured val+train-fit models -- the SAME ones used to score the
+    # direct-prediction test metrics. Kept around so we can run a paired
+    # recursive multi-step pass over the test window AFTER the per-class
+    # loop completes. Without this snapshot, the prod-refit step
+    # overwrites mdl_full and the recursive evaluator would have to use a
+    # model that already saw the test data (leakage).
+    val_fit_models_by_class: dict[str, dict[str, Any]] = {}
     pair_model_lookup = []
 
-    for cls in classes_df["class"].unique():
+    # Sort the class list so iteration order is deterministic across runs
+    # regardless of input row order. ``classes_df["class"].unique()`` returns
+    # first-appearance order, which depends on row order; sorted iteration
+    # makes log lines and per-class artifact key order byte-identical run
+    # to run. Per-pair correctness is unaffected (each pair maps to one
+    # class deterministically), but reproducibility audits get cleaner diffs.
+    for cls in sorted(classes_df["class"].unique()):
         logger.info("=== Class: {} ===".format(cls))
         cls_pairs = classes_df[classes_df["class"] == cls].reset_index()[group_keys]
         cls_train = train.merge(cls_pairs, on=group_keys, how="inner")
@@ -530,13 +705,13 @@ def run_training(config_path, on_step=None):
         models_to_run = _filter_models_for_class(enabled, cls, fallback)
         # Drop any model no pair in this class actually asked for (routing).
         # Ensemble stays eligible whenever at least one pair lists it OR when
-        # no routing applied — absence of a non-default route for the class
+        # no routing applied - absence of a non-default route for the class
         # means we should keep today's full behaviour.
         coverage = route_coverage_by_class.get(cls)
         if coverage:
             models_to_run = [m for m in models_to_run if m in coverage or m == "ensemble"]
             if not models_to_run:
-                logger.info("Class %s: no models after route filter — using fallback", cls)
+                logger.info("Class %s: no models after route filter - using fallback", cls)
                 models_to_run = [m for m in fallback if is_available(m)]
         logger.info("Models for {}: {}".format(cls, models_to_run))
 
@@ -620,7 +795,20 @@ def run_training(config_path, on_step=None):
                 m_metrics = compute_all(test_merged[target_col].values, test_merged["prediction"].values, metrics_names)
                 logger.info("{} {} test metrics: {}".format(cls, m_name, m_metrics))
                 cls_class_metric[m_name] = m_metrics.get(selection_metric)
-                metrics_records.append({"class": cls, "model": m_name, **m_metrics})
+                # ``regime=direct``: 1-step direct prediction over the test
+                # window. The recursive multi-step regime is scored by
+                # _recursive_test_predict() after the per-class loop and
+                # written to the same CSV with regime=recursive so the user
+                # can compare the two numbers side by side.
+                metrics_records.append({"class": cls, "model": m_name, "regime": "direct", **m_metrics})
+
+                # Capture the val+train-fit model BEFORE the prod-refit
+                # overwrites it. This is the SAME model that produced the
+                # direct-test metrics; reusing it for the recursive pass
+                # means the only thing varying between the two regimes is
+                # the prediction strategy, not the model itself (no leakage,
+                # apples-to-apples comparison).
+                val_fit_models_by_class.setdefault(cls, {})[m_name] = mdl_full
 
                 # Production refit: now that test predictions and metrics
                 # have been recorded against the held-out (train+val) model,
@@ -641,7 +829,7 @@ def run_training(config_path, on_step=None):
                         )
                     except Exception as exc:
                         logger.warning(
-                            "Production refit failed for %s/%s: %s — keeping train+val fit",
+                            "Production refit failed for %s/%s: %s - keeping train+val fit",
                             cls, m_name, exc,
                         )
 
@@ -650,9 +838,15 @@ def run_training(config_path, on_step=None):
                     save_pickle(mdl_full, model_path)
                     artifacts["models_path"]["{}__{}".format(cls, m_name)] = model_path
                 except Exception as e:
-                    logger.info("Failed to pickle {} {}: {}".format(cls, m_name, e))
+                    # Pickle failure means the production model is unrecoverable
+                    # for this (class, model). Log as ERROR so monitoring fires
+                    # -- inference will fall back at serve time but ops needs to know.
+                    logger.error("Failed to pickle %s %s: %s", cls, m_name, e)
             except Exception as e:
-                logger.info("Model {} failed for class {}: {}".format(m_name, cls, e))
+                # Model fit failure -- the candidate is excluded from per-pair
+                # selection. Log as WARNING so the failure rate is visible
+                # without burying it in the INFO stream.
+                logger.warning("Model %s failed for class %s: %s", m_name, cls, e)
 
         if not cls_test_predictions:
             for fb in fallback:
@@ -674,7 +868,14 @@ def run_training(config_path, on_step=None):
                         vm["prediction"] = vm["prediction"].fillna(0.0)
                         cls_val_predictions[fb] = vm
                     break
-                except Exception:
+                except Exception as exc:
+                    # Fallback model fit failed -- try the next candidate.
+                    # Silent ``continue`` was hiding genuine model bugs;
+                    # log so we can audit the failure rate later.
+                    logger.warning(
+                        "Class %s fallback model %s failed: %s",
+                        cls, fb, exc,
+                    )
                     continue
 
         if "ensemble" in enabled.get(cls, []) and len(cls_test_predictions) >= 2:
@@ -689,7 +890,9 @@ def run_training(config_path, on_step=None):
             cls_test_predictions["ensemble"] = test_merged
             m_metrics = compute_all(test_merged[target_col].values, test_merged["prediction"].values, metrics_names)
             logger.info("{} ensemble test metrics: {}".format(cls, m_metrics))
-            metrics_records.append({"class": cls, "model": "ensemble", **m_metrics})
+            metrics_records.append({
+                "class": cls, "model": "ensemble", "regime": "direct", **m_metrics,
+            })
 
             if can_select_on_val and len(cls_val_predictions) >= 2:
                 ens_val = weighted_average_ensemble(
@@ -740,11 +943,16 @@ def run_training(config_path, on_step=None):
             for pk, (bm, sc) in pair_best.items():
                 row = {group_keys[i]: pk[i] for i in range(len(group_keys))}
                 route = pair_routes.get(pk)
+                # ``trained`` -> the per-pair winner was selected from the
+                # candidate pool. ``ensemble`` is reported separately so
+                # downstream readers can tell composite models from singletons.
+                model_selection_type = "ensemble" if bm == "ensemble" else "trained"
                 row.update({
                     "class": cls,
                     "best_model": bm,
                     "score": sc,
                     "route_reason": route.reason if route else "default",
+                    "model_selection_type": model_selection_type,
                 })
                 pair_model_lookup.append(row)
             unscored = all_class_pair_tuples - set(pair_best.keys())
@@ -764,6 +972,12 @@ def run_training(config_path, on_step=None):
                     "class": cls,
                     "best_model": class_winner,
                     "route_reason": route.reason if route else "default",
+                    # Class-winner branch: no per-pair signal, but the model
+                    # is still a real trained pick. ``ensemble`` reported
+                    # separately for the same reason as above.
+                    "model_selection_type": (
+                        "ensemble" if class_winner == "ensemble" else "trained"
+                    ),
                 })
                 pair_model_lookup.append(row)
             unscored = set()  # every pair got a row above
@@ -788,12 +1002,103 @@ def run_training(config_path, on_step=None):
                         f"{prior_reason};class_winner_fallback"
                         if prior_reason != "default" else "class_winner_fallback"
                     ),
+                    # Distinct fallback flavours so the API surface can
+                    # tell the UI how confident we are in this pair's pick.
+                    "model_selection_type": (
+                        "fallback_validation_nan"
+                        if pair_routes.get(pk) is not None
+                        and pair_routes[pk].fired_rules
+                        else "fallback_class_winner"
+                    ),
                 })
                 pair_model_lookup.append(row)
 
         artifacts["per_class"][cls] = {"models_trained": list(cls_test_predictions.keys()), "metrics": cls_class_metric}
         if not best_pred.empty:
             test_pred_records.append(best_pred)
+
+    # ------------------------------------------------------------------
+    # Recursive multi-step test pass.
+    #
+    # Production inference predicts a horizon recursively (predict t+1,
+    # fold prediction into panel, rebuild features, predict t+2, ...). The
+    # per-class direct test metrics above use single-shot prediction, so
+    # without this paired pass, reported test accuracy can over-state
+    # production accuracy at horizon > 1 (lags at t+k reference real
+    # actuals during evaluation but predictions during production).
+    #
+    # Same val+train-fit models, same test-window actuals, scoring is
+    # identical -- the only thing that varies between regime=direct and
+    # regime=recursive is the prediction strategy, so the two metric
+    # rows are apples-to-apples.
+    if val_fit_models_by_class and not test.empty and horizon > 1:
+        from ._recursive_test import recursive_test_predict
+        try:
+            history_for_recursive = pd.concat(
+                [train, val], ignore_index=True,
+            ) if not val.empty else train.copy()
+            recursive_preds = recursive_test_predict(
+                val_fit_models_by_class=val_fit_models_by_class,
+                classes_df=classes_df,
+                panel_history=history_for_recursive,
+                test_feats=test,
+                full_date_range=full_date_range,
+                fe_cfg=cfg["feature_engineering"],
+                holiday_cfg=cfg.get("holidays"),
+                hijri_cfg=cfg.get("hijri"),
+                salary_cycle_cfg=cfg.get("salary_cycle"),
+                target_encoding_artifact=te_artifact,
+                group_keys=group_keys,
+                date_col=date_col,
+                target_col=target_col,
+                granularity=freq,
+                forecast_horizon=horizon,
+                feature_cols_by_class=feature_cols_by_class,
+                # Pass per-pair routing so each pair is predicted with
+                # its own winner (matching the direct-pass selection).
+                # Without this, every pair would fall back to the first
+                # captured model in its class -- direct vs recursive
+                # metrics would compare different models, not regimes.
+                pair_routes=pair_routes,
+            )
+            if not recursive_preds.empty:
+                joined = test[group_keys + [date_col, target_col]].merge(
+                    recursive_preds[group_keys + [date_col, "prediction", "class", "best_model"]],
+                    on=group_keys + [date_col], how="inner",
+                )
+                if not joined.empty:
+                    for (cls, model_used), grp in joined.groupby(["class", "best_model"], sort=False):
+                        rec_metrics = compute_all(
+                            grp[target_col].to_numpy(dtype=float),
+                            grp["prediction"].to_numpy(dtype=float),
+                            metrics_names,
+                        )
+                        metrics_records.append({
+                            "class": cls,
+                            "model": model_used,
+                            "regime": "recursive",
+                            **rec_metrics,
+                        })
+                    logger.info(
+                        "recursive_test_predict: scored %d rows, emitted %d "
+                        "(class, model) recursive metric rows",
+                        len(joined),
+                        joined.groupby(["class", "best_model"], sort=False).ngroups,
+                    )
+                else:
+                    logger.warning(
+                        "recursive_test_predict: no overlap between recursive "
+                        "predictions and test actuals -- skipping recursive metrics",
+                    )
+            else:
+                logger.warning(
+                    "recursive_test_predict returned empty frame; skipping "
+                    "recursive metrics row (test window or captured models empty)",
+                )
+        except Exception as exc:
+            # Recursive eval is a measurement, not a contract. A failure
+            # here must NOT block training or destroy the direct metrics.
+            logger.warning("recursive_test_predict failed: %s", exc)
 
     pi_cfg = cfg.get("evaluation", {}).get("prediction_intervals", {})
     conformal_offsets_df: pd.DataFrame | None = None
@@ -811,10 +1116,11 @@ def run_training(config_path, on_step=None):
         val_calibration_parts: list[pd.DataFrame] = []
         quantiles = pi_cfg.get("quantiles", [0.1, 0.9])
 
-        for cls in classes_df["class"].unique():
+        # Sorted -- same determinism rationale as the per-class model loop above.
+        for cls in sorted(classes_df["class"].unique()):
             cls_feature_cols = feature_cols_by_class.get(cls)
             if not cls_feature_cols:
-                continue  # class never trained — skip quantile fit too
+                continue  # class never trained - skip quantile fit too
             cls_pairs = classes_df[classes_df["class"] == cls].reset_index()[group_keys]
             if conformal_enabled:
                 cls_fit = train.merge(cls_pairs, on=group_keys, how="inner")
@@ -836,7 +1142,7 @@ def run_training(config_path, on_step=None):
 
                 # Per-class validation predictions feed conformal calibration.
                 # Compute these BEFORE the production refit so calibration sees
-                # the held-out (train-only) quantile bands — the principled
+                # the held-out (train-only) quantile bands - the principled
                 # CQR setup. Production refit comes after.
                 if conformal_enabled and not cls_val_qi.empty:
                     val_qi_pred = qi_model.predict(cls_val_qi, group_keys, date_col, target_col, cls_feature_cols)
@@ -850,7 +1156,7 @@ def run_training(config_path, on_step=None):
                 # so inference's bands reflect every period the point model
                 # has seen. Conformal offsets stay calibrated against the
                 # held-out (train-only) bands but are applied as an additive
-                # per-pair shift — small approximation, big honesty win.
+                # per-pair shift - small approximation, big honesty win.
                 if cfg.get("training", {}).get("refit_on_full_data", True) and not cls_test_qi.empty:
                     qi_full = pd.concat(
                         [cls_fit, cls_val_qi, cls_test_qi] if not cls_val_qi.empty else [cls_fit, cls_test_qi],
@@ -866,13 +1172,17 @@ def run_training(config_path, on_step=None):
                         )
                     except Exception as exc:
                         logger.warning(
-                            "Production refit failed for quantile %s: %s — keeping calibration fit",
+                            "Production refit failed for quantile %s: %s - keeping calibration fit",
                             cls, exc,
                         )
 
                 save_pickle(qi_model, os.path.join(cfg["paths"]["models_dir"], "quantile_{}.pkl".format(cls)))
             except Exception as e:
-                logger.info("Quantile model failed for {}: {}".format(cls, e))
+                # Quantile model failure means this class's prediction
+                # intervals will fall back to the unconformalized base model
+                # at inference. Log as WARNING so ops sees the regression in
+                # band tightness without parsing INFO chatter.
+                logger.warning("Quantile model failed for %s: %s", cls, e)
         interval_preds = pd.concat(qi_parts, ignore_index=True) if qi_parts else None
 
         # Conformal calibration: per-pair offsets from val residuals.
@@ -943,7 +1253,7 @@ def run_training(config_path, on_step=None):
                         final_test_pred, conformal_offsets_df, group_keys=group_keys,
                     )
                 if "q_10" in qi_cols and "q_90" in qi_cols:
-                    # Quantile post-processing — TWO deliberate fixes folded
+                    # Quantile post-processing - TWO deliberate fixes folded
                     # into one min/max sweep:
                     #
                     #   1) Quantile rearrangement (Chernozhukov et al. 2010):
@@ -956,7 +1266,7 @@ def run_training(config_path, on_step=None):
                     #   2) Point-in-band guarantee: the point forecast and
                     #      the quantile bands come from independent models,
                     #      so on rare rows the point can fall outside the
-                    #      raw band — incoherent to a customer ("our most
+                    #      raw band - incoherent to a customer ("our most
                     #      likely number is outside our likely range?"). We
                     #      widen the band just enough to contain ``pred``
                     #      whenever this happens.
@@ -987,6 +1297,7 @@ def run_training(config_path, on_step=None):
             final_test_pred[target_col].to_numpy(),
             final_test_pred["prediction"].to_numpy(),
             cls_arr,
+            **composite_kwargs_from_cfg(cfg),
         )["accuracy_pct"]
 
     metrics_df = pd.DataFrame(metrics_records)
@@ -1009,6 +1320,17 @@ def run_training(config_path, on_step=None):
                 seen.add(c)
                 union_cols.append(c)
     artifacts["schema"]["feature_cols"] = union_cols
+
+    # Metadata block lets the inference pipeline detect drift between
+    # training and runtime configs (forecast horizon, feature schema,
+    # framework versions). Resolves the YAML's ``recursive_iterations:
+    # auto`` to the concrete value used at inference time so a config
+    # change after training trips the guard.
+    artifacts["metadata"] = build_training_metadata(
+        cfg,
+        feature_cols=union_cols,
+        resolved_recursive_iterations=resolve_recursive_iterations(cfg),
+    )
 
     save_json(artifacts, os.path.join(cfg["paths"]["artifacts_dir"], "training_summary.json"))
 

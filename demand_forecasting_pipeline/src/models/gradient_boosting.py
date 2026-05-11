@@ -1,5 +1,5 @@
 """
-Scikit-learn gradient-boosting regressor — optional backup for environments
+Scikit-learn gradient-boosting regressor - optional backup for environments
 where LightGBM/XGBoost aren't installed. Not in any class's default
 ``models.enabled`` list; users can opt in via config.
 """

@@ -10,14 +10,14 @@ Everything external to the objective is config-driven:
     from config. That preserves "no hardcoding" without forcing users to
     re-type every bound.
   - ``direction`` is either taken from config or derived from the metric
-    name (error metrics → minimize; score metrics → maximize).
+    name (error metrics -> minimize; score metrics -> maximize).
   - Temporal cross-validation uses a **window** per fold, not a single
     date; window size is config-driven or derived from the data when
     absent.
   - The sampler is seeded from ``project.random_seed`` so best-params are
     reproducible for the same data.
   - When tuning cannot run (no Optuna, empty validation data, etc.) the
-    reason is logged and an empty param dict is returned — callers fall
+    reason is logged and an empty param dict is returned - callers fall
     back to ``model_defaults``.
 """
 
@@ -30,10 +30,11 @@ import pandas as pd
 
 try:
     import optuna
+    from optuna.pruners import MedianPruner
     from optuna.samplers import TPESampler
     optuna.logging.set_verbosity(optuna.logging.WARNING)
     _HAS_OPTUNA = True
-except ImportError:  # pragma: no cover — declared as a dep
+except ImportError:  # pragma: no cover - declared as a dep
     _HAS_OPTUNA = False
 
 from ..evaluation.metrics import compute_all
@@ -52,7 +53,7 @@ _MAXIMIZE_METRICS = frozenset({
 # Fallback search spaces when a model has no entry in
 # ``cfg.hyperparameter_tuning.search_spaces``. Each entry is a mapping of
 # parameter name -> {type, low, high, [log]}. Users override any subset via
-# config — defaults fill in the rest.
+# config - defaults fill in the rest.
 _DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict]] = {
     # --- ML / tree models ---
     "lightgbm": {
@@ -90,16 +91,53 @@ _DEFAULT_SEARCH_SPACES: dict[str, dict[str, dict]] = {
         "alpha":            {"type": "float", "low": 0.05, "high": 0.5},
     },
     "ets": {
-        # ``seasonal_periods`` is derived from data granularity — not tuned.
+        # ``seasonal_periods`` is derived from data granularity - not tuned.
         # Only the trend/seasonal structure is searched.
         "trend":            {"type": "categorical", "choices": [None, "add"]},
         "seasonal":         {"type": "categorical", "choices": [None, "add"]},
     },
+    # --- two-stage (Prob(demand) classifier x Qty|demand regressor) ---
+    # The classifier threshold is the meaningful tunable here. Range
+    # spans from "favour recall on small/sparse demand" (0.2) up to
+    # "demand to fire" (0.7). Inner regressor params are tuned in
+    # their own pass via ``class_tuned_params`` injection upstream.
+    "two_stage": {
+        "threshold":        {"type": "float", "low": 0.2, "high": 0.7},
+    },
 }
 
 
+def _adapt_search_space(
+    spec: dict[str, dict],
+    *,
+    n_train_rows: int,
+    divisor: float = 50.0,
+    cap_low_floor: int = 100,
+    cap_high_ceiling: int = 2000,
+) -> dict[str, dict]:
+    """Tighten or widen search-space ranges based on training-set size.
+
+    Currently the only adaptation is on tree-ensemble ``n_estimators``:
+    the upper bound is set to ``clip(n_train_rows / divisor,
+    cap_low_floor, cap_high_ceiling)`` so a small class doesn't waste
+    trials on giant ensembles and a big class isn't capped at the
+    YAML default. ``divisor``, ``cap_low_floor`` and ``cap_high_ceiling``
+    are config-overridable (``hyperparameter_tuning.adaptive_n_estimators``).
+
+    Returns a fresh dict; the input ``spec`` is not mutated.
+    """
+    out = {k: dict(v) for k, v in spec.items()}
+    if "n_estimators" in out and isinstance(out["n_estimators"], dict):
+        cap_high = int(np.clip(n_train_rows / max(1e-9, float(divisor)),
+                               int(cap_low_floor), int(cap_high_ceiling)))
+        cap_low = int(min(out["n_estimators"].get("low", int(cap_low_floor)), cap_high))
+        out["n_estimators"]["low"] = cap_low
+        out["n_estimators"]["high"] = max(cap_high, cap_low + 1)
+    return out
+
+
 def _resolve_direction(metric: str, configured: str | None) -> str:
-    """Returns 'minimize' or 'maximize'. 'auto' (or None) → infer from metric."""
+    """Returns 'minimize' or 'maximize'. 'auto' (or None) -> infer from metric."""
     if configured and configured not in ("auto", "", None):
         if configured not in ("minimize", "maximize"):
             raise ValueError(
@@ -181,22 +219,47 @@ def tune_model(
 ) -> dict:
     """Run an Optuna study and return the winning params.
 
-    Returns ``{}`` (empty params → caller uses model_defaults) when tuning
+    Returns ``{}`` (empty params -> caller uses model_defaults) when tuning
     cannot meaningfully run; reasons are logged so silent fallbacks don't
     go unnoticed.
     """
     if not _HAS_OPTUNA:
-        logger.warning("Optuna not installed — skipping HP tuning for %s", model_name)
+        logger.warning("Optuna not installed - skipping HP tuning for %s", model_name)
         return {}
 
     tuning_cfg = tuning_cfg or {}
     space_spec = _resolve_search_space(model_name, tuning_cfg.get("search_spaces"))
     if not space_spec:
         logger.warning(
-            "No search space configured or defaulted for '%s' — using model defaults",
+            "No search space configured or defaulted for '%s' - using model defaults",
             model_name,
         )
         return {}
+
+    # Data-size-aware adaptation. The default ranges in
+    # ``_DEFAULT_SEARCH_SPACES`` are calibrated for ~5-50k rows; on much
+    # larger data the upper bound is the limiting factor for accuracy,
+    # on much smaller data the lower bound wastes trials. Recompute
+    # bounds adaptively for tree models so search effort lands where it
+    # matters.
+    # Adaptive bound: any model whose search space declares
+    # ``n_estimators`` benefits from data-size-aware capping. Reading
+    # the model list from the search-space dict (instead of a hardcoded
+    # tuple) keeps the behaviour correct when a future model is added
+    # to the spec via config without touching this file.
+    adaptive_cfg = (tuning_cfg.get("adaptive_n_estimators") or {})
+    has_n_estimators = (
+        "n_estimators" in space_spec
+        and isinstance(space_spec.get("n_estimators"), dict)
+    )
+    if has_n_estimators:
+        space_spec = _adapt_search_space(
+            space_spec,
+            n_train_rows=int(len(train_df)),
+            divisor=float(adaptive_cfg.get("divisor", 50.0)),
+            cap_low_floor=int(adaptive_cfg.get("cap_low_floor", 100)),
+            cap_high_ceiling=int(adaptive_cfg.get("cap_high_ceiling", 2000)),
+        )
 
     direction = _resolve_direction(metric, tuning_cfg.get("direction"))
     tcv = tuning_cfg.get("temporal_cv") or {}
@@ -255,7 +318,15 @@ def tune_model(
             return fail_score
 
     sampler = TPESampler(seed=random_seed) if random_seed is not None else TPESampler()
-    study = optuna.create_study(direction=direction, sampler=sampler)
+    # MedianPruner stops trials whose intermediate score lags the running
+    # median by more than ``n_warmup_steps`` epochs. For TPE this typically
+    # cuts wall-clock 30-50% with no measurable impact on best_value, since
+    # the pruned trials weren't going to win anyway. Models that don't
+    # report intermediate values (most of ours, since we evaluate on a
+    # held-out slice once per trial) are unaffected -- the pruner is only
+    # active if the objective calls trial.report().
+    pruner = MedianPruner(n_warmup_steps=1, n_startup_trials=5)
+    study = optuna.create_study(direction=direction, sampler=sampler, pruner=pruner)
     try:
         study.optimize(objective, n_trials=n_trials, timeout=timeout, show_progress_bar=False)
     except Exception as exc:
@@ -266,7 +337,7 @@ def tune_model(
     # evaluated against a real score. Detect and fall back.
     if study.best_value == fail_score:
         logger.warning(
-            "All trials failed for %s (best_value=%s) — returning empty params",
+            "All trials failed for %s (best_value=%s) - returning empty params",
             model_name, study.best_value,
         )
         return {}

@@ -2,7 +2,7 @@
 Internal calendar helpers shared by the feature-engineering modules.
 
 Everything here is pure, vectorized, and config-agnostic: the callers tell
-these functions *what* events to measure proximity to — they don't know or
+these functions *what* events to measure proximity to - they don't know or
 care which events those are.
 
 Kept under a single underscore to signal "package-internal".
@@ -38,14 +38,14 @@ def is_monthly_or_finer(freq: str) -> bool:
 
 
 # ---------------------------------------------------------------------------
-# Weekend resolver — honours date-dependent weekend regimes.
+# Weekend resolver - honours date-dependent weekend regimes.
 # ---------------------------------------------------------------------------
 
 
 def resolve_weekend_mask(dates: pd.Series, spec) -> pd.Series:
     """Vectorized ``is_weekend`` computation supporting two config forms.
 
-    Legacy (flat):   ``[4, 5]``  — these weekday ints are weekend at all times.
+    Legacy (flat):   ``[4, 5]``  - these weekday ints are weekend at all times.
     Regimes:         ``[{from: "2022-01-01", days: [5, 6]},
                          {until: "2022-01-01", days: [4, 5]}]``
 
@@ -80,7 +80,7 @@ def resolve_weekend_mask(dates: pd.Series, spec) -> pd.Series:
 
 
 # ---------------------------------------------------------------------------
-# Event proximity — the one source of truth for days_to/days_since/windows.
+# Event proximity - the one source of truth for days_to/days_since/windows.
 # ---------------------------------------------------------------------------
 
 
@@ -94,7 +94,7 @@ def proximity_features(
 ) -> pd.DataFrame:
     """For each row date, return distance-to-nearest-event features.
 
-    Columns returned (only those that are meaningful — if ``event_dates`` is
+    Columns returned (only those that are meaningful - if ``event_dates`` is
     empty, an empty DataFrame with the row index is returned):
 
       - ``days_to_next_<prefix>``

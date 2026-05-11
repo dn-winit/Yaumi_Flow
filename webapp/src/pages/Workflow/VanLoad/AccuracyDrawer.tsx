@@ -1,71 +1,54 @@
 import { useEffect, useMemo, useState } from "react";
 import Drawer from "@/components/ui/Drawer";
-import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
 import KpiRow from "@/components/ui/KpiRow";
-import HighlightsStrip, { type Highlight } from "@/components/ui/HighlightsStrip";
 import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
-import BarChart from "@/components/charts/BarChart";
+import { Skeleton } from "@/components/ui/Skeleton";
+import InfoBubble from "@/components/ui/InfoBubble";
+import SectionLabel from "@/components/ui/SectionLabel";
 import { CHART_COLOR } from "@/components/charts/theme";
-import ExplainabilityModal from "@/components/ui/ExplainabilityModal";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
-import { useForecastRows, useLookbackWindow } from "@/hooks/useDataImport";
+import { useReconciliationPastPerformance } from "@/hooks/useForecast";
 import {
   fmtNum,
   fmtCurrency,
-  toNum,
-  pickDate,
-  compositeAccuracy,
-  GOOD_SCORE_THRESHOLD,
-  TOLERANCE_PCT,
-  LEAKAGE_SHARE_WARN,
-  ON_TARGET_GOOD_RATIO,
-  ON_TARGET_POOR_RATIO,
-  DEFAULT_LOOKBACK,
+  fmtPct,
+  lookbackDays as lookbackDaysOf,
   type Lookback,
+  DEFAULT_LOOKBACK,
 } from "@/lib/format";
-import { fmtDate } from "@/lib/date";
-import InfoBubble from "@/components/ui/InfoBubble";
-import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
-import type { DashboardFilters, ForecastRow } from "@/types/data-import";
+import { todayIso, addDays, fmtDate, fmtDateRange } from "@/lib/date";
+import type { DashboardFilters } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
-import type { Row } from "@/types/common";
-
-interface VarianceRow {
-  item_code: string;
-  predicted: number;
-  actual: number;
-  variance: number;
-}
 
 interface Props {
   open: boolean;
   onClose: () => void;
-  // The drawer is opened from a specific route's van-load context, so the
-  // route is fixed and pre-applied. The user can further narrow inside
-  // the drawer by category and item. Warehouse + route would be redundant
-  // here so the filter bar hides them.
   routeCode?: string;
+  /**
+   * Last day of the past-performance window. When the page already
+   * holds a user-selected date, pass it here so the drawer aligns with
+   * the headline van-load tile. Falls back to "yesterday" only when
+   * the caller has no date in scope.
+   */
+  endDate?: string;
 }
 
 /**
- * "Past analysis" drawer: predicted vs actual for the route the user is
- * viewing, scoped further by Category and Item via the same multi-select
- * cascading filter bar the dashboard uses. The four tiles, daily trend
- * chart, and items-variance bar chart are computed client-side from the
- * shared (sales ⋈ forecast) merge served by /eda/forecast-rows -- the
- * same merge that powers the dashboard KPIs, so numbers reconcile.
+ * Past performance drawer. Reads canonical reconciled values from the
+ * forecast frame the daily cron writes, so per-day totals match the
+ * page-view tile by construction. Anchor scope: (route, item) pairs
+ * with Predicted > 0 in the window. Wire shape and field semantics
+ * are documented in src/types/forecast.ts.
  */
-export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
-  const [explainRow, setExplainRow] = useState<Row | null>(null);
+export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endDateProp }: Props) {
   const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  // Seed the drawer's filter scope with the active route on every open so
-  // the user always lands on "this route's history". The route field is
-  // hidden in the filter bar but still pinned in state.
+  // Reset/seed filter state on every open so the user always lands on
+  // "this route's history" without lingering selections.
   useEffect(() => {
     if (!open) return;
     setFilters({
@@ -75,266 +58,38 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode]);
 
-  const { data, loading } = useForecastRows(
-    open ? lookback : undefined,
-    open ? filters : undefined,
-    open,
-  );
-  const rows = (data?.rows ?? []) as ForecastRow[];
+  const lookbackDays = lookbackDaysOf(lookback);
+  // Past performance is over COMPLETED days. If the caller hands us
+  // today (page is showing the in-progress day), cap at yesterday so
+  // the "Last working day" label is always truthful. ISO date strings
+  // compare lexicographically.
+  const yesterday = addDays(todayIso(), -1);
+  const endDate =
+    endDateProp && endDateProp < yesterday ? endDateProp : yesterday;
 
-  // Working-day axis for the daily chart -- pads gaps when scope filters
-  // strip a day from the merge.
-  const windowQ = useLookbackWindow(open ? lookback : undefined);
-  const activeDates = windowQ.data?.active_dates ?? [];
-
-  // Single-pass aggregation. Headline accuracyPct uses the canonical
-  // composite helper so it reconciles with the Pipeline tiles.
-  const stats = useMemo(() => {
-    const byDay = new Map<string, { p: number; a: number }>();
-    const byItem = new Map<string, { predicted: number; actual: number }>();
-    let totalActual = 0;
-    let totalPredicted = 0;
-    let demandServed = 0;
-    let unsoldForecast = 0;
-    let unsoldRevenue = 0;
-    let pricesSeen = false;
-
-    rows.forEach((r) => {
-      const p = toNum(r.predicted) ?? 0;
-      const a = toNum(r.actual_qty) ?? 0;
-      totalActual += a;
-      totalPredicted += p;
-      demandServed += Math.min(p, a);
-      const excess = Math.max(0, p - a);
-      if (excess > 0) {
-        unsoldForecast += excess;
-        const price = r.price ?? 0;
-        if (price > 0) {
-          unsoldRevenue += excess * price;
-          pricesSeen = true;
-        }
-      }
-
-      const d = pickDate(r as unknown as Record<string, unknown>);
-      if (d) {
-        const cur = byDay.get(d) ?? { p: 0, a: 0 };
-        cur.p += p;
-        cur.a += a;
-        byDay.set(d, cur);
-      }
-      const code = String(r.item_code ?? "");
-      if (code) {
-        const agg = byItem.get(code) ?? { predicted: 0, actual: 0 };
-        agg.predicted += p;
-        agg.actual += a;
-        byItem.set(code, agg);
-      }
-    });
-
-    const accuracyPct = compositeAccuracy(
-      rows.map((r) => ({
-        predicted: toNum(r.predicted) ?? 0,
-        actual: toNum(r.actual_qty) ?? 0,
-        demandClass: r.demand_class,
-      })),
-    );
-
-    let forecastedSkuCount = 0;
-    let servedSkuCount = 0;
-    let unsoldSkuCount = 0;
-    byItem.forEach(({ predicted, actual }) => {
-      if (predicted > 0) forecastedSkuCount += 1;
-      if (predicted > 0 && actual > 0) servedSkuCount += 1;
-      if (predicted > actual) unsoldSkuCount += 1;
-    });
-
-    const dayEntries = Array.from(byDay.entries())
-      .filter(([, v]) => v.a > 0 && v.p > 0)
-      .sort(([a], [b]) => a.localeCompare(b));
-
-    let daysOnTarget = 0;
-    let bestStreak = 0;
-    let currentStreak = 0;
-    let bestDayDate = "";
-    let bestDayAcc = -1;
-
-    dayEntries.forEach(([date, { p, a }]) => {
-      if (Math.abs(p - a) / a <= TOLERANCE_PCT) {
-        daysOnTarget += 1;
-        currentStreak += 1;
-        if (currentStreak > bestStreak) bestStreak = currentStreak;
-      } else {
-        currentStreak = 0;
-      }
-      // Plain day-level WAPE for the "best day" highlight.
-      const acc = a > 0 ? Math.max(0, 100 - (Math.abs(p - a) / a) * 100) : null;
-      if (acc != null && acc > bestDayAcc) {
-        bestDayAcc = acc;
-        bestDayDate = date;
-      }
-    });
-    const bestDay = bestDayAcc >= 0 ? { date: bestDayDate, accuracy: bestDayAcc } : null;
-
-    return {
-      accuracyPct,
-      demandServed,
-      totalActual,
-      totalPredicted,
-      forecastedSkuCount,
-      servedSkuCount,
-      daysOnTarget,
-      daysScored: dayEntries.length,
-      bestStreak,
-      bestDay,
-      unsoldForecast,
-      unsoldSkuCount,
-      unsoldRevenue: pricesSeen ? unsoldRevenue : null,
-    };
-  }, [rows]);
-
-  const dailyChart = useMemo(() => {
-    // Track whether each date had ANY genuine prediction contribution. The
-    // model only emits predictions for the test horizon (last 30 days from
-    // training cutoff) plus the forward forecast horizon -- dates outside
-    // those windows return 0 predicted from the merge, which is "no model
-    // coverage", not "model said zero". Showing 0 there flat-lines the
-    // forecast series misleadingly. Carry a flag so the renderer can pad
-    // those days with null and let the line break at the gap.
-    const map = new Map<string, { predicted: number; actual: number; hasPrediction: boolean }>();
-    rows.forEach((r) => {
-      const d = pickDate(r as unknown as Record<string, unknown>);
-      if (!d) return;
-      const predicted = toNum(r.predicted) ?? 0;
-      const actual = toNum(r.actual_qty) ?? 0;
-      const cur = map.get(d) ?? { predicted: 0, actual: 0, hasPrediction: false };
-      cur.predicted += predicted;
-      cur.actual += actual;
-      if (predicted > 0) cur.hasPrediction = true;
-      map.set(d, cur);
-    });
-    // Pad against the canonical working-day list so the X-axis always
-    // shows every working day in the window. Falls back to the dates
-    // that have data if active_dates is still loading.
-    const axis = activeDates.length > 0
-      ? activeDates
-      : Array.from(map.keys()).sort();
-    return axis.map((date) => {
-      const v = map.get(date);
-      if (!v) {
-        // Day with neither sale nor forecast -- both are absent.
-        return { date, predicted: null as unknown as number, actual: null as unknown as number };
-      }
-      return {
-        date,
-        predicted: v.hasPrediction
-          ? Number(v.predicted.toFixed(2))
-          : (null as unknown as number),
-        actual: Number(v.actual.toFixed(2)),
-      };
-    });
-  }, [rows, activeDates]);
-
-  // Coverage diagnostic for the chart subtitle: how many of the rendered
-  // days actually carry a model prediction.
-  const daysWithPrediction = useMemo(
-    () => dailyChart.filter((d) => d.predicted != null).length,
-    [dailyChart],
+  const apiFilters = useMemo(
+    () => ({
+      item_codes: filters.item_codes,
+      category_codes: filters.category_codes,
+    }),
+    [filters.item_codes, filters.category_codes],
   );
 
-  const itemVarianceChart = useMemo(() => {
-    const byItem = new Map<string, { predicted: number; actual: number }>();
-    rows.forEach((r) => {
-      const code = String(r.item_code ?? "");
-      if (!code) return;
-      const predicted = toNum(r.predicted) ?? 0;
-      const actual = toNum(r.actual_qty) ?? 0;
-      const cur = byItem.get(code) ?? { predicted: 0, actual: 0 };
-      cur.predicted += predicted;
-      cur.actual += actual;
-      byItem.set(code, cur);
-    });
-    return Array.from(byItem.entries())
-      // An item with predicted == 0 is "no model coverage" (e.g. a SKU
-      // added after the training cut-off). Counting it as a forecast miss
-      // would surface it as the worst variance even though the model was
-      // never asked. Restrict the chart to items the model actually
-      // forecast so every bar is a genuine miss the team can act on.
-      .filter(([, v]) => v.predicted > 0)
-      .map(([item_code, v]) => ({
-        item_code,
-        predicted: Number(v.predicted.toFixed(1)),
-        actual: Number(v.actual.toFixed(1)),
-        variance: Number((v.actual - v.predicted).toFixed(1)),
-      }))
-      .sort((a, b) => Math.abs(b.variance) - Math.abs(a.variance))
-      .slice(0, 10);
-  }, [rows]);
-
-  const mostAccurateItem = useMemo(() => {
-    const significantVolume = stats.totalActual * LEAKAGE_SHARE_WARN;
-    let bestCode = "";
-    let bestErr = Number.POSITIVE_INFINITY;
-    itemVarianceChart.forEach((r) => {
-      if (r.actual <= 0 || r.actual < significantVolume) return;
-      const errPct = Math.abs(r.variance) / r.actual;
-      if (errPct < bestErr) {
-        bestErr = errPct;
-        bestCode = r.item_code;
-      }
-    });
-    return bestCode ? { item: bestCode, errPct: bestErr } : null;
-  }, [itemVarianceChart, stats.totalActual]);
-
-  const highlights = useMemo(() => {
-    const items: Highlight[] = [];
-    if (stats.bestDay) {
-      items.push({
-        label: "Best day",
-        value: `${stats.bestDay.accuracy.toFixed(1)}% accurate`,
-        detail: fmtDate(stats.bestDay.date),
-      });
-    }
-    if (stats.bestStreak > 0) {
-      items.push({
-        label: "Best streak",
-        value: `${stats.bestStreak} day${stats.bestStreak === 1 ? "" : "s"} on target`,
-        detail: `within ${Math.round(TOLERANCE_PCT * 100)}% of actual`,
-      });
-    }
-    if (mostAccurateItem) {
-      items.push({
-        label: "Most accurate item",
-        value: mostAccurateItem.item,
-        detail: `${(mostAccurateItem.errPct * 100).toFixed(1)}% off across the window`,
-      });
-    }
-    return items;
-  }, [stats.bestDay, stats.bestStreak, mostAccurateItem]);
-
-  const servedArrow: "up" | "down" | undefined = stats.demandServed > 0 ? "up" : undefined;
-  const accuracyArrow: "up" | "down" | undefined =
-    stats.accuracyPct == null
-      ? undefined
-      : stats.accuracyPct >= GOOD_SCORE_THRESHOLD
-      ? "up"
-      : "down";
-  const onTargetRatio =
-    stats.daysScored > 0 ? stats.daysOnTarget / stats.daysScored : null;
-  const onTargetArrow: "up" | "down" | undefined =
-    onTargetRatio == null
-      ? undefined
-      : onTargetRatio >= ON_TARGET_GOOD_RATIO
-      ? "up"
-      : onTargetRatio < ON_TARGET_POOR_RATIO
-      ? "down"
-      : undefined;
-
-  const windowLabel = data?.working_days
-    ? `${data.working_days} working day${data.working_days === 1 ? "" : "s"}`
-    : "this period";
+  const { data, loading } = useReconciliationPastPerformance(
+    routeCode,
+    open ? endDate : undefined,
+    lookbackDays,
+    open && Boolean(routeCode),
+    apiFilters,
+  );
 
   return (
-    <Drawer open={open} onClose={onClose} title="Past performance — forecast vs actual" width="xl">
+    <Drawer
+      open={open}
+      onClose={onClose}
+      title="Past performance"
+      width="xl"
+    >
       <div className="space-y-6">
         <DashboardFilterBar
           value={filters}
@@ -344,115 +99,318 @@ export default function AccuracyDrawer({ open, onClose, routeCode }: Props) {
           hideWarehouse
           hideRoute
         />
+        {data?.active_days != null && (
+          <div className="text-caption text-text-tertiary">
+            {data.active_days} active day
+            {data.active_days === 1 ? "" : "s"} in window
+          </div>
+        )}
 
         {loading ? (
-          <Loading message="Loading past analysis..." />
-        ) : rows.length === 0 ? (
+          <DrawerSkeleton />
+        ) : !data?.available || data.daily.length === 0 ? (
           <EmptyState
-            title="No historical data"
-            message={
-              data?.message ??
-              `No predictions matched actuals for route ${routeCode ?? "this scope"} in ${windowLabel}.`
-            }
+            title="No past activity for this window"
+            message={data?.message ?? `No allocation or sales recorded for route ${routeCode ?? ""} in this period.`}
           />
         ) : (
+          <DrawerContent data={data} />
+        )}
+      </div>
+    </Drawer>
+  );
+}
+
+function DrawerSkeleton() {
+  return (
+    <div className="space-y-6">
+      <KpiRow>
+        {[0, 1, 2].map((i) => (
+          <Skeleton key={i} className="h-24" />
+        ))}
+      </KpiRow>
+      <KpiRow>
+        {[0, 1].map((i) => (
+          <Skeleton key={i} className="h-24" />
+        ))}
+      </KpiRow>
+      <Skeleton className="h-80" />
+    </div>
+  );
+}
+
+interface ContentProps {
+  data: NonNullable<ReturnType<typeof useReconciliationPastPerformance>["data"]>;
+}
+
+// Pure render: server pre-computes total, percentages, ordering, and
+// labels (single source of truth in the backend). UI only maps tone to
+// a colour token. ``floor_protected`` is dropped server-side because
+// the back-test path runs with ``use_carry_floor=False``.
+function DrawerContent({ data }: ContentProps) {
+  const t = data.totals;
+  const m = data.metrics;
+
+  // Surface the actual window the metrics cover: a single day for
+  // "Last working day", a range for the multi-day lookbacks. Pulls
+  // straight from the server response so the dates always match the
+  // tiles below -- no client-side date math drift.
+  const windowLabel = (() => {
+    const start = data.start_date ?? "";
+    const end = data.end_date ?? "";
+    if (!start && !end) return null;
+    if (!start || !end || start === end) return fmtDate(end || start);
+    return fmtDateRange(start, end);
+  })();
+
+  return (
+    <>
+      {/* Plain-language explainer banner so a non-tech reader knows
+          what they're looking at without needing to parse the tiles. */}
+      <div className="rounded-lg border border-brand-100 bg-brand-50/50 p-4 text-body text-text-secondary">
+        We compare the <strong>actual van load</strong> (what the rep took) against the{" "}
+        <strong>recommended van load</strong> (what our forecast suggests) — with{" "}
+        <strong>actually sold</strong> as the ground truth. Scoped to items we forecast on this route.
+        Items whose dominant buyer isn't on the day's journey plan are intentionally zeroed out, so a
+        flat recommendation on those days is by design, not a model miss.
+        {windowLabel && (
           <>
-            <KpiRow>
-              <MetricCard
-                label="Demand served by our forecast"
-                value={`${fmtNum(stats.demandServed)} units`}
-                subtitle={
-                  stats.totalPredicted > 0
-                    ? `${fmtNum(stats.demandServed)} of ${fmtNum(stats.totalPredicted)} forecast units sold · ${fmtNum(stats.servedSkuCount)} items`
-                    : "No forecast in this window"
-                }
-                trend={servedArrow}
-              />
-              <MetricCard
-                label="Forecast accuracy"
-                value={stats.accuracyPct != null ? `${stats.accuracyPct.toFixed(1)}%` : "-"}
-                subtitle={
-                  stats.daysScored > 0
-                    ? `${stats.daysScored} of ${windowLabel} with records`
-                    : `No records in ${windowLabel}`
-                }
-                trend={accuracyArrow}
-                info={
-                  <InfoBubble
-                    title="How forecast accuracy is calculated"
-                    body={<ForecastAccuracyExplanation />}
-                  />
-                }
-              />
-              <MetricCard
-                label="Days we got it right"
-                value={stats.daysScored > 0 ? `${stats.daysOnTarget} / ${stats.daysScored}` : "-"}
-                subtitle={`Within ${Math.round(TOLERANCE_PCT * 100)}% of what actually sold`}
-                trend={onTargetArrow}
-              />
-              <MetricCard
-                label="Sales we could have made"
-                value={
-                  stats.unsoldRevenue != null && stats.unsoldRevenue > 0
-                    ? fmtCurrency(stats.unsoldRevenue)
-                    : stats.unsoldForecast > 0
-                    ? `${fmtNum(stats.unsoldForecast)} units`
-                    : "0"
-                }
-                subtitle={
-                  stats.unsoldForecast === 0
-                    ? "We captured every forecasted unit"
-                    : `${fmtNum(stats.unsoldForecast)} units across ${fmtNum(stats.unsoldSkuCount)} items — extra sales the forecast pointed to`
-                }
-              />
-            </KpiRow>
-
-            <HighlightsStrip items={highlights} />
-
-            <LineChart
-              title="What we forecast vs what actually sold"
-              subtitle={
-                daysWithPrediction > 0 && daysWithPrediction < dailyChart.length
-                  ? `Model predictions cover ${daysWithPrediction} of ${dailyChart.length} days in this window — gaps in the forecast line mean the date falls outside the model's test horizon, so no prediction was generated for it.`
-                  : undefined
-              }
-              data={dailyChart}
-              xKey="date"
-              series={[
-                { key: "predicted", label: "Forecast" },
-                { key: "actual", label: "Actual" },
-              ]}
-              height={300}
-            />
-
-            {itemVarianceChart.length > 0 && (
-              <BarChart
-                title="Items where forecast missed the mark"
-                data={itemVarianceChart}
-                xKey="item_code"
-                yKey="variance"
-                color={CHART_COLOR.warning}
-                height={260}
-                onBarClick={(p) => {
-                  const v = p as unknown as VarianceRow;
-                  setExplainRow({
-                    item_code: v.item_code,
-                    route_code: routeCode,
-                    predicted: v.predicted,
-                    actual_qty: v.actual,
-                  });
-                }}
-              />
-            )}
+            {" "}
+            <span className="text-text-tertiary">Period: <strong>{windowLabel}</strong>.</span>
           </>
         )}
       </div>
 
-      <ExplainabilityModal
-        open={explainRow != null}
-        onClose={() => setExplainRow(null)}
-        row={explainRow}
+      {/* Three story tiles -- plain English on the face, full math + source
+          views one click away in the "i" bubble. */}
+      <SectionLabel>Actual van load · recommended van load · actually sold</SectionLabel>
+      <KpiRow>
+        <MetricCard
+          label="Actual van load"
+          value={`${fmtNum(t.rep_van_load_total)} units`}
+          subtitle={`${fmtNum(t.past_leftover_total)} kept from yesterday + ${fmtNum(t.today_allocation_total)} depot loaded`}
+          info={
+            <InfoBubble
+              title="How is rep van load calculated?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p><strong>Rep van load</strong> is what the rep physically had on the truck — the stock kept on board from yesterday plus what depot loaded fresh today.</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    rep_van_load[d] = ClosingQty[d−1]  +  AllocatedPC[d]
+                  </p>
+                  <p>Both numbers come straight from SQL Server views, looked up directly per (route, item, day):</p>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li><strong>VW_GET_CLOSING_STOCK</strong> → yesterday's <code>ClosingQty</code> = leftover</li>
+                    <li><strong>VW_GET_LOAD_ALLOCATION_DETAILS</strong> → today's <code>AllocatedPC</code> = fresh allocation</li>
+                  </ul>
+                  <p>If a row is missing for a given (item, day), we treat that value as 0. The schema never logs <code>ClosingQty=0</code> — empirically validated against 21,073 cells across 12 routes.</p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-warning-500"
+        />
+        <MetricCard
+          label="Recommended van load"
+          value={`${fmtNum(t.recommended_van_load_total)} units`}
+          subtitle={
+            t.recommended_carried_total != null && t.recommended_fresh_total != null
+              ? `${fmtNum(t.recommended_carried_total)} kept from yesterday + ${fmtNum(t.recommended_fresh_total)} depot recommended (leftover minimised)`
+              : "Yesterday's leftover plus what depot should issue today"
+          }
+          info={
+            <InfoBubble
+              title="How is our recommendation calculated?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p><strong>Recommended van load</strong> reads the same reconciled cells the daily cron writes to the forecast table — so the number you see here matches the headline tile on the Van Load page byte-for-byte for the same (route, date).</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    recommended_van_load[d] = opening_stock[d]  +  recommended_load[d]
+                  </p>
+                  <p>Per (item, day), the cron subtracts the simulated leftover from the bias-corrected forecast and rounds to whole units:</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    P_corrected = Predicted / (1 + bias_pct)<br />
+                    recommended_load = max(0, P_corrected − opening_stock)
+                  </p>
+                  <p><strong>Leftover minimisation:</strong> if the truck already has 100 of an item and demand is 80, the engine recommends zero fresh — less stock left on the van overnight.</p>
+                  <p><strong>Journey-aware mask:</strong> for items where one or two customers account for nearly all sales, recommended_load is forced to 0 on dates those customers aren't on the day's journey plan. Loading 900 units of a wholesale-only item on a day the wholesaler isn't being visited is the kind of phantom load this guard prevents.</p>
+                  <p><strong>bias_pct</strong> is the recency-weighted ratio of past actuals to past predictions over the last 30 days for that route+item, capped at ±50%.</p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-brand-600"
+        />
+        <MetricCard
+          label="Actually sold"
+          value={`${fmtNum(t.actual_sold_total)} units`}
+          subtitle="What customers actually bought — the ground truth"
+          info={
+            <InfoBubble
+              title="What 'actually sold' means"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p><strong>Actually sold</strong> is the invoiced sales total for the same items in the same window.</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    Σ TotalQuantity from VW_GET_SALES_DETAILS<br />
+                    WHERE TrxType = &apos;SalesInvoice&apos;<br />
+                    AND ItemType = &apos;OrderItem&apos;
+                  </p>
+                  <p>Returns (bad/good) are tracked separately under <code>TrxType = &apos;Bad Return&apos;</code> / <code>&apos;Good Return&apos;</code> and are <strong>not</strong> counted as sales.</p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-success-600"
+        />
+      </KpiRow>
+
+      {/* Three forecast-performance tiles -- each answers a UNIQUE
+          question. No number on this row appears twice. Section symmetry
+          with the row above (3 + 3) keeps the drawer scannable.
+            • Accuracy  -- how close our forecast came to actual demand (%)
+            • Coverage  -- how many items we predicted that the rep sold (%)
+            • Saved     -- AED savings under our recommendation (with the
+                           rep AED -> ours AED breakdown in the subtitle) */}
+      <SectionLabel>Forecast performance</SectionLabel>
+      <KpiRow>
+        <MetricCard
+          label="Recommendation match"
+          value={fmtPct(m.forecast_accuracy_pct)}
+          subtitle={`Recommended ${fmtNum(t.recommended_van_load_total)} vs actually sold ${fmtNum(t.actual_sold_total)}`}
+          trend={m.forecast_accuracy_pct >= 80 ? "up" : "down"}
+          info={
+            <InfoBubble
+              title="What is recommendation match?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p>How close the <strong>recommended van load</strong> shown on the headline tile came to what was <strong>actually sold</strong> on this route. Bounded fill-ratio accuracy — symmetric, [0%, 100%], no cliff when over-allocation runs heavy.</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    recommended_van_load  =  yesterday_leftover  +  fresh_recommended<br />
+                    match  =  min(recommended_van_load, actually_sold)  ÷  max(recommended_van_load, actually_sold)  × 100
+                  </p>
+                  <p>For this view: recommended <strong>{fmtNum(t.recommended_van_load_total)}</strong> ({fmtNum(t.recommended_carried_total)} kept + {fmtNum(t.recommended_fresh_total)} fresh) vs actually sold <strong>{fmtNum(t.actual_sold_total)}</strong> = <strong>{fmtPct(m.forecast_accuracy_pct)}</strong>.</p>
+                  <p>Symmetric: a 2× over-allocation and a 0.5× under-allocation both read as 50%. 100% = exact match. The number is naturally bounded by min/max, so heavy leftover days that would clamp a WAPE-style metric to 0% still show a meaningful signal here.</p>
+                  <p className="text-text-tertiary"><em>Different from <strong>Baseline accuracy</strong> on the Pipeline page, which is the model&apos;s overall test-set score across all routes. This tile is route + window specific.</em></p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-brand-600"
+        />
+        <MetricCard
+          label="Forecast coverage"
+          value={fmtPct(m.forecast_coverage_pct, 0)}
+          subtitle="Share of sold items that were on our forecast"
+          trend={m.forecast_coverage_pct >= 80 ? "up" : "down"}
+          info={
+            <InfoBubble
+              title="How is forecast coverage calculated?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p>Of the items the rep actually sold on each working day in the window, what fraction were on our forecast for that day?</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    coverage = mean over each working day of:<br />
+                    &nbsp;&nbsp;|sold_items ∩ forecasted_items|  ÷  |sold_items|
+                  </p>
+                  <p>100% means every item the rep sold was something we&apos;d predicted demand for. Lower numbers mean some sales came from items the model never saw — those are blind spots to investigate.</p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-brand-600"
+        />
+        <MetricCard
+          label={
+            (t.excess_units_savings ?? 0) >= 0
+              ? "Overnight stock prevented"
+              : "Extra overnight stock"
+          }
+          // Signed value so the sign communicates direction ("+808" reads
+          // as "808 more units left overnight than the rep" while "−808"
+          // reads as "808 units saved"). The label and border colour
+          // already reinforce the polarity; the signed number removes
+          // any chance the reader misinterprets the magnitude.
+          value={
+            t.excess_units_savings != null
+              ? `${t.excess_units_savings >= 0 ? "−" : "+"}${fmtNum(Math.abs(t.excess_units_savings))} units`
+              : fmtCurrency(t.holding_savings)
+          }
+          subtitle={
+            t.rep_excess_units != null && t.our_excess_units != null
+              ? `Actual ${fmtNum(t.rep_excess_units)} → recommended ${fmtNum(t.our_excess_units)} units left on the truck overnight`
+              : `Actual ${fmtCurrency(t.rep_holding_value)} → recommended ${fmtCurrency(t.our_holding_value)} (overnight excess stock)`
+          }
+          // Up = our policy reduced overnight stock (good).
+          // Down = our policy left more overnight (bad).
+          trend={
+            (t.excess_units_savings ?? t.holding_savings) > 0
+              ? "up"
+              : (t.excess_units_savings ?? t.holding_savings) < 0
+              ? "down"
+              : undefined
+          }
+          info={
+            <InfoBubble
+              title="How is overnight stock calculated?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p><strong>Overnight stock</strong> is the units loaded onto the truck that didn&apos;t sell that day — pieces that have to be stored, recounted, and rolled into tomorrow&apos;s leftover. Less overnight stock = leaner van, less stale inventory, lower handling overhead.</p>
+                  <p>Per item we compute:</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    overnight_units  =  max( on_truck − sold,  0 )<br />
+                    total_overnight  =  Σ overnight_units
+                  </p>
+                  <p>The <em>max(., 0)</em> excludes items where stock ran short — those would be lost-sales cost, not overnight stock.</p>
+                  <p>Numbers shown:</p>
+                  <ul className="list-disc pl-5 space-y-1">
+                    <li>Under the actual van load: <strong>{fmtNum(t.rep_excess_units ?? 0)} units</strong> ({fmtCurrency(t.rep_holding_value)})</li>
+                    <li>Under the recommended van load: <strong>{fmtNum(t.our_excess_units ?? 0)} units</strong> ({fmtCurrency(t.our_holding_value)})</li>
+                    <li>Units prevented: <strong>{fmtNum(t.excess_units_savings ?? 0)}</strong> · AED equivalent: <strong>{fmtCurrency(t.holding_savings)}</strong></li>
+                  </ul>
+                  <p>Why two figures? The bias-corrected forecast can redistribute issuance toward higher-priced items the model has been under-predicting; that can lift AED while units fall. <strong>Units</strong> is the metric the policy directly controls and the cleaner leftover-minimisation signal; <strong>AED</strong> is the financial context.</p>
+                </div>
+              }
+            />
+          }
+          className={
+            (t.excess_units_savings ?? t.holding_savings) >= 0
+              ? "!border-l-success-600"
+              : "!border-l-warning-500"
+          }
+        />
+      </KpiRow>
+
+      {/* Daily comparison chart -- one line per story. The recommended-
+          van-load series plots ``recommended_van_load`` (leftover + fresh
+          composition), matching the headline tile exactly. The
+          forecast-quality story lives on its own ``Forecast accuracy``
+          tile -- not on this chart -- so each surface shows ONE meaning
+          of "recommended" and the two never collide. */}
+      <LineChart
+        title="Day-by-day comparison"
+        subtitle="Actual van load (yellow) · recommended van load (blue) · actually sold (green, the ground truth)"
+        data={data.daily as unknown as Record<string, unknown>[]}
+        xKey="date"
+        series={[
+          {
+            key: "rep_van_load",
+            label: "Actual van load",
+            color: CHART_COLOR.warning,
+          },
+          {
+            key: "recommended_van_load",
+            label: "Recommended van load",
+            color: CHART_COLOR.brandPrimary,
+          },
+          {
+            key: "actual_sold",
+            label: "Actually sold",
+            color: CHART_COLOR.success,
+          },
+        ]}
+        height={320}
       />
-    </Drawer>
+    </>
   );
 }

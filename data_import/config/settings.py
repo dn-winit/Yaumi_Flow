@@ -11,8 +11,38 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+
+def _read_allow_origins() -> list[str]:
+    """Read ``YF_ALLOW_ORIGINS`` and parse comma/semicolon-separated or
+    JSON-list. Falls back to local-dev origin. Reads ``os.environ``
+    directly so we bypass pydantic-settings' JSON-only env-list parser
+    -- one shared env var works as a plain string across every service.
+    """
+    import json
+    raw = os.getenv("YF_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:3000"]
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+    return [s.strip() for s in raw.replace(";", ",").split(",") if s.strip()]
+
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _MODULE_ROOT.parent
+
+
+def _data_root() -> Path:
+    """Resolve the unified on-disk data root for every Yaumi Flow service.
+
+    Reads ``YF_DATA_ROOT`` from the environment so a single env var moves
+    every service's filesystem layout in lockstep. Falls back to
+    ``<project>/data`` so a fresh checkout works without ops setup.
+    """
+    raw = os.getenv("YF_DATA_ROOT", "").strip()
+    return Path(raw).resolve() if raw else _PROJECT_ROOT / "data"
 
 
 class _BaseDbSettings(BaseSettings):
@@ -72,17 +102,33 @@ class Settings(BaseSettings):
     db: DatabaseSettings = Field(default_factory=DatabaseSettings)
     aiml_db: AimlDatabaseSettings = Field(default_factory=AimlDatabaseSettings)
 
-    # Output paths
-    data_dir: str = Field(default=str(_PROJECT_ROOT / "data"))
+    # Output paths -- the unified ``imports/`` mirror under ``YF_DATA_ROOT``.
+    # Every service that needs DB-mirrored data reads from this same dir,
+    # so a single env override moves the whole stack to a different volume.
+    data_dir: str = Field(default_factory=lambda: str(_data_root() / "imports"))
     customer_data_file: str = Field(default="customer_data.csv")
     journey_plan_file: str = Field(default="journey_plan.csv")
     sales_recent_file: str = Field(default="sales_recent.csv")
     demand_forecast_file: str = Field(default="demand_forecast.csv")
+    # Van-stock reconciliation inputs (refreshed nightly with the rest)
+    closing_stock_file: str = Field(default="closing_stock.csv")
+    load_allocation_file: str = Field(default="load_allocation.csv")
+    returns_recent_file: str = Field(default="returns_recent.csv")
 
     # Source views/tables (configurable)
     sales_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_SALES_DETAILS]")
     journey_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_JOURNEYPLAN_DETAILS]")
+    closing_stock_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_CLOSING_STOCK]")
+    load_allocation_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_LOAD_ALLOCATION_DETAILS]")
     demand_forecast_table: str = Field(default="[YaumiAIML].[dbo].[yf_demand_forecast]")
+
+    # TrxType vocabulary in VW_GET_SALES_DETAILS. Returns are recorded as
+    # separate rows with negative QuantityInPCs; Bad Return = damaged
+    # write-off, Good Return = salable stock back to depot.
+    sales_invoice_trx_type: str = Field(default="SalesInvoice")
+    bad_return_trx_type: str = Field(default="Bad Return")
+    good_return_trx_type: str = Field(default="Good Return")
+    sales_item_type: str = Field(default="OrderItem")
 
     # Route codes
     route_codes: list[str] = Field(default=[
@@ -94,6 +140,24 @@ class Settings(BaseSettings):
     customer_data_lookback_days: int = Field(default=365, ge=30)
     journey_plan_window_days: int = Field(default=90, ge=7)
     sales_recent_lookback_days: int = Field(default=365, ge=30)
+
+    # ``import_all`` fan-out. Each dataset query is independent and
+    # I/O-bound; pyodbc releases the GIL, so a small thread pool turns
+    # the 7-dataset cron into one connection-bounded round trip.
+    # Conservative default keeps OLTP load gentle.
+    import_concurrency: int = Field(default=4, ge=1, le=16)
+
+    # Live YaumiLive cut-through cache window. Short by design so the
+    # supervisor UI sees fresh-enough actuals while still absorbing
+    # rapid-fire visit clicks on the same (route, date) cell.
+    live_cache_ttl_seconds: int = Field(default=60, ge=1, le=3600)
+
+    # CORS allow-list. ``YF_ALLOW_ORIGINS`` (shared across all services)
+    # is read at boot via a default_factory so the value can be a plain
+    # comma- or semicolon-separated string -- pydantic-settings' default
+    # env handler insists on JSON for list-typed fields, which is too
+    # strict for a config knob ops will set as a single string.
+    allow_origins: list[str] = Field(default_factory=_read_allow_origins)
 
     # Scheduler -- daily incremental import
     scheduler_enabled: bool = Field(default=True)

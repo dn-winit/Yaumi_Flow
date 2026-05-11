@@ -1,5 +1,5 @@
 """
-Feature builder — orchestrates all feature modules.
+Feature builder - orchestrates all feature modules.
 
 Split into two phases:
 
@@ -8,12 +8,12 @@ Split into two phases:
 
   2. Global date-driven features that apply to every row identically
      (temporal, holidays, hijri, salary cycle) and the target encoding
-     merge. Computed once on the concatenated panel — no per-class
+     merge. Computed once on the concatenated panel - no per-class
      duplication.
 
 NaN policy
 ----------
-Lag and rolling features have leading NaN per pair — the "prior" doesn't
+Lag and rolling features have leading NaN per pair - the "prior" doesn't
 exist for the first few rows. Intermittent-specific features behave the same
 way. After assembly we fill those columns with ``fe_cfg.nan_fill`` (default
 ``0.0``, meaning "no prior observation"). Set ``nan_fill: null`` to preserve
@@ -65,7 +65,7 @@ def _horizon_safe_lags(lags: list[int], forecast_horizon: int) -> list[int]:
 
     The guarantee: at inference we predict ``H`` periods into the future; only
     lags that reference data from before the forecast origin can be computed
-    from actuals. Lags < H would require predictions-of-predictions — safe in
+    from actuals. Lags < H would require predictions-of-predictions - safe in
     a recursive scheme, not in the current direct-lookup pipeline.
     """
     if forecast_horizon <= 1:
@@ -169,6 +169,7 @@ def build_features(
     granularity: str = "D",
     full_date_range=None,
     target_encoding_source: pd.DataFrame | None = None,
+    target_encoding_artifact: tuple[pd.DataFrame, float] | None = None,
     forecast_horizon: int = 1,
 ) -> pd.DataFrame:
     """Top-level feature assembly.
@@ -178,15 +179,21 @@ def build_features(
          each row belongs to.
       2. Per-class features (lags, rolling, intermittent).
       3. Concat back into a single panel.
-      4. Global date-driven features (once — no per-class duplication).
-      5. Target encoding from the train-window source.
+      4. Global date-driven features (once - no per-class duplication).
+      5. Target encoding -- ``target_encoding_artifact`` takes precedence
+         over ``target_encoding_source``. The artifact path is the
+         production-grade route: encoding frozen at training time and
+         applied verbatim at inference, so the matrix the model sees at
+         serve time matches the one it was fit on. ``target_encoding_source``
+         is the training path -- compute the encoding from the train
+         window only and write it to disk for inference.
       6. NaN policy on target-derived features.
     """
     merged = df.merge(
         classes_df.reset_index()[group_keys + ["class"]],
         on=group_keys, how="left",
     )
-    # Any pair in df that wasn't classified gets dropped explicitly — with
+    # Any pair in df that wasn't classified gets dropped explicitly - with
     # a log entry so the loss is visible, not silent.
     missing_class = int(merged["class"].isna().sum())
     if missing_class:
@@ -234,19 +241,28 @@ def build_features(
     if salary_cycle_cfg:
         out = add_salary_cycle_features(out, date_col, granularity, salary_cycle_cfg)
 
-    # --- Target encoding (leakage-free: source is train-window only) ------
+    # --- Target encoding -------------------------------------------------
+    # The persisted artifact wins -- inference loads the (te_df, global_mean)
+    # tuple training wrote, so encoded values are stable across runs and
+    # match what the model was fit on. Falling back to recompute from
+    # ``target_encoding_source`` is the training-time path; passing both
+    # explicitly with the artifact is also safe (artifact still wins).
     te_cfg = fe_cfg.get("target_encoding", {}) or {}
-    if te_cfg.get("enabled", False) and target_encoding_source is not None:
-        smoothing = int(te_cfg.get("smoothing", 10))
-        te_df, global_mean = compute_target_encoding(
-            target_encoding_source, group_keys, target_col, smoothing
-        )
-        out = apply_target_encoding(out, group_keys, te_df, global_mean)
+    if te_cfg.get("enabled", False):
+        if target_encoding_artifact is not None:
+            te_df, global_mean = target_encoding_artifact
+            out = apply_target_encoding(out, group_keys, te_df, global_mean)
+        elif target_encoding_source is not None:
+            smoothing = int(te_cfg.get("smoothing", 10))
+            te_df, global_mean = compute_target_encoding(
+                target_encoding_source, group_keys, target_col, smoothing
+            )
+            out = apply_target_encoding(out, group_keys, te_df, global_mean)
 
     # --- NaN policy: fill target-derived and proximity families ----------
     # Surface the chosen fills explicitly so downstream readers know which
     # assumption is in force. ``nan_fill=0.0`` treats pre-launch periods as
-    # "no prior observation = zero demand" — a strong assumption for
+    # "no prior observation = zero demand" - a strong assumption for
     # intermittent classes; users wanting the model to see NaN should set
     # ``feature_engineering.nan_fill: null``.
     nan_fill_explicit = "nan_fill" in (fe_cfg or {})

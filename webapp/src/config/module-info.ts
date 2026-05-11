@@ -3,7 +3,7 @@ import type { ProcessStep } from "@/components/ui/InfoPanel";
 export const VAN_LOAD_INFO = {
   title: "How demand forecasting works",
   subtitle:
-    "Every item on the van is backed by a data-driven prediction. Here's how the system determines what to load and how much.",
+    "Every item on the van is backed by a data-driven prediction. Here's how the system decides what to load and how much.",
   steps: [
     {
       title: "Data collection",
@@ -43,120 +43,20 @@ export const VAN_LOAD_INFO = {
     {
       title: "Confidence & range estimation",
       description:
-        "Every prediction carries a confidence score and a likely range (low to high estimate). This helps supervisors know which items have solid predictions and which need extra attention.",
-      highlights: ["Confidence scoring", "Low-to-high range", "Uncertainty visibility"],
+        "Every prediction carries a confidence score and a likely range — the lower and upper bounds you see on the Van Load table are the conformal-calibrated band the truck's load is guaranteed to sit inside.",
+      highlights: ["Confidence scoring", "Conformal lower / upper band", "Uncertainty visibility"],
+    },
+    {
+      title: "Journey-aware allocation",
+      description:
+        "If an item is bought by only one or two customers and none of them is on today's journey plan, recommended load drops to zero for that day. Stops the truck from carrying stock no scheduled customer can buy.",
+      highlights: ["Whale-buyer detection", "Journey-plan intersection", "Phantom-load prevention"],
     },
     {
       title: "Accuracy tracking",
       description:
         "Forecast accuracy is measured daily against actual sales. The system tracks performance trends over time, so you can see it improving as it learns your data.",
       highlights: ["Daily measurement", "Trend tracking", "Self-improving"],
-    },
-  ] satisfies ProcessStep[],
-};
-
-export const RECOMMENDED_ORDERS_INFO = {
-  title: "How order recommendations work",
-  subtitle:
-    "Every recommendation is personalised to the specific customer, based on their buying history and what works on their route.",
-  steps: [
-    {
-      title: "Customer profiling",
-      description:
-        "Each customer's complete buying history is analysed — what items they purchase, how frequently, how much per visit, and whether their patterns are consistent or changing. Customers are bucketed into HEAVY / MEDIUM / LIGHT basket tiers so recommendations weight the right signals for the right archetype (a hypermarket cares about quantity depth; a corner shop cares about timing).",
-      highlights: ["Per-customer analysis", "HEAVY/MEDIUM/LIGHT tiering", "Trend detection"],
-    },
-    {
-      title: "Purchase cycle detection",
-      description:
-        "The system identifies each customer's natural buying rhythm per item. Some items are bought weekly, others monthly — the system learns each cycle and knows when the customer is due. Multi-modal patterns (weekly + monthly bulk) and accelerating/declining trends are detected automatically.",
-      highlights: ["Per-item cycles", "Multi-modal detection", "Trend-aware (accelerating / declining)"],
-    },
-    {
-      title: "Five recommendation strategies",
-      description:
-        "Five independent approaches work together. Each customer-item pair is evaluated by every relevant strategy; the best signal wins, and corroborating signals stack as supporting evidence:",
-      highlights: [
-        "History — items the customer regularly buys, timed to their personal cycle",
-        "Peer matching — items similar customers on the same route buy",
-        "Basket analysis — items commonly purchased with what's already in the order",
-        "Reactivation — top items for customers who've gone quiet past their dormancy threshold",
-        "Seed — top van items for first-time / unknown customers",
-      ],
-    },
-    {
-      title: "Smart quantity sizing",
-      description:
-        "Quantities use a recency-weighted average tuned to each customer's own visit cadence — recent visits dominate for daily customers, weekly customers get a slower decay. Trending items adjust upward or downward, and outlier bulk-buys are winsorised so a single big order doesn't bias the average.",
-      highlights: ["Per-customer recency half-life", "Trend-adjusted", "Outlier-resistant", "Van-load aware"],
-    },
-    {
-      title: "Per-route AND per-customer calibration",
-      description:
-        "Every threshold is data-driven — no hardcoded business numbers. Per-route thresholds (frequency floor, cycle gate, basket confidence) are recomputed every generation from the route's distribution. Each customer then gets their own personal completion gate so a JIT mini-mart and a bulk-buying hypermarket aren't held to the same trigger.",
-      highlights: ["Route-specific thresholds", "Customer-personalised gates", "No manual configuration"],
-    },
-    {
-      title: "Honest, current-day data",
-      description:
-        "When generating today's plan, the engine excludes today's already-completed sales from the customer's history (the 'as-of cutoff'), so customers who were visited earlier today don't appear as 'just bought' and lose their full basket. Predictions stay forecast-forward, never describe-the-past.",
-      highlights: ["As-of cutoff", "No same-day leakage", "Real per-day numbers"],
-    },
-    {
-      title: "Priority ranking & explainability",
-      description:
-        "Every recommendation is scored and ranked so drivers focus on the highest-value items first. Each recommendation comes with a plain-language explanation of why it was chosen and how the quantity was sized.",
-      highlights: ["Transparent reasoning", "Priority scoring", "Actionable explanations"],
-    },
-    {
-      title: "Continuous learning",
-      description:
-        "The system tracks which recommendations actually convert to sales. Over time, it learns which strategies work best for each route and adjusts future recommendations automatically.",
-      highlights: ["Outcome tracking", "Adaptive feedback", "Self-improving"],
-    },
-  ] satisfies ProcessStep[],
-};
-
-export const SUPERVISION_INFO = {
-  title: "How live supervision works",
-  subtitle:
-    "The supervision module connects to live sales data so you can track route performance as it happens — not after the day is over.",
-  steps: [
-    {
-      title: "Real-time data connection",
-      description:
-        "The system connects to live sales data and updates every 60 seconds. When a customer invoice is created, you see it on screen within a minute.",
-      highlights: ["60-second refresh", "Live invoicing data", "No manual entry"],
-    },
-    {
-      title: "Planned vs unplanned tracking",
-      description:
-        "The system automatically separates planned customer visits (on today's route) from drop-in sales (customers not on the plan). Both are tracked and scored independently.",
-      highlights: ["Automatic classification", "Drop-in detection", "Full route visibility"],
-    },
-    {
-      title: "Visit scoring",
-      description:
-        "Every customer visit is scored in three dimensions: how many recommended items were bought (items matched), how close the quantities were (quantity accuracy), and an overall weighted score.",
-      highlights: ["Item matching", "Quantity accuracy", "Overall score"],
-    },
-    {
-      title: "Smart redistribution",
-      description:
-        "When a customer buys less than recommended, the unsold items are automatically redistributed to remaining customers on the route — prioritised by who's most likely to buy them.",
-      highlights: ["Automatic reallocation", "Priority-based", "Van utilisation"],
-    },
-    {
-      title: "AI-powered route review",
-      description:
-        "Request an AI analysis of any customer visit or the entire route. Get actionable insights — strengths, areas for improvement, and specific instructions for the supervisor.",
-      highlights: ["Per-customer analysis", "Route-level summary", "Actionable insights"],
-    },
-    {
-      title: "Session management",
-      description:
-        "Every supervision session is saved with full scoring history, redistribution records, and visit outcomes. Review past sessions for team coaching, performance tracking, and trend analysis.",
-      highlights: ["Complete history", "Team coaching", "Performance trends"],
     },
   ] satisfies ProcessStep[],
 };

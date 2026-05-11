@@ -9,7 +9,6 @@ import type {
   BusinessKpis,
   DashboardFilters,
   FilterDimensions,
-  ForecastRowsResponse,
   LookbackWindowResponse,
 } from "@/types/data-import";
 import type { DataSummary } from "@/types/common";
@@ -48,22 +47,17 @@ export const dataImportApi = {
       })
       .then((r) => r.data),
 
-  getForecastRows: (lookback?: string, filters?: Partial<DashboardFilters>) =>
-    c()
-      .get<ForecastRowsResponse>("/eda/forecast-rows", {
-        params: { ...(lookback ? { lookback } : {}), ...filterParams(filters) },
-      })
-      .then((r) => r.data),
-
   getFilterDimensions: (filters?: Partial<DashboardFilters>) =>
     c()
       .get<FilterDimensions>("/eda/filter-dimensions", {
-        // The endpoint only consumes warehouse/route/category (items are leaves).
+        // Pass the full selection vector so the backend can return
+        // ``trimmed_selections`` -- the cleaned-up codes the FilterBar
+        // applies after an upstream change invalidates a downstream pick.
         params: filterParams({
           warehouse_codes: filters?.warehouse_codes,
           route_codes: filters?.route_codes,
           category_codes: filters?.category_codes,
-          item_codes: [],
+          item_codes: filters?.item_codes,
         }),
       })
       .then((r) => r.data),

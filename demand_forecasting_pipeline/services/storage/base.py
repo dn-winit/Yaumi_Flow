@@ -6,7 +6,7 @@ Both file and database backends implement this contract.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict
 
 import pandas as pd
 
@@ -21,6 +21,15 @@ ARTIFACT_KEYS = (
     "pair_classes",
     "pair_explainability",
     "data_quality",
+    # Auxiliary artifacts -- written by the pipelines, consumed by
+    # inference / API. Registering them here lets them flow through the
+    # same atomic write/read path, surface in /health/ready artifact
+    # checks, and be cleaned up by ``_reset_artifact_dirs`` like every
+    # other tracked artifact.
+    "outlier_bounds",
+    "conformal_offsets",
+    "pair_coverage",
+    "target_encoding",
 )
 
 

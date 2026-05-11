@@ -1,11 +1,11 @@
-import { useEffect, useMemo } from "react";
+import { useEffect } from "react";
 import Card from "@/components/ui/Card";
 import MultiSelect from "@/components/ui/MultiSelect";
 import Select from "@/components/ui/Select";
 import Button from "@/components/ui/Button";
 import { useFilterDimensions } from "@/hooks/useDataImport";
 import { LOOKBACK_OPTIONS, type Lookback } from "@/lib/format";
-import type { DashboardFilters, FilterDimensionOption } from "@/types/data-import";
+import type { DashboardFilters } from "@/types/data-import";
 
 interface Props {
   value: DashboardFilters;
@@ -44,17 +44,14 @@ export default function DashboardFilterBar({
   const categories = dims.data?.categories ?? [];
   const items = dims.data?.items ?? [];
 
-  // Auto-trim selections that no longer exist in the (newly cascaded)
-  // option set. Without this, a stale code lingers and silently filters
-  // results to nothing -- a confusing UX.
+  // Auto-trim invalid selections by reading ``trimmed_selections`` from
+  // the backend response. Server already validated each code against
+  // the cascaded option sets -- the client just applies the cleaned
+  // vector when it differs from the current state.
   useEffect(() => {
     if (dims.loading || !dims.data) return;
-    const trimmed: DashboardFilters = {
-      warehouse_codes: trimTo(value.warehouse_codes, warehouses),
-      route_codes: trimTo(value.route_codes, routes),
-      category_codes: trimTo(value.category_codes, categories),
-      item_codes: trimTo(value.item_codes, items),
-    };
+    const trimmed = dims.data.trimmed_selections;
+    if (!trimmed) return;
     if (
       trimmed.warehouse_codes.length !== value.warehouse_codes.length ||
       trimmed.route_codes.length !== value.route_codes.length ||
@@ -66,14 +63,15 @@ export default function DashboardFilterBar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dims.data, dims.loading]);
 
-  const activeCount = useMemo(
-    () =>
-      value.warehouse_codes.length +
-      value.route_codes.length +
-      value.category_codes.length +
-      value.item_codes.length,
-    [value]
-  );
+  // The "N filters active" badge is a presentation count of the user's
+  // own UI state (length of each selection array). Not a calculation
+  // on business data -- the underlying values are what the user just
+  // picked in the dropdowns.
+  const activeCount =
+    value.warehouse_codes.length +
+    value.route_codes.length +
+    value.category_codes.length +
+    value.item_codes.length;
 
   function update<K extends keyof DashboardFilters>(key: K, next: string[]) {
     // Cascade reset: changing an upstream level clears every downstream
@@ -166,9 +164,3 @@ export default function DashboardFilterBar({
   );
 }
 
-function trimTo(selected: string[], options: FilterDimensionOption[]): string[] {
-  if (selected.length === 0) return selected;
-  const valid = new Set(options.map((o) => o.code));
-  const filtered = selected.filter((c) => valid.has(c));
-  return filtered.length === selected.length ? selected : filtered;
-}

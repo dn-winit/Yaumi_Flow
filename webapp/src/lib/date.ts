@@ -25,6 +25,21 @@ export function todayIso(): string {
   return toLocalIsoDate();
 }
 
+/**
+ * Whole calendar days elapsed since the given ISO date / datetime,
+ * interpreted in local time. Returns ``null`` for unparseable input.
+ * Single source of truth for "X days ago" calculations across pages.
+ */
+export function daysSince(value: unknown): number | null {
+  if (value == null || value === "") return null;
+  const dt = value instanceof Date ? value : new Date(String(value));
+  const ms = dt.getTime();
+  if (!Number.isFinite(ms)) return null;
+  const elapsedMs = Date.now() - ms;
+  if (elapsedMs < 0) return 0;
+  return Math.floor(elapsedMs / (24 * 60 * 60 * 1000));
+}
+
 /** Add (or subtract) calendar days to a YYYY-MM-DD date string. Returns YYYY-MM-DD. */
 export function addDays(dateIso: string, delta: number): string {
   const [y, m, d] = dateIso.split("-").map(Number);

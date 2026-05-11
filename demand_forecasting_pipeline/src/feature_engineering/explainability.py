@@ -1,8 +1,8 @@
 """
-Per-pair descriptive statistics — feeds ``pair_explainability.csv`` for the
+Per-pair descriptive statistics - feeds ``pair_explainability.csv`` for the
 UI, drift checks, and routing signals.
 
-Explainability never re-derives ADI / CV² / class: those are already
+Explainability never re-derives ADI / CV^2 / class: those are already
 computed by :func:`classify_dataset` and are supplied via ``classes_df``.
 This keeps the per-pair loop single-purpose.
 
@@ -15,8 +15,8 @@ Column surface (single source of truth for downstream consumers):
     sum_qty                total observed demand
     min_qty                smallest single-period demand (incl. zeros)
     max_qty                largest single-period demand
-    range_qty              max_qty − min_qty — the OBSERVED historical range
-                           of demand. Directly comparable to the q_90 − q_10
+    range_qty              max_qty - min_qty - the OBSERVED historical range
+                           of demand. Directly comparable to the q_90 - q_10
                            interval width: when the band looks "wide", this
                            number explains why (the data itself is wide).
     std_qty                std over all periods (includes zeros)
@@ -96,7 +96,7 @@ def compute_pair_explainability(
 
     ``classes_df`` is the output of :func:`classify_dataset` (indexed by
     ``group_keys``, with ``adi`` / ``cv2`` / ``class`` columns). We do NOT
-    recompute those columns here — they come pre-computed in one place.
+    recompute those columns here - they come pre-computed in one place.
 
     ``recent_window_periods`` controls a second slice: each pair's last N
     *periods* of training history (sorted by ``date_col``) feeds the
@@ -120,7 +120,7 @@ def compute_pair_explainability(
         min_q = float(s.min()) if len(s) else 0.0
         max_q = float(s.max()) if len(s) else 0.0
 
-        # Recent-window slice — the customer's "what we've seen lately" view.
+        # Recent-window slice - the customer's "what we've seen lately" view.
         s_recent = s.tail(recent_n)
         recent_min = float(s_recent.min()) if len(s_recent) else 0.0
         recent_max = float(s_recent.max()) if len(s_recent) else 0.0

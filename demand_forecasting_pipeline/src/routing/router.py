@@ -1,11 +1,11 @@
 """
-Router — turns pair signals into pair-level routing decisions.
+Router - turns pair signals into pair-level routing decisions.
 
 Design:
 
   1. Rules are declared in config, sorted by priority (DESC).
   2. Each rule's ``when`` is evaluated *vectorized* across the full signal
-     frame — one pandas mask per rule, not per pair. That's the only
+     frame - one pandas mask per rule, not per pair. That's the only
      iteration over the frame.
   3. Rule actions (allow / exclude / prefer / modifiers) are accumulated
      per pair. ``allow`` is the first winner (highest priority allow rule
@@ -14,7 +14,7 @@ Design:
      menu if no ``allow`` fired) minus exclude, then reordered so
      ``prefer`` entries come first.
 
-No rule → pair uses the class's full menu (i.e. today's behaviour).
+No rule -> pair uses the class's full menu (i.e. today's behaviour).
 Reason string is the semicolon-joined list of fired rule names; the raw
 list is also persisted so downstream tooling can parse it.
 """
@@ -22,7 +22,7 @@ list is also persisted so downstream tooling can parse it.
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -31,12 +31,20 @@ from .rules import Rule, evaluate_condition
 logger = logging.getLogger(__name__)
 
 
-@dataclass
+@dataclass(frozen=True)
 class Route:
-    models: list[str] = field(default_factory=list)
+    """Immutable per-pair routing decision.
+
+    ``models`` and ``fired_rules`` are tuples (not lists) so the value
+    survives a ``frozen=True`` dataclass and downstream code can never
+    mutate a routing decision in place. Construction sites in this
+    module pass tuples explicitly.
+    """
+
+    models: tuple[str, ...] = ()
     skip_hp_tuning: bool = False
     hp_trials_multiplier: float = 1.0
-    fired_rules: list[str] = field(default_factory=list)
+    fired_rules: tuple[str, ...] = ()
 
     @property
     def reason(self) -> str:
@@ -147,10 +155,10 @@ class Router:
                 final_models = filtered
 
             routes[pair_key] = Route(
-                models=final_models,
+                models=tuple(final_models),
                 skip_hp_tuning=skip_hp[i],
                 hp_trials_multiplier=hp_mult[i],
-                fired_rules=list(fired[i]),
+                fired_rules=tuple(fired[i]),
             )
         return routes
 
@@ -166,7 +174,7 @@ class Router:
         """Union of models across all pairs of each class.
 
         Training can skip fitting any model that isn't in a class's coverage
-        — nothing selects it, so fitting it is wasted work.
+        - nothing selects it, so fitting it is wasted work.
         """
         out: dict[str, set[str]] = {}
         for pair_key, route in routes.items():
@@ -206,6 +214,6 @@ class Router:
             unknown = rule.referenced_signals() - known_signals
             if unknown:
                 logger.warning(
-                    "Routing rule '%s' references unknown signal(s) %s — rule will never fire.",
+                    "Routing rule '%s' references unknown signal(s) %s - rule will never fire.",
                     rule.name, sorted(unknown),
                 )

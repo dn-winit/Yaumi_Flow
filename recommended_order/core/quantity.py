@@ -108,7 +108,10 @@ class QuantityCalculator:
         # Safety clamp to perfect-zone endpoints (never pitch outside)
         proposed = max(expected * lo, min(expected * hi, proposed))
 
-        qty = max(1, int(round(proposed)))
+        # Quantity contract: round UP to next whole unit ("you can't sell
+        # 17.4 of a SKU"). Banker's ``round`` would silently drop ~half a
+        # unit on average, divergent from the rest of the chain.
+        qty = max(1, int(np.ceil(proposed)))
         qty = min(qty, int(van_qty))
 
         # Emit qty_derivation signal (single source for the sentence). The

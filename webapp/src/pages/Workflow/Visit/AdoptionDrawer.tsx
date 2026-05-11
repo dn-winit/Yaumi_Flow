@@ -7,6 +7,8 @@ import HighlightsStrip, { type Highlight } from "@/components/ui/HighlightsStrip
 import MetricCard from "@/components/charts/MetricCard";
 import LineChart from "@/components/charts/LineChart";
 import BarChart from "@/components/charts/BarChart";
+import InfoBubble from "@/components/ui/InfoBubble";
+import SectionLabel from "@/components/ui/SectionLabel";
 import { CHART_COLOR } from "@/components/charts/theme";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
@@ -16,12 +18,16 @@ import { fmtDate, fmtDateRange } from "@/lib/date";
 import {
   fmtNum,
   fmtCurrency,
+  fmtPct,
+  fmtBps,
   DELIVERY_GOOD,
   DEFAULT_LOOKBACK,
   type Lookback,
 } from "@/lib/format";
 import type { DashboardFilters } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
+
+const MISSING = "--";
 
 interface Props {
   open: boolean;
@@ -65,19 +71,14 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   // days" -- this drawer never recomputes it from calendar deltas.
   const window = useLookbackWindow(open ? lookback : undefined);
   const w = window.data;
-  const { params, windowLabel } = useMemo(() => {
-    if (!w?.available || !w.start_date || !w.end_date) {
-      return { params: null, windowLabel: "—" };
-    }
+  const params = useMemo(() => {
+    if (!w?.available || !w.start_date || !w.end_date) return null;
     return {
-      params: {
-        start_date: w.start_date,
-        end_date: w.end_date,
-        ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
-        ...(filters.category_codes.length > 0 ? { category_codes: filters.category_codes } : {}),
-        ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
-      },
-      windowLabel: fmtDateRange(w.start_date, w.end_date),
+      start_date: w.start_date,
+      end_date: w.end_date,
+      ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
+      ...(filters.category_codes.length > 0 ? { category_codes: filters.category_codes } : {}),
+      ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
     };
   }, [w, filters]);
 
@@ -87,63 +88,27 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   );
   const s = data?.summary ?? null;
 
-  // Pad daily series to every working day in the lookback window so the
-  // X-axis never skips a day -- shared canonical list with the dashboard
-  // and the AccuracyDrawer.
-  //
-  // Days WITHOUT stored recommendations get ``adoption_pct: null`` (not 0)
-  // so the line chart breaks at those points instead of dragging the
-  // series to the floor. A real zero (recommended>0 but adopted=0) still
-  // plots as 0%, which is the honest signal the supervisor wants to see.
-  const activeDates = w?.active_dates ?? [];
-  const dailyPadded = useMemo(() => {
-    const rows = data?.daily ?? [];
-    if (activeDates.length === 0) return rows;
-    const byDate = new Map<string, (typeof rows)[number]>();
-    for (const row of rows) byDate.set(row.date, row);
-    return activeDates.map((date) => {
-      const r = byDate.get(date);
-      if (r) return r;
-      return { date, recommended: 0, adopted: 0, adoption_pct: null as unknown as number };
-    });
-  }, [data?.daily, activeDates]);
-  const daysWithRecs = useMemo(
-    () => (data?.daily ?? []).filter((d) => d.recommended > 0).length,
-    [data?.daily],
-  );
-
-  // All four tiles derive from the same backend summary snapshot.
-  const derived = useMemo(() => {
-    if (!s) return null;
-    const pickAccuracyPct =
-      s.skus_recommended > 0 ? (s.skus_adopted / s.skus_recommended) * 100 : null;
-    const perfectPickPct =
-      s.skus_adopted > 0 ? (s.skus_perfect / s.skus_adopted) * 100 : null;
-
-    let bestDayDate = "";
-    let bestDayPct = -1;
-    (data?.daily ?? []).forEach((d) => {
-      if (d.recommended > 0 && d.adoption_pct > bestDayPct) {
-        bestDayPct = d.adoption_pct;
-        bestDayDate = d.date;
-      }
-    });
-
-    return {
-      pickAccuracyPct,
-      perfectPickPct,
-      bestDay: bestDayPct >= 0 ? { date: bestDayDate, pct: bestDayPct } : null,
-    };
-  }, [s, data?.daily]);
+  // Window label and the padded daily series both come straight from
+  // the backend response -- no client-side date math, no client-side
+  // padding. The server returns ``daily`` already aligned to every
+  // working day in the window, with ``adoption_pct=null`` on days
+  // without recommendations (the chart treats nulls as a break).
+  const windowLabel =
+    data?.start_date && data?.end_date
+      ? fmtDateRange(data.start_date, data.end_date)
+      : MISSING;
+  const dailyPadded = data?.daily ?? [];
+  const daysWithRecs = s?.days_with_recs ?? 0;
+  const activeDays = s?.active_days ?? 0;
 
   const highlights = useMemo<Highlight[]>(() => {
-    if (!derived || !s) return [];
+    if (!s) return [];
     const items: Highlight[] = [];
-    if (derived.bestDay) {
+    if (s.best_day) {
       items.push({
         label: "Best day",
-        value: `${derived.bestDay.pct.toFixed(1)}% hit rate`,
-        detail: fmtDate(derived.bestDay.date),
+        value: `${fmtPct(s.best_day.pct)} hit rate`,
+        detail: fmtDate(s.best_day.date),
       });
     }
     if (s.skus_adopted > 0) {
@@ -154,20 +119,20 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       });
     }
     return items;
-  }, [derived, s]);
+  }, [s]);
 
   const revenueArrow: "up" | "down" | undefined =
     s?.driven_revenue != null && s.driven_revenue > 0 ? "up" : undefined;
   const accuracyArrow: "up" | "down" | undefined =
-    derived?.pickAccuracyPct == null
+    s?.pick_accuracy_pct == null
       ? undefined
-      : derived.pickAccuracyPct >= DELIVERY_GOOD
+      : s.pick_accuracy_pct >= DELIVERY_GOOD
       ? "up"
       : "down";
   const perfectPickArrow: "up" | "down" | undefined =
-    derived?.perfectPickPct == null
+    s?.perfect_pick_pct == null
       ? undefined
-      : derived.perfectPickPct >= DELIVERY_GOOD
+      : s.perfect_pick_pct >= DELIVERY_GOOD
       ? "up"
       : "down";
 
@@ -196,6 +161,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
           />
         ) : (
           <>
+            <SectionLabel>How customers responded to our recommendations</SectionLabel>
             <KpiRow>
               <MetricCard
                 label="Revenue from our suggestions"
@@ -209,15 +175,33 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 subtitle={
                   !s || s.recommended_volume <= 0
                     ? "No recommendations bought yet"
-                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units sold · ${fmtNum(s.skus_adopted)} items`
+                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units actually sold · ${fmtNum(s.skus_adopted)} items`
                 }
                 trend={revenueArrow}
+                info={
+                  <InfoBubble
+                    title="Revenue from our suggestions"
+                    body={
+                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                        <p>AED of customer purchases that came from items we recommended to that customer.</p>
+                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                          driven_revenue = Σ (qty_bought × unit_price)<br />
+                          where (customer, item, day) appears in BOTH:<br />
+                          &nbsp;&nbsp;recommended_orders.csv  AND<br />
+                          &nbsp;&nbsp;VW_GET_SALES_DETAILS (TrxType=&apos;SalesInvoice&apos;)
+                        </p>
+                        <p>This isolates the revenue our recommendations <em>actually</em> drove — not just total revenue, but the slice attributable to suggestions the rep made.</p>
+                      </div>
+                    }
+                  />
+                }
+                className="!border-l-success-600"
               />
               <MetricCard
                 label="Items the customer took"
                 value={
-                  derived?.pickAccuracyPct != null
-                    ? `${derived.pickAccuracyPct.toFixed(1)}%`
+                  s?.pick_accuracy_pct != null
+                    ? fmtPct(s.pick_accuracy_pct)
                     : "-"
                 }
                 subtitle={
@@ -226,23 +210,53 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                     : "No recommendations to score"
                 }
                 trend={accuracyArrow}
+                info={
+                  <InfoBubble
+                    title="Items the customer took"
+                    body={
+                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                        <p>The percentage of items we recommended that the customer actually bought.</p>
+                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                          pick_accuracy = items_adopted ÷ items_recommended × 100
+                        </p>
+                        <p>Counts each (customer, item, day) once. A high number means the rep&apos;s recommendation list was on-target with what the customer wanted.</p>
+                      </div>
+                    }
+                  />
+                }
+                className="!border-l-brand-600"
               />
               <MetricCard
                 label="Right quantity, right item"
                 value={
-                  derived?.perfectPickPct != null
-                    ? `${derived.perfectPickPct.toFixed(1)}%`
+                  s?.perfect_pick_pct != null
+                    ? fmtPct(s.perfect_pick_pct)
                     : "-"
                 }
                 subtitle={
                   s && s.skus_adopted > 0
-                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within ±${Math.round(s.perfect_pick_tolerance * 100)}% of suggested`
+                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within ±${fmtBps(s.perfect_pick_tolerance)} of suggested`
                     : "No adopted items to score"
                 }
                 trend={perfectPickArrow}
+                info={
+                  <InfoBubble
+                    title="Right quantity, right item"
+                    body={
+                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                        <p>Of the items the customer bought from our recommendations, the percentage where the bought quantity was within ±{s ? fmtBps(s.perfect_pick_tolerance) : "20%"} of the recommended quantity.</p>
+                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                          perfect_pick = items_within_tolerance ÷ items_adopted × 100
+                        </p>
+                        <p>Tighter than &quot;Items the customer took&quot; — this checks both the SKU choice and the volume. The tolerance is set per-deployment in the recommendation engine config.</p>
+                      </div>
+                    }
+                  />
+                }
+                className="!border-l-brand-600"
               />
               <MetricCard
-                label="Sales we could have made"
+                label="Sales opportunity flagged"
                 value={
                   s?.unsold_revenue != null && s.unsold_revenue > 0
                     ? fmtCurrency(s.unsold_revenue)
@@ -252,9 +266,27 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   !s || s.unsold_volume === 0
-                    ? "We captured every recommended unit"
-                    : `${fmtNum(s.unsold_volume)} units · ${fmtNum(s.unsold_sku_count)} items — extra sales the recommendations pointed to`
+                    ? "Every recommended unit was bought"
+                    : `${fmtNum(s.unsold_volume)} units across ${fmtNum(s.unsold_sku_count)} items where customers didn't buy what we suggested — opportunity to re-pitch next visit`
                 }
+                trend={s?.unsold_volume != null && s.unsold_volume > 0 ? "up" : undefined}
+                info={
+                  <InfoBubble
+                    title="Sales opportunity flagged"
+                    body={
+                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                        <p>The AED value of items we recommended to customers that <strong>they didn&apos;t buy</strong> on this visit.</p>
+                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                          unsold_per_(customer,item,day) = max(recommended_qty − bought_qty, 0)<br />
+                          unsold_revenue = Σ unsold × avg_unit_price
+                        </p>
+                        <p><strong>Read it as opportunity, not error.</strong> A high number means the recommendations identified demand the customer hasn&apos;t yet acted on — items the team can re-pitch on the next visit, or that signal a stocking / pricing barrier.</p>
+                        <p>This number sits alongside Dashboard&apos;s &quot;Sales opportunity flagged&quot; tile — same opportunity-positive framing, scoped here to recommendation-vs-purchase per customer rather than forecast-vs-sales per route.</p>
+                      </div>
+                    }
+                  />
+                }
+                className="!border-l-brand-600"
               />
             </KpiRow>
 
@@ -265,8 +297,8 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 <LineChart
                   title="Daily share of suggestions that sold"
                   subtitle={
-                    daysWithRecs > 0 && daysWithRecs < activeDates.length
-                      ? `Recommendations stored for ${daysWithRecs} of ${activeDates.length} days in this window — gaps in the line mean no recommendations were generated that day.`
+                    daysWithRecs > 0 && daysWithRecs < activeDays
+                      ? `Recommendations stored for ${daysWithRecs} of ${activeDays} days in this window - gaps in the line mean no recommendations were generated that day.`
                       : undefined
                   }
                   data={dailyPadded as unknown as Record<string, unknown>[]}

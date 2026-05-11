@@ -34,10 +34,13 @@ class Analyzer:
             cache_dir=self._s.cache_dir,
             ttl_hours=self._s.cache_ttl_hours,
             enabled=self._s.cache_enabled,
+            janitor_every_n_writes=self._s.cache_janitor_every_n_writes,
         )
         self._limiter = RateLimiter(
             max_requests=self._s.rate_limit_max_requests,
             window_seconds=self._s.rate_limit_window_seconds,
+            acquire_timeout_seconds=self._s.rate_limit_acquire_timeout_seconds,
+            poll_interval_seconds=self._s.rate_limit_poll_interval_seconds,
         )
 
     # ------------------------------------------------------------------
@@ -251,6 +254,7 @@ class Analyzer:
     def _call_with_retry(self, system: str, user: str, model_cls: type, label: str) -> Dict[str, Any]:
         """Call LLM with retries on JSON parse/validation failure."""
         for attempt in range(self._s.max_retries):
+            raw: Optional[Dict[str, Any]] = None
             try:
                 raw = self._client.chat(system, user, attempt=attempt)
 
@@ -260,10 +264,8 @@ class Analyzer:
 
             except ValidationError as exc:
                 logger.warning("%s validation failed (attempt %d): %s", label, attempt + 1, exc)
-                if attempt == self._s.max_retries - 1:
-                    # Return raw if it's at least a dict
-                    if isinstance(raw, dict):
-                        return raw
+                if attempt == self._s.max_retries - 1 and isinstance(raw, dict):
+                    return raw
             except Exception as exc:
                 logger.error("%s failed (attempt %d): %s", label, attempt + 1, exc)
                 if attempt == self._s.max_retries - 1:

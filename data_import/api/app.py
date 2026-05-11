@@ -42,6 +42,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 This covers the case where the server was down overnight and
                 the scheduled cron missed its window. Runs off the request
                 path so startup isn't blocked."""
+                # Default-stale so any failure in the freshness probe falls
+                # through to a refresh + cache invalidate, never to NameError
+                # in the warm-up block below.
+                stale = True
                 try:
                     importer = get_importer()
                     today = datetime.now().strftime("%Y-%m-%d")
@@ -49,15 +53,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     # Quick freshness check: peek at the most recent date in
                     # sales_recent.csv (the fastest-changing dataset).
                     sales_csv = Path(settings.data_dir) / "sales_recent.csv"
-                    stale = True
                     if sales_csv.exists():
                         import pandas as pd
                         try:
-                            df = pd.read_csv(sales_csv, usecols=["TrxDate"], nrows=0)
-                            # Read last 100 rows for max date (cheaper than full scan)
-                            tail = pd.read_csv(sales_csv, usecols=["TrxDate"]).tail(500)
-                            max_date = str(tail["TrxDate"].max()).strip()[:10]
-                            # Stale if max date is more than 1 day behind today
+                            max_date = str(
+                                pd.read_csv(sales_csv, usecols=["TrxDate"])["TrxDate"].max()
+                            ).strip()[:10]
                             stale = max_date < today
                             _logger.info("Sales CSV max date: %s, today: %s, stale: %s", max_date, today, stale)
                         except Exception as exc:
@@ -113,9 +114,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
+    # CORS pinned to the configured webapp origins -- never ``*`` with
+    # credentials, which browsers silently block. Override via the
+    # shared ``YF_ALLOW_ORIGINS`` env var.
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
+        allow_origins=settings.allow_origins,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],

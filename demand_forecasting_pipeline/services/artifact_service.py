@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -19,16 +19,12 @@ from demand_forecasting_pipeline.src.utils.config_loader import load_config, res
 
 logger = logging.getLogger(__name__)
 
-# Shared with the API route default; callers can override.
-DEFAULT_PAGE_LIMIT = 5000
-
-
 class ArtifactService:
     """Serves pipeline artifacts via cached file reads.
 
     Dtype coercion is driven by the pipeline YAML (same source of truth the
     training/inference pipelines use) so that API responses match the types
-    emitted upstream — no silent int↔string drift between CSV and JSON.
+    emitted upstream - no silent int<->string drift between CSV and JSON.
     """
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
@@ -38,13 +34,13 @@ class ArtifactService:
 
         # Resolve dtype contract + key column names from the pipeline YAML
         # once. If the YAML is missing or can't be parsed we fall back to
-        # the historical column names — the API still works, it just won't
+        # the historical column names - the API still works, it just won't
         # adapt if a future config renames things.
         try:
             cfg = load_config(self._s.pipeline_config)
-            self._dtypes: Dict[str, str] = resolve_dtypes(cfg)
+            self._dtypes: dict[str, str] = resolve_dtypes(cfg)
             data_cfg = cfg.get("data", {}) or {}
-            self._group_keys: List[str] = list(data_cfg.get("forecast_level") or [])
+            self._group_keys: list[str] = list(data_cfg.get("forecast_level") or [])
             self._date_col: str = data_cfg.get("date_col") or ""
             self._date_cols = {self._date_col} - {""}
             self._target_col: str = data_cfg.get("target_col") or ""
@@ -67,6 +63,55 @@ class ArtifactService:
         return self._group_keys[1] if len(self._group_keys) >= 2 else "ItemCode"
 
     # ------------------------------------------------------------------
+    # Test-predictions schema resolvers
+    #
+    # Two scorers (drift baseline + summary KPI) read the same
+    # test_predictions.csv and need the same column-name discipline.
+    # Centralised here so a future artifact-schema rename only has to
+    # update one resolver, not every caller. Returns None when the
+    # column is absent so callers can render an em-dash instead of
+    # crashing or silently scoring against a zero column.
+    # ------------------------------------------------------------------
+
+    def resolve_actual_column(self, df: pd.DataFrame) -> Optional[str]:
+        """Pick the column carrying realised quantity in test_predictions.
+
+        Tries the configured ``target_col`` first (legacy artifacts), then
+        the canonical ``actual_qty`` the current pipeline writes. Same
+        precedence the prior inline implementations used in summary.py
+        and retrain_scheduler.py."""
+        configured = (self._target_col or "").strip()
+        for cand in (configured, "actual_qty"):
+            if cand and cand in df.columns:
+                return cand
+        return None
+
+    def resolve_prediction_column(self, df: pd.DataFrame) -> Optional[str]:
+        """Pick the column carrying the model's point forecast.
+
+        ``prediction`` is the canonical name the current pipeline writes;
+        ``predicted`` is kept as a fallback for legacy snapshots so an
+        older test_predictions.csv still scores rather than silently
+        evaluating to zero."""
+        for cand in ("prediction", "predicted"):
+            if cand in df.columns:
+                return cand
+        return None
+
+    @property
+    def composite_accuracy_kwargs(self) -> dict:
+        """Composite-WAPE kwargs (per-class tolerances) read from the same
+        pipeline YAML training used. Returns an empty dict if the config
+        is missing/invalid -- callers fall through to module defaults.
+
+        Cached at the metrics-module level (one parse per YAML path),
+        so this property is effectively free to re-read."""
+        from demand_forecasting_pipeline.src.evaluation.metrics import (
+            composite_kwargs_from_yaml,
+        )
+        return composite_kwargs_from_yaml(self._s.pipeline_config)
+
+    # ------------------------------------------------------------------
     # Predictions
     # ------------------------------------------------------------------
 
@@ -74,15 +119,16 @@ class ArtifactService:
         self,
         route_code: Optional[str] = None,
         item_code: Optional[str] = None,
-        limit: int = DEFAULT_PAGE_LIMIT,
+        limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
         df = self._read_df("test_predictions")
         df = self._apply_filters(df, route_code=route_code, item_code=item_code)
         total = len(df)
-        return df.iloc[offset : offset + limit], total
+        eff_limit = int(limit if limit is not None else self._s.default_page_limit)
+        return df.iloc[offset : offset + eff_limit], total
 
-    def _van_load_view(self) -> pd.DataFrame:
+    def van_load_view(self) -> pd.DataFrame:
         """Unified "what's on the van" frame -- the single source of truth
         every operational consumer reads (VanLoad page, route-summary tile,
         recommendation engine).
@@ -130,13 +176,14 @@ class ArtifactService:
         self,
         route_code: Optional[str] = None,
         item_code: Optional[str] = None,
-        limit: int = DEFAULT_PAGE_LIMIT,
+        limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
-        df = self._van_load_view()
+        df = self.van_load_view()
         df = self._apply_filters(df, route_code=route_code, item_code=item_code)
         total = len(df)
-        return df.iloc[offset : offset + limit], total
+        eff_limit = int(limit if limit is not None else self._s.default_page_limit)
+        return df.iloc[offset : offset + eff_limit], total
 
     def get_future_forecast_meta(self) -> tuple[int, Optional[str]]:
         """Return ``(total_rows, max_TrxDate_iso)`` from the cached future
@@ -154,37 +201,6 @@ class ArtifactService:
                 max_date = str(mx)
         return int(len(df)), max_date
 
-    def get_future_route_summary(self, date: Optional[str] = None) -> List[Dict[str, Any]]:
-        """Per-route aggregates over the unified van-load view.
-
-        Reads the same Forecast+Test union the table and the recommendation
-        engine read, so the tile's SKU count matches what the supervisor
-        sees once they open the route. Skips rows with prediction <= 0
-        (van-load semantics — you don't load what the model said to skip).
-
-        If ``date`` is given, summarises that date only; otherwise collapses
-        the full horizon.
-        """
-        df = self._van_load_view()
-        rk, ik, dk = self._route_key, self._item_key, self._date_col
-        if df.empty or rk not in df.columns:
-            return []
-        if date and dk and dk in df.columns:
-            df = df[df[dk] == date]
-        if df.empty:
-            return []
-
-        grouped = df.groupby(rk)
-        out: List[Dict[str, Any]] = []
-        for rc, g in grouped:
-            out.append({
-                "route_code": str(rc),
-                "skus": int(g[ik].nunique()) if ik in g.columns else 0,
-                "predicted_qty": round(float(g["prediction"].sum()), 1) if "prediction" in g.columns else 0.0,
-            })
-        out.sort(key=lambda r: r["route_code"])
-        return out
-
     # ------------------------------------------------------------------
     # Metrics
     # ------------------------------------------------------------------
@@ -199,13 +215,13 @@ class ArtifactService:
     # Training summary
     # ------------------------------------------------------------------
 
-    def get_training_summary(self) -> Dict[str, Any]:
+    def get_training_summary(self) -> dict[str, Any]:
         return self._cache.get_or_load(
             "training_summary",
             lambda: self._storage.read_json("training_summary"),
         ) or {}
 
-    def get_data_quality(self) -> Dict[str, Any]:
+    def get_data_quality(self) -> dict[str, Any]:
         # data_quality.json is written by the data_processing step (~2 min
         # in), long before pair_classes.csv (end of training, ~18 min).
         # Reading it lets the dashboard surface the real pair count
@@ -253,7 +269,7 @@ class ArtifactService:
     # Model files (always from disk)
     # ------------------------------------------------------------------
 
-    def list_model_files(self) -> List[Dict[str, Any]]:
+    def list_model_files(self) -> list[dict[str, Any]]:
         models_dir = Path(self._s.models_dir)
         if not models_dir.exists():
             return []
@@ -272,7 +288,7 @@ class ArtifactService:
     # Summaries
     # ------------------------------------------------------------------
 
-    def get_class_summary(self) -> Dict[str, Any]:
+    def get_class_summary(self) -> dict[str, Any]:
         # Authoritative path: the persisted per-pair class assignment from
         # the most recent run.
         df = self.get_pair_classes()
@@ -293,7 +309,7 @@ class ArtifactService:
     # Artifact checks
     # ------------------------------------------------------------------
 
-    def check_artifacts(self) -> Dict[str, bool]:
+    def check_artifacts(self) -> dict[str, bool]:
         return {k: self._storage.exists(k) for k in ARTIFACT_KEYS}
 
     # ------------------------------------------------------------------
@@ -305,7 +321,7 @@ class ArtifactService:
         self._cache.invalidate(key)
         return rows
 
-    def write_json(self, key: str, data: Dict[str, Any]) -> bool:
+    def write_json(self, key: str, data: dict[str, Any]) -> bool:
         ok = self._storage.write_json(key, data)
         self._cache.invalidate(key)
         return ok
@@ -319,7 +335,7 @@ class ArtifactService:
 
     @property
     def cache_keys(self) -> list[str]:
-        """Non-expired cache keys — exposed so the health endpoint doesn't
+        """Non-expired cache keys - exposed so the health endpoint doesn't
         have to reach into private state."""
         return self._cache.keys
 
@@ -330,8 +346,8 @@ class ArtifactService:
         return self._target_col
 
     @staticmethod
-    def to_records(df: pd.DataFrame) -> List[Dict[str, Any]]:
-        """JSON-safe DataFrame → list-of-dicts. Replaces NaN / ±Inf with
+    def to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
+        """JSON-safe DataFrame -> list-of-dicts. Replaces NaN / +/-Inf with
         ``None`` so the payload survives FastAPI / browser JSON strict mode
         (which rejects ``nan``). Centralizes the conversion so every API
         route gets identical serialization behaviour.

@@ -4,8 +4,8 @@ Per-pair split balance audit.
 The global time-based split doesn't guarantee every pair has data in both
 train and test. Some pairs only sold in the training window (recently went
 silent); others appeared only in the test window (brand new). This module
-produces the per-pair counts that let downstream stages — routing, the
-training loop, the data-quality report — handle those pairs deliberately
+produces the per-pair counts that let downstream stages - routing, the
+training loop, the data-quality report - handle those pairs deliberately
 instead of dropping them silently.
 """
 

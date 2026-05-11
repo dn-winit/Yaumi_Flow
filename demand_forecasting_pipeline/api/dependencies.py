@@ -37,3 +37,25 @@ def get_accuracy_service() -> AccuracyService:
 @lru_cache(maxsize=1)
 def get_retrain_config() -> AutoRetrainConfig:
     return AutoRetrainConfig(settings=get_settings())
+
+
+# ----------------------------------------------------------------------
+# Reconciliation layer (V5_b)
+# ----------------------------------------------------------------------
+
+@lru_cache(maxsize=1)
+def get_bias_service():
+    from demand_forecasting_pipeline.services.reconciliation import BiasService
+    return BiasService(get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_van_load_service():
+    from demand_forecasting_pipeline.services.reconciliation import VanLoadService
+    return VanLoadService(get_settings())
+
+
+@lru_cache(maxsize=1)
+def get_reconciliation_engine():
+    from demand_forecasting_pipeline.services.reconciliation import ReconciliationEngine
+    return ReconciliationEngine(settings=get_settings())

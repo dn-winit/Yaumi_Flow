@@ -24,14 +24,20 @@ class TwoStageForecaster(BaseForecaster):
         df["_y_bin"] = (df[target_col] > 0).astype(int)
         X = df[feature_cols].fillna(0.0)
         y_bin = df["_y_bin"].values
+        # Both knobs are config-overridable via
+        # ``models.model_defaults.two_stage`` so tuning effort and the
+        # minimum-history-to-fit-regressor can adapt to the deployment
+        # without touching code.
+        max_iter = int(self.params.get("max_iter", 1000))
+        min_nonzero_for_regressor = int(self.params.get("min_nonzero_for_regressor", 5))
         if y_bin.sum() == 0 or y_bin.sum() == len(y_bin):
             self.classifier_ = None
         else:
-            self.classifier_ = LogisticRegression(max_iter=1000, class_weight="balanced")
+            self.classifier_ = LogisticRegression(max_iter=max_iter, class_weight="balanced")
             self.classifier_.fit(X, y_bin)
         nz = df[df[target_col] > 0]
         self.regressor_ = self._make_regressor()
-        if len(nz) >= 5:
+        if len(nz) >= min_nonzero_for_regressor:
             self.regressor_.fit(nz, group_keys, date_col, target_col, feature_cols)
         else:
             self.regressor_ = None
@@ -50,7 +56,11 @@ class TwoStageForecaster(BaseForecaster):
             qty_pred = self.regressor_.predict(df, group_keys, date_col, target_col, feature_cols)["prediction"].values
         else:
             qty_pred = np.full(len(df), getattr(self, "_fallback_value_", 0.0))
-        final = np.where(p_demand >= self.threshold_, qty_pred, 0.0)
+        # ``getattr`` fallback so a partially-initialised pickle (e.g.
+        # an old artifact from before this attribute existed) still
+        # predicts coherently instead of crashing with AttributeError.
+        threshold = getattr(self, "threshold_", float(self.params.get("threshold", 0.5)))
+        final = np.where(p_demand >= threshold, qty_pred, 0.0)
         out = df[group_keys + [date_col]].copy()
         out["prediction"] = np.clip(final, a_min=0.0, a_max=None)
         out["p_demand"] = p_demand

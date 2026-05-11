@@ -1,6 +1,7 @@
 import { useState } from "react";
 import Card from "@/components/ui/Card";
 import EmptyState from "@/components/ui/EmptyState";
+import { Skeleton } from "@/components/ui/Skeleton";
 import LineChart from "@/components/charts/LineChart";
 import type { SalesOverviewResponse } from "@/types/data-import";
 
@@ -30,14 +31,11 @@ export default function DashboardDailyTrend({ data, loading, height = 300 }: Pro
 
   return (
     <Card
-      title="Daily sales trend"
+      title="Daily sales trend — actual customer purchases per day"
       actions={<TrendMetricToggle active={metric} onChange={setMetric} />}
     >
       {loading ? (
-        <div
-          className="animate-pulse bg-surface-sunken rounded-lg"
-          style={{ height: `${height}px` }}
-        />
+        <Skeleton className="rounded-lg" style={{ height: `${height}px` }} />
       ) : !data?.daily_trend || data.daily_trend.length === 0 ? (
         <EmptyState title="No trend data" />
       ) : (

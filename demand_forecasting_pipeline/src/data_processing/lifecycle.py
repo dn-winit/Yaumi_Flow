@@ -17,7 +17,7 @@ rows, not days):
 
 Both flags are designed to be dependable **signals** that downstream stages
 (outlier treatment, loss masking, reporting) can consult. They are not
-features — the training pipeline keeps them out of the feature matrix so
+features - the training pipeline keeps them out of the feature matrix so
 there is no risk of temporal leakage.
 """
 

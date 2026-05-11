@@ -1,19 +1,27 @@
+# Pipeline schema version. Bump alongside breaking changes in
+# demand_forecasting_pipeline/config/schema.py so old configs can't run
+# silently against an incompatible code release.
+version: "1.0"
+
 project:
   name: demand_forecasting
   random_seed: 42
   log_level: INFO
 
 paths:
-  # Sales feed produced daily by the data_import service. This is the
-  # single shared CSV every backend reads from -- keep the path in sync
-  # with data_import.config.settings.sales_recent_file.
-  raw_data: data/sales_recent.csv
-  artifacts_dir: demand_forecasting_pipeline/artifacts
-  models_dir: demand_forecasting_pipeline/artifacts/models
-  predictions_dir: demand_forecasting_pipeline/artifacts/predictions
-  metrics_dir: demand_forecasting_pipeline/artifacts/metrics
-  explainability_dir: demand_forecasting_pipeline/artifacts/explainability
-  logs_dir: demand_forecasting_pipeline/artifacts/logs
+  # Sales feed produced daily by data_import; lives in the unified
+  # imports/ mirror under YF_DATA_ROOT. Keep aligned with
+  # data_import.config.settings.sales_recent_file.
+  raw_data: data/imports/sales_recent.csv
+  # Non-DB training artifacts (models, metrics, explainability) live
+  # under data/forecast/. Predictions are NOT here -- the API reads
+  # them from data/imports/demand_forecast.csv (DB-canonical mirror).
+  artifacts_dir: data/forecast
+  models_dir: data/forecast/models
+  predictions_dir: data/forecast/predictions
+  metrics_dir: data/forecast/metrics
+  explainability_dir: data/forecast/explainability
+  logs_dir: data/forecast/logs
 
 data:
   forecast_level: [RouteCode, ItemCode]
@@ -26,7 +34,7 @@ data:
   zero_fill_value: 0.0
   activity_flag: true
   # Explicit dtype hints forwarded to ``pd.read_csv``. RouteCode values in
-  # demand_data_merged.csv look like integers (e.g. 9105) — without this
+  # demand_data_merged.csv look like integers (e.g. 9105) - without this
   # override pandas would silently cast them to int64 and strip any leading
   # zeros that might appear in future data, breaking joins with classes_df
   # (loaded from CSV where numeric-looking codes get inferred back to int).
@@ -93,22 +101,22 @@ split:
   validation_horizon: 30
 
 explainability:
-  # Per-pair "recent window" stats — last N PERIODS of each pair's training
+  # Per-pair "recent window" stats - last N PERIODS of each pair's training
   # history (sorted by date) feed ``recent_min_qty`` / ``recent_max_qty`` /
   # ``recent_range_qty`` in pair_explainability.csv. Use these to ground
   # band-width conversations in recent reality (instead of multi-year
   # extremes that dominate ``range_qty``).
   #
   # Periods, not days, so the window adapts to ``data.granularity``:
-  #   * 180 at daily   → ~6 months
-  #   * 26  at weekly  → ~6 months
-  #   * 6   at monthly → ~6 months
+  #   * 180 at daily   -> ~6 months
+  #   * 26  at weekly  -> ~6 months
+  #   * 6   at monthly -> ~6 months
   recent_window_periods: 180
 
 training:
   # Standard ML practice: train/val/test stay held-out for unbiased
   # selection and scoring (test_predictions.csv reflects a model that
-  # never saw the test slice — the honest number we report to clients).
+  # never saw the test slice - the honest number we report to clients).
   # Once the chosen model is settled, refit it on train + val + test
   # before pickling so the production model that inference loads has
   # seen ALL available history up to the moment of training. This
@@ -144,7 +152,7 @@ holidays:
   # Optional group aggregation. Maps a group name to a list of holiday
   # slugs produced by the library (inspect artifacts/data_quality.json or
   # pair_explainability after one run to see what slugs your country emits).
-  # Empty by default — the module never assumes what is religious/national.
+  # Empty by default - the module never assumes what is religious/national.
   groups: {}
   # Phased events let you split a long period into sub-regimes; the flat
   # {name, start, end} form is still supported for one-shot events.
@@ -168,7 +176,7 @@ hijri:
     pre_window_days: 7
     post_window_days: 3
 
-# Salary cycle — region-specific and business-specific, so default is off.
+# Salary cycle - region-specific and business-specific, so default is off.
 # When enabling, document the pay cycle for the region/segment you're
 # modelling. Empty pay_rules keeps the feature surface clean.
 salary_cycle:
@@ -187,17 +195,17 @@ classification:
   adi_intermittent_threshold: 1.32
   cv2_erratic_threshold: 0.49
   # Pairs with fewer non-zero observations than this are forced into the
-  # ``intermittent`` bucket regardless of their computed ADI / CV² — a
-  # single-point series trivially has CV²=0 and would otherwise be labelled
-  # "smooth" incorrectly. Raw ADI / CV² are still exported for auditing.
+  # ``intermittent`` bucket regardless of their computed ADI / CV^2 - a
+  # single-point series trivially has CV^2=0 and would otherwise be labelled
+  # "smooth" incorrectly. Raw ADI / CV^2 are still exported for auditing.
   min_observations_for_classification: 3
 
 feature_engineering:
   adaptive_depth: true
   # NaN policy for target-derived feature families (lags, rolling stats,
   # intermittent-specific). A leading NaN represents "no prior observation";
-  # we fill with 0.0 by default so every trained/served model — including
-  # ones that aren't natively NaN-tolerant — receives a clean matrix. Set to
+  # we fill with 0.0 by default so every trained/served model - including
+  # ones that aren't natively NaN-tolerant - receives a clean matrix. Set to
   # ``null`` (YAML null) to keep NaN and let NaN-tolerant backends handle it.
   nan_fill: 0.0
   # Proximity features (``days_to_next_<event>`` / ``days_since_last_<event>``)
@@ -212,13 +220,15 @@ feature_engineering:
   # (direct-forecast bias). Rolling features have the same concern but
   # filtering them to horizon-safe typically empties the list; for now we
   # only gate lags and leave rolling to the modeller's awareness.
-  horizon_safe_lags: false
+  # Production default is ``true`` -- the only way training metrics match
+  # inference at horizon > 1. Flip to ``false`` only for ablation runs.
+  horizon_safe_lags: true
   target_encoding:
     enabled: true
     smoothing: 10
   temporal:
     enabled: true
-    # Date-aware weekend regime — UAE moved weekend from Fri-Sat to Sat-Sun
+    # Date-aware weekend regime - UAE moved weekend from Fri-Sat to Sat-Sun
     # on 2022-01-01. Each rule applies to rows whose date falls in its
     # [from, until) window; later rules overwrite earlier ones on overlap.
     # Legacy flat list (e.g. [4, 5]) is still accepted.
@@ -244,7 +254,7 @@ feature_engineering:
     lumpy: [7, 14, 28]
   rolling:
     # Per-class: windows, stats, and optional min_periods_fraction.
-    # min_periods_fraction defaults to 0.5 — so roll_mean_28 needs at least 14
+    # min_periods_fraction defaults to 0.5 - so roll_mean_28 needs at least 14
     # observations before it emits a value. Tighten (e.g. 1.0) to require a
     # full window; loosen (e.g. 0.1) only if your models truly need early
     # rows filled and tolerate weakly-supported stats.
@@ -284,7 +294,7 @@ model_selection:
 #   between: [low, high]
 #   is_true / is_false
 #
-# Signals available (all optional — rules referencing absent signals simply
+# Signals available (all optional - rules referencing absent signals simply
 # never fire):
 #   class, adi, cv2
 #   n_periods, n_nonzero_periods, nonzero_ratio
@@ -339,7 +349,7 @@ routing:
     - name: rich_history_deeper_tuning
       priority: 45
       when: {n_periods: {gte: 365}}
-      # Pairs with ≥1 year of clean history are where ML pays off most —
+      # Pairs with >=1 year of clean history are where ML pays off most -
       # spend 50% more trials searching their hyperparameter neighbourhood.
       hp_trials_multiplier: 1.5
 
@@ -357,6 +367,65 @@ routing:
         cv2: {gte: 2.0}
       prefer: [lightgbm, ensemble]
 
+    # Pattern-aware rules computed from train_window only. Trend
+    # signals come from the last ``treatment.recent_window_periods``
+    # rows of each pair (config below). They never fire for cold-start
+    # / EOL pairs because those higher-priority rules already pin a
+    # naive/MA pool.
+    - name: declining_demand
+      priority: 65
+      when:
+        trend_direction: {eq: declining}
+        is_likely_eol: {is_false: true}
+      prefer: [ets, moving_average]
+
+    - name: growing_demand
+      priority: 65
+      when:
+        trend_direction: {eq: growing}
+        is_new_launch: {is_false: true}
+      prefer: [ets, lightgbm]
+
+    - name: strongly_seasonal
+      priority: 60
+      when:
+        seasonal_strength: {gte: 0.40}
+      prefer: [ets, lightgbm]
+
+    # A pair sitting on the ADI=1.32 / CV2=0.49 boundary is class-
+    # ambiguous on the data; broaden its candidate pool so per-pair
+    # selection picks the model that actually scores best, instead of
+    # being constrained to one quadrant's menu. We don't override
+    # ``allow`` -- we just give the tuner a bit more budget so the
+    # extra options get a fair fit.
+    - name: near_class_boundary
+      priority: 40
+      when:
+        near_class_boundary: {is_true: true}
+      hp_trials_multiplier: 1.3
+
+# Knobs consumed by routing.pair_treatment.compute_pattern_signals.
+# Window length defaults to explainability.recent_window_periods so a
+# single config change rolls through every "recent" computation.
+treatment:
+  recent_window_periods: 28
+  trend:
+    growing_threshold: 0.10        # relative slope*window/mean above this -> growing
+    declining_threshold: -0.10     # below this -> declining
+  seasonal:
+    # Lag null -> auto-pick from data.granularity (7 for D, 4 for Q, 12 for M, 52 for W).
+    lag: null
+  boundary:
+    adi_tolerance: 0.10            # |adi - adi_threshold| <= this -> near_class_boundary
+    cv2_tolerance: 0.05
+  cold_start:
+    # Inference-time warm-start for pairs in the feed but absent from
+    # pair_classes.csv. We borrow the per-date median forecast across
+    # same-route trained siblings; pairs whose route has fewer than
+    # ``min_route_siblings`` trained pairs stay cold (no signal to borrow).
+    enabled: true
+    min_route_siblings: 2
+
 models:
   enabled:
     smooth: [naive, moving_average, ets, linear, random_forest, lightgbm, xgboost, ensemble]
@@ -366,13 +435,13 @@ models:
   fallback_order: [moving_average, naive]
   selection_metric: rmse
   # Each model gets a flat default block. Any key can be overridden per
-  # demand class via ``per_class:`` — the pipeline merges class-specific
+  # demand class via ``per_class:`` - the pipeline merges class-specific
   # values over the flat ones.
   model_defaults:
     moving_average:
       window: 7
       per_class:
-        intermittent: {window: 28}   # sparse → longer window to smooth gaps
+        intermittent: {window: 28}   # sparse -> longer window to smooth gaps
         lumpy:        {window: 28}
     croston:
       alpha: 0.4
@@ -383,15 +452,23 @@ models:
       # data.granularity: 7 at daily, 52 at weekly, 12 at monthly, 4 at
       # quarterly. Override here only if you know your data has a different
       # dominant cycle (e.g. fiscal periods).
-      trend: null
+      #
+      # ``trend: add`` + ``damped_trend: true`` is the academic standard
+      # for declining demand: ETS extrapolates the slope but damps it
+      # toward zero so we don't predict negative quantities once the
+      # decline has run for a while. Smooth/erratic pairs that just
+      # happen to pick ETS via per-pair selection still benefit because
+      # damping is harmless when there's no real trend.
+      trend: add
       seasonal: null
+      damped_trend: true
     linear:
       alpha: 1.0
     two_stage:
       regressor: lightgbm
       threshold: 0.5
       per_class:
-        # Intermittent demand → favour recall on the "demand-occurred"
+        # Intermittent demand -> favour recall on the "demand-occurred"
         # classifier. A 0.5 threshold misses too many small-but-real demand
         # days; 0.4 trades a few false positives for catching the day a
         # sale actually happens, which is the operational priority.
@@ -403,12 +480,12 @@ hyperparameter_tuning:
   # Production-grade tuning depth. Optuna's TPE sampler needs ~20 trials
   # before it can meaningfully exploit promising regions; below that it's
   # quasi-random search. ``timeout_seconds`` caps the worst-case study
-  # duration per (class, model) — long enough for boosted-tree fits on
+  # duration per (class, model) - long enough for boosted-tree fits on
   # full-class data with 3 CV folds.
   n_trials: 25
   timeout_seconds: 600
   # Optuna direction. ``auto`` derives it from ``models.selection_metric``:
-  # error metrics (rmse/mae/mape/…) → minimize; score metrics (r2/accuracy_pct/…) → maximize.
+  # error metrics (rmse/mae/mape/...) -> minimize; score metrics (r2/accuracy_pct/...) -> maximize.
   # Set explicitly to ``minimize`` or ``maximize`` to override.
   direction: auto
   temporal_cv:
@@ -424,7 +501,14 @@ hyperparameter_tuning:
   # croston, croston_sba, ets) have built-in search spaces in the tuner and
   # can be added here once validation data is available. They converge fast
   # because their search spaces are tiny (1-2 params each).
-  models_to_tune: [lightgbm, xgboost, random_forest, linear]
+  #
+  # ``two_stage`` is included so its decision threshold is searched per
+  # class (default 0.5 / class-overridden 0.4 is rarely optimal across
+  # the full ADI/CV^2 spectrum). The two_stage search space tunes only
+  # the threshold; the inner regressor inherits already-tuned LightGBM
+  # params via ``class_tuned_params`` so we don't double-tune the same
+  # model surface.
+  models_to_tune: [lightgbm, xgboost, random_forest, linear, two_stage]
   # Optional search-space override. Any entry supplied here replaces the
   # in-code default for the matching model. Missing entries keep their
   # defaults. Accepted types: int / float (optionally log: true) / categorical.
@@ -434,9 +518,32 @@ hyperparameter_tuning:
   #       n_estimators: {type: int, low: 200, high: 1500}
   #       learning_rate: {type: float, low: 0.005, high: 0.1, log: true}
   search_spaces: {}
+  # Data-size-adaptive bounds for tree-ensemble n_estimators. The upper
+  # bound at tuning time is ``clip(n_train_rows / divisor, cap_low_floor,
+  # cap_high_ceiling)`` so a 5k-row class doesn't waste trials on giant
+  # ensembles and a 200k-row class isn't capped at the YAML default. Any
+  # model whose search space declares ``n_estimators`` is auto-capped --
+  # no per-model list to maintain.
+  adaptive_n_estimators:
+    divisor: 50.0
+    cap_low_floor: 100
+    cap_high_ceiling: 2000
 
 evaluation:
   metrics: [mae, rmse, mape, smape, bias, wape]
+  # Class-aware miss tolerances for the composite headline accuracy.
+  # Each row's miss is forgiven up to ``tolerance * actual``; only the
+  # overshoot beyond tolerance feeds the WAPE numerator. Tighter buckets
+  # (smooth) get less slack; harder buckets (lumpy) get more. The
+  # ``default`` tolerance applies when a row's class is missing or
+  # unrecognised so the metric never crashes on a sparse classifier.
+  composite_accuracy:
+    tolerance_by_class:
+      smooth:       0.10
+      intermittent: 0.20
+      erratic:      0.30
+      lumpy:        0.40
+    default: 0.20
   prediction_intervals:
     enabled: true
     quantiles: [0.1, 0.9]
@@ -480,14 +587,14 @@ inference:
   forecast_horizon: 30
   # Recursive multi-step refinement. For each iteration, the inference
   # pipeline folds the current predictions back into the panel target
-  # column (only for future rows — history is never touched), rebuilds
+  # column (only for future rows - history is never touched), rebuilds
   # lag/rolling features, and re-predicts. This is the standard recursive
   # multi-step forecasting approach.
-  #   0 → legacy direct-forecast (lag features beyond t+1 reference
-  #       placeholder zeros — biased toward under-forecasting at horizon > 1)
-  #   1 → single fold-back, captures most short-lag dependencies (recommended)
-  #   2+ → diminishing returns; mainly useful for very long horizons or
-  #       feature sets with many compound lag/rolling windows
+  #   0     -> legacy direct-forecast (lag features beyond t+1 reference
+  #           placeholder zeros - biased toward under-forecasting at horizon>1)
+  #   N (int) -> fixed N passes
+  #   auto  -> picked at runtime as ``min(horizon, max(1, horizon // max_lag))``
+  #           so feature-set changes don't require manual tuning
   # Each iteration roughly doubles inference time (one extra build_features
   # + one extra prediction pass).
-  recursive_iterations: 1
+  recursive_iterations: auto

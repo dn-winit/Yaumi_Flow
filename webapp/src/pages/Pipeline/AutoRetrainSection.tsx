@@ -7,8 +7,10 @@ import {
   useRetrainHistory,
   useUpdateRetrainConfig,
 } from "@/hooks/useForecast";
-import { fmtDate } from "@/lib/date";
+import { fmtDate, daysSince } from "@/lib/date";
+import { fmtPct } from "@/lib/format";
 import InfoBubble from "@/components/ui/InfoBubble";
+import SectionLabel from "@/components/ui/SectionLabel";
 import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
 import type { Tone } from "@/lib/colorize";
 
@@ -55,12 +57,15 @@ function Toggle({
 /*  Helpers                                                            */
 /* ------------------------------------------------------------------ */
 
-const FREQ_OPTIONS = [
-  { value: "7", label: "Every 7 days" },
-  { value: "14", label: "Every 14 days" },
-  { value: "21", label: "Every 21 days" },
-  { value: "30", label: "Every 30 days" },
-];
+const FREQ_PRESETS = [7, 14, 21, 30];
+
+function freqOptions(currentDays: number) {
+  // Synthesize an option for the current value when ops sets a custom
+  // frequency outside the presets via env / direct JSON edit -- without
+  // this the Select would lie about the active schedule.
+  const days = Array.from(new Set([...FREQ_PRESETS, currentDays])).sort((a, b) => a - b);
+  return days.map((d) => ({ value: String(d), label: `Every ${d} days` }));
+}
 
 function driftTone(status: string): Tone {
   if (status === "significant") return "danger";
@@ -75,20 +80,11 @@ function driftLabel(status: string): string {
 }
 
 function timeAgo(iso: string | null): string {
-  if (!iso) return "";
-  try {
-    const days = Math.floor((Date.now() - new Date(iso).getTime()) / 86_400_000);
-    if (days === 0) return "(today)";
-    if (days === 1) return "(1 day ago)";
-    return `(${days} days ago)`;
-  } catch {
-    return "";
-  }
-}
-
-function fmtPct(v: number | null): string {
-  if (v == null) return "\u2014";
-  return `${v.toFixed(1)}%`;
+  const days = daysSince(iso);
+  if (days == null) return "";
+  if (days === 0) return "(today)";
+  if (days === 1) return "(1 day ago)";
+  return `(${days} days ago)`;
 }
 
 /* ------------------------------------------------------------------ */
@@ -114,42 +110,43 @@ export default function AutoRetrainSection() {
 
   return (
     <Card title="Auto-retrain schedule">
-      {/* Controls row */}
-      <div className="flex flex-wrap items-center gap-6 mb-6">
-        <Toggle
-          checked={enabled}
-          onChange={handleToggle}
-          label="Enable auto-retrain"
-        />
-
-        <Select
-          value={String(freqDays)}
-          onChange={handleFreq}
-          options={FREQ_OPTIONS}
-          className="w-44"
-        />
-
-        <label className="flex items-center gap-2 cursor-pointer text-body text-text-secondary">
-          <input
-            type="checkbox"
-            checked={autoInference}
-            onChange={(e) => handleAutoInference(e.target.checked)}
-            className="h-4 w-4 rounded border-strong text-brand-600 focus:ring-brand-500"
+      <div className="space-y-6">
+        {/* Controls row */}
+        <div className="flex flex-wrap items-center gap-6">
+          <Toggle
+            checked={enabled}
+            onChange={handleToggle}
+            label="Enable auto-retrain"
           />
-          Auto-generate forecasts after retrain
-        </label>
-      </div>
 
-      {/* Status panel */}
-      <div className="rounded-lg border border-default bg-surface-sunken p-4 mb-6">
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+          <Select
+            value={String(freqDays)}
+            onChange={handleFreq}
+            options={freqOptions(freqDays)}
+            className="w-44"
+          />
+
+          <label className="flex items-center gap-2 cursor-pointer text-body text-text-secondary">
+            <input
+              type="checkbox"
+              checked={autoInference}
+              onChange={(e) => handleAutoInference(e.target.checked)}
+              className="h-4 w-4 rounded border-strong text-brand-600 focus:ring-brand-500"
+            />
+            Auto-generate forecasts after retrain
+          </label>
+        </div>
+
+        {/* Status panel */}
+        <div className="rounded-lg border border-default bg-surface-sunken p-4">
+          <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
           {/* Drift status */}
           <div>
             <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
               Drift status
               <InfoBubble
                 title="How drift is measured"
-                text="Drift compares the last 7 working days' accuracy (live sales vs forecast) against the model's training-time baseline. When recent accuracy drops well below baseline, the world has shifted since training and a retrain is warranted. Status is 'stable' inside the warn band, 'drifting' between warn and alert thresholds, and 'significant' beyond alert."
+                text="Drift compares Recent accuracy (raw model forecast vs invoiced actuals, class-tolerance WAPE over the last 7 working days, all routes pooled) against Baseline accuracy (same formula on the full held-out test set, set at training time). Both sides score the raw forecast so the delta is a pure model-quality signal. Status is 'stable' inside the warn band, 'drifting' between warn and alert thresholds, and 'significant' beyond alert."
               />
             </span>
             {drift ? (
@@ -161,7 +158,12 @@ export default function AutoRetrainSection() {
             )}
           </div>
 
-          {/* Recent vs baseline accuracy */}
+          {/* Recent vs baseline accuracy. ``recent_accuracy`` and
+              ``baseline_accuracy`` are scored under the same composite
+              function (raw model forecast vs actual) so the delta is
+              honest. ``recent_reconciled_accuracy`` is the operational
+              lens on the same window -- shown beneath as context, not
+              as the headline drift number. */}
           <div>
             <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
               Recent accuracy
@@ -187,6 +189,11 @@ export default function AutoRetrainSection() {
                 {drift.delta >= 0 ? "\u0394 +" : "\u0394 "}
                 {drift.delta.toFixed(1)}
               </span>
+            )}
+            {drift?.rows_compared != null && (
+              <div className="text-caption text-text-tertiary mt-0.5">
+                {drift.rows_compared.toLocaleString()} cells scored
+              </div>
             )}
           </div>
 
@@ -214,49 +221,48 @@ export default function AutoRetrainSection() {
               </span>
             )}
           </div>
-        </div>
-      </div>
-
-      {/* History table */}
-      {recentHistory.length > 0 && (
-        <div>
-          <h4 className="text-caption font-semibold text-text-secondary uppercase tracking-wider mb-2">
-            History (last {recentHistory.length})
-          </h4>
-          <div className={TABLE_SCROLL_CLASS}>
-            <table className="w-full text-left text-body">
-              <thead className="sticky top-0 z-10 bg-surface-raised border-b border-default">
-                <tr>
-                  <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Date</th>
-                  <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Trigger</th>
-                  <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Before</th>
-                  <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">After</th>
-                  <th className="py-2 text-caption font-semibold text-text-tertiary">Status</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentHistory.map((h, i) => (
-                  <tr key={i} className="border-b border-default last:border-b-0">
-                    <td className="py-2 pr-4 text-text-secondary">{fmtDate(h.date)}</td>
-                    <td className="py-2 pr-4 text-text-secondary capitalize">{h.trigger}</td>
-                    <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_before)}</td>
-                    <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_after)}</td>
-                    <td className="py-2">
-                      <Badge tone={h.status === "success" ? "success" : "danger"}>
-                        {h.status === "success" ? "Success" : "Failed"}
-                      </Badge>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
           </div>
         </div>
-      )}
 
-      {recentHistory.length === 0 && !configLoading && (
-        <p className="text-caption text-text-tertiary">No auto-retrain history yet.</p>
-      )}
+        {/* History table */}
+        {recentHistory.length > 0 && (
+          <div className="space-y-2">
+            <SectionLabel>History (last {recentHistory.length})</SectionLabel>
+            <div className={TABLE_SCROLL_CLASS}>
+              <table className="w-full text-left text-body">
+                <thead className="sticky top-0 z-10 bg-surface-raised border-b border-default">
+                  <tr>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Date</th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Trigger</th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Before</th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">After</th>
+                    <th className="py-2 text-caption font-semibold text-text-tertiary">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {recentHistory.map((h, i) => (
+                    <tr key={i} className="border-b border-default last:border-b-0">
+                      <td className="py-2 pr-4 text-text-secondary">{fmtDate(h.date)}</td>
+                      <td className="py-2 pr-4 text-text-secondary capitalize">{h.trigger}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_before)}</td>
+                      <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_after)}</td>
+                      <td className="py-2">
+                        <Badge tone={h.status === "success" ? "success" : "danger"}>
+                          {h.status === "success" ? "Success" : "Failed"}
+                        </Badge>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        {recentHistory.length === 0 && !configLoading && (
+          <p className="text-caption text-text-tertiary">No auto-retrain history yet.</p>
+        )}
+      </div>
     </Card>
   );
 }

@@ -72,22 +72,38 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
   const routeCode = str(row.RouteCode ?? row.route_code);
   const date = pickDate(row);
 
-  const predicted = num(row.prediction ?? row.predicted);
+  // ``prediction`` / ``predicted`` carry the reconciled van load
+  // (units_to_load) -- the cron's recommended_load + opening_stock for
+  // this (route, item, date). Same number the headline tile shows.
+  const recommendedLoad = num(row.prediction ?? row.predicted);
   const actual = num(row.actual_qty ?? row.TotalQuantity);
   const pDemand = num(row.p_demand);
   const qtyIfDemand = num(row.qty_if_demand);
-  const q10 = num(row.q_10 ?? row.lower_bound);
-  const q90 = num(row.q_90 ?? row.upper_bound);
-  const cls = str(row.class ?? row.demand_class);
+  // Canonical column names from the DB-mirror are
+  // ``lower_bound``/``upper_bound`` and ``demand_class``. Older payloads
+  // used ``q_10``/``q_90`` and ``class``; try the canonical names first.
+  const q10 = num(row.lower_bound ?? row.q_10);
+  const q90 = num(row.upper_bound ?? row.q_90);
+  const cls = str(row.demand_class ?? row.class);
   const nonzeroRatio = num(row.nonzero_ratio);
   const avgGapDays = num(row.avg_gap_days);
+  // Engine intermediates -- the "show your work" math.
+  const openingStock = num(row.opening_stock);
+  const forecastCorrected = num(row.forecast_corrected);
+  const biasPct = num(row.bias_pct);
+  const guardSkipped = row.guard_skipped === true;
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
   const windows = stats.data?.windows;
 
-  const variance = predicted != null && actual != null ? actual - predicted : null;
+  // Load vs sold gap (NOT model accuracy -- this compares the truck
+  // weight against actual invoiced units; raw forecast accuracy lives
+  // on the Pipeline page).
+  const variance = recommendedLoad != null && actual != null ? actual - recommendedLoad : null;
   const variancePct =
-    variance != null && predicted && predicted > 0 ? (variance / predicted) * 100 : null;
+    variance != null && recommendedLoad && recommendedLoad > 0
+      ? (variance / recommendedLoad) * 100
+      : null;
 
   return (
     <Modal open={open} onClose={onClose} title="Why this forecast" size="xl">
@@ -97,10 +113,21 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           right={{ label: "Route / Date", primary: routeCode, secondary: fmtDate(date) }}
         />
 
-        {/* Section 1: The forecast itself */}
+        {/* Guard banner: appears only when the journey-aware
+            concentration mask zeroed this row. Without it, a "0" load
+            with no explanation looks like a model miss. */}
+        {guardSkipped && (
+          <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-body text-warning-800">
+            <strong>Skipped today:</strong> the customer who buys nearly all of this item isn&apos;t on
+            today&apos;s journey plan, so the recommendation is held at zero. The truck rolls without
+            phantom inventory.
+          </div>
+        )}
+
+        {/* Section 1: The recommendation itself */}
         <div>
           <SectionTitle>
-            Forecast
+            Recommendation
             {cls && (
               <Badge tone={patternTone(cls)} className="ml-2 text-caption">
                 {cls} — {classDesc(cls)}
@@ -109,9 +136,9 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </SectionTitle>
           <div className={GRID_3}>
             <Stat
-              label="Predicted quantity"
-              value={predicted != null ? predicted.toFixed(1) : "-"}
-              hint="Best estimate for this item on this date"
+              label="Recommended van load"
+              value={recommendedLoad != null ? Math.round(recommendedLoad).toLocaleString() : "-"}
+              hint="Units to put on the truck for this item — fresh + carried"
               highlight
             />
             <Stat
@@ -121,22 +148,65 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
             />
             <Stat
               label="Likely range"
-              value={q10 != null && q90 != null ? `${q10.toFixed(1)} – ${q90.toFixed(1)}` : "-"}
-              hint="From a slow day (10th percentile) to a busy day (90th percentile)"
+              value={
+                q10 != null && q90 != null
+                  ? `${Math.round(q10).toLocaleString()} – ${Math.round(q90).toLocaleString()}`
+                  : "-"
+              }
+              hint="Conformal lower-to-upper band the load is calibrated to sit inside"
             />
           </div>
         </div>
 
-        {/* Section 2: Anchor the prediction in the item's own pattern.
+        {/* Section 1b: How the truck weight breaks down. Backend ships
+            opening_stock / forecast_corrected / bias_pct in every
+            payload; renders only when they're populated so legacy rows
+            without the engine intermediates stay clean. */}
+        {(openingStock != null || forecastCorrected != null || biasPct != null) && (
+          <div>
+            <SectionTitle>How we got the load</SectionTitle>
+            <div className={GRID_3}>
+              <Stat
+                label="Bias-corrected forecast"
+                value={
+                  forecastCorrected != null
+                    ? Math.round(forecastCorrected).toLocaleString()
+                    : "-"
+                }
+                hint="Raw model output trimmed by the route+item bias"
+              />
+              <Stat
+                label="Stock on van"
+                value={
+                  openingStock != null
+                    ? Math.round(openingStock).toLocaleString()
+                    : "-"
+                }
+                hint="Units already on the truck — leftover from yesterday"
+              />
+              <Stat
+                label="Recent over/under"
+                value={
+                  biasPct != null
+                    ? `${biasPct > 0 ? "+" : ""}${(biasPct * 100).toFixed(1)}%`
+                    : "-"
+                }
+                hint="Model has been over (+) or under (−) actuals for this route+item"
+              />
+            </div>
+          </div>
+        )}
+
+        {/* Section 2: Anchor the recommendation in the item's own pattern.
             Renders only when at least one of the contextual stats exists,
             so the popup stays clean for legacy rows that lack them. */}
         {(qtyIfDemand != null || nonzeroRatio != null || avgGapDays != null) && (
           <div>
-            <SectionTitle>How we got there</SectionTitle>
+            <SectionTitle>Item demand pattern</SectionTitle>
             <div className={GRID_3}>
               <Stat
                 label="Expected qty when it sells"
-                value={qtyIfDemand != null ? qtyIfDemand.toFixed(1) : "-"}
+                value={qtyIfDemand != null ? Math.round(qtyIfDemand).toLocaleString() : "-"}
                 hint="Average size of a buying day for this item"
               />
               <Stat
@@ -157,21 +227,20 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </div>
         )}
 
-        {/* Section 3: Actual vs forecast (only when actuals exist).
-            ``Days with sales`` was here too -- removed because it duplicates
-            the ``Sells how often`` stat in the section above (both read
-            ``nonzero_ratio``). Two stats fit cleanly in the 3-col grid. */}
+        {/* Section 3: Load vs sold (only when actuals exist).
+            NOT model accuracy -- compares the truck weight to invoiced
+            units. Raw forecast accuracy is on the Pipeline page. */}
         {actual != null && (
           <div>
             <SectionTitle>How it performed</SectionTitle>
             <div className={GRID_3}>
               <Stat
                 label="Actually sold"
-                value={actual.toFixed(1)}
+                value={Math.round(actual).toLocaleString()}
                 hint="Units invoiced on this date"
               />
               <Stat
-                label="Accuracy"
+                label="Load vs sold"
                 value={
                   variancePct != null ? (
                     <Badge tone={accuracyTone(variancePct)}>
@@ -184,8 +253,8 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
                 }
                 hint={
                   variance != null
-                    ? `${variance > 0 ? "Sold" : "Loaded"} ${Math.abs(variance).toFixed(1)} ${variance > 0 ? "more than predicted" : "more than sold"}`
-                    : "Difference vs prediction"
+                    ? `${variance > 0 ? "Sold" : "Loaded"} ${Math.abs(Math.round(variance)).toLocaleString()} ${variance > 0 ? "more than we recommended" : "more than sold"}`
+                    : "Difference between truck load and invoiced units"
                 }
               />
             </div>

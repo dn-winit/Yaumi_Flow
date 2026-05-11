@@ -14,6 +14,21 @@ from pydantic_settings import BaseSettings
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
 
 
+def _read_allow_origins() -> list[str]:
+    """Read shared ``YF_ALLOW_ORIGINS`` (comma/semicolon or JSON list)."""
+    import json
+    raw = os.getenv("YF_ALLOW_ORIGINS", "").strip()
+    if not raw:
+        return ["http://localhost:3000"]
+    if raw.startswith("["):
+        try:
+            parsed = json.loads(raw)
+            return [str(x).strip() for x in parsed if str(x).strip()]
+        except Exception:
+            pass
+    return [s.strip() for s in raw.replace(";", ",").split(",") if s.strip()]
+
+
 class Settings(BaseSettings):
     model_config = {"env_prefix": "LLM_", "extra": "ignore"}
 
@@ -47,9 +62,25 @@ class Settings(BaseSettings):
     # Rate limiting
     rate_limit_max_requests: int = Field(default=10, ge=1)
     rate_limit_window_seconds: int = Field(default=60, ge=10)
+    # How long ``acquire()`` waits for a free token before failing fast.
+    # Sized to be noticeably shorter than ``timeout`` so a starved request
+    # never stacks on the budget.
+    rate_limit_acquire_timeout_seconds: float = Field(default=5.0, ge=0.5, le=60.0)
+    # Token-bucket poll interval. Small enough to feel responsive,
+    # large enough that the wait loop is not a CPU sink.
+    rate_limit_poll_interval_seconds: float = Field(default=0.1, ge=0.01, le=1.0)
+
+    # Cache lazy-janitor: every N writes, walk one shard and purge
+    # expired entries. Round-robins across the 256 shards so the work is
+    # bounded (~entries-per-shard) and disk usage stays bounded without
+    # ever serialising over a full-tree walk.
+    cache_janitor_every_n_writes: int = Field(default=200, ge=10, le=10000)
 
     # Data limits (prevent oversized prompts)
     max_items_per_customer: int = Field(default=12)
+
+    # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var.
+    allow_origins: list[str] = Field(default_factory=_read_allow_origins)
 
     @field_validator("log_level")
     @classmethod

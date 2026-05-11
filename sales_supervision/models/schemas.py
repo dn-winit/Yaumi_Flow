@@ -24,27 +24,43 @@ class SessionItem:
     purchase_cycle_days: float = 0.0
     frequency_percent: float = 0.0
     van_inventory_qty: int = 0
+    # Original PascalCase rec from the recommended_order engine. Carried
+    # verbatim so explainability fields (WhyItem, WhyQuantity, Confidence,
+    # PurchaseCount, AvgQuantityPerVisit, Signals, Source, ...) survive
+    # the round-trip into the live session and back out to the UI without
+    # the dataclass having to enumerate every field.
+    raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
     def effective_recommended(self) -> int:
         return self.recommended_qty + self.adjustment
 
     def to_dict(self) -> Dict[str, Any]:
+        # Canonical PascalCase shape. Order matters: canonical fields
+        # derived from dataclass attrs come first, then ``self.raw`` is
+        # spread so engine-supplied values override the defaults, and
+        # supervision-runtime fields (Actual / Adjustment / ...) land
+        # last so they always win. Earlier this method spread ``raw``
+        # first without emitting the dataclass fields -- callers that
+        # built a SessionItem with empty ``raw`` produced dicts with NO
+        # ``ItemCode`` key, which collapsed every item to ``""`` at the
+        # DB layer and tripped the ``uq_yf_si`` unique constraint.
         return {
-            "itemCode": self.item_code,
-            "itemName": self.item_name,
-            "recommendedQuantity": self.recommended_qty,
-            "actualQuantity": self.actual_qty,
-            "adjustment": self.adjustment,
-            "effectiveRecommended": self.effective_recommended,
-            "wasSold": self.was_sold,
-            "wasEdited": self.was_edited,
-            "tier": self.tier,
-            "priorityScore": self.priority_score,
-            "daysSinceLastPurchase": self.days_since_last_purchase,
-            "purchaseCycleDays": self.purchase_cycle_days,
-            "frequencyPercent": self.frequency_percent,
-            "vanInventoryQty": self.van_inventory_qty,
+            "ItemCode":              self.item_code,
+            "ItemName":              self.item_name,
+            "RecommendedQuantity":   self.recommended_qty,
+            "Tier":                  self.tier,
+            "PriorityScore":         self.priority_score,
+            "DaysSinceLastPurchase": self.days_since_last_purchase,
+            "PurchaseCycleDays":     self.purchase_cycle_days,
+            "FrequencyPercent":      self.frequency_percent,
+            "VanLoad":               self.van_inventory_qty,
+            **self.raw,
+            "ActualQuantity":       self.actual_qty,
+            "Adjustment":           self.adjustment,
+            "EffectiveRecommended": self.effective_recommended,
+            "WasSold":              self.was_sold,
+            "WasEdited":            self.was_edited,
         }
 
 
@@ -124,23 +140,112 @@ class Session:
         return max((c.visit_sequence for c in self.customers.values() if c.visited), default=0)
 
     def summary(self) -> Dict[str, Any]:
-        visited = [c for c in self.customers.values() if c.visited]
-        visited_rec = sum(c.total_recommended for c in visited)
-        visited_act = sum(c.total_actual for c in visited)
+        """Wire-shaped summary the live UI binds to.
+
+        Carries everything the LiveSessionTab used to compute on the
+        client: per-customer grouped items (with qty>0), per-customer
+        tile stats, and both the static recommendation totals (planned)
+        and the dynamic visit totals (live, including avg score).
+
+        ``customers_grouped`` and ``customer_tiles`` are filtered to
+        items with ``effective_recommended > 0`` and customers that
+        survive that filter -- matches the legacy frontend rule. The
+        unfiltered map is still available via ``to_dict()['customers']``
+        for the visit handler to look customers up by code.
+        """
+        # Two visited cohorts -- planned (rep delivered against the
+        # journey plan) and unplanned (drop-in invoices, all items
+        # tier="UNPLANNED"). Route-header counters and the "Visited X/Y"
+        # tile must compare like-with-like (planned-visited / planned),
+        # so we compute them separately. ``visit_totals.visited_count``
+        # follows the same rule -- planned-only -- because the UI's
+        # denominator (recommendation_totals.customers_count) is also
+        # planned-only.
+        def _is_unplanned(c: SessionCustomer) -> bool:
+            return bool(c.items) and all(it.tier == "UNPLANNED" for it in c.items)
+
+        planned = [c for c in self.customers.values() if not _is_unplanned(c)]
+        planned_visited = [c for c in planned if c.visited]
+        unplanned_visited = [c for c in self.customers.values()
+                              if _is_unplanned(c) and c.visited]
+
+        visited_rec = sum(c.total_recommended for c in planned_visited)
+        visited_act = sum(c.total_actual for c in planned_visited)
+        avg_score = (
+            round(sum(c.score.score for c in planned_visited) / len(planned_visited), 2)
+            if planned_visited else None
+        )
+
+        # --- Pre-shaped customer payload (filter qty>0 items + drop empties)
+        customers_grouped: List[Dict[str, Any]] = []
+        customer_tiles: List[Dict[str, Any]] = []
+        unique_items: set[str] = set()
+        total_units = 0
+        for c in self.customers.values():
+            kept_items = [it for it in c.items if it.effective_recommended > 0]
+            if not kept_items:
+                continue
+            tile_units = sum(it.effective_recommended for it in kept_items)
+            tile_skus = len({it.item_code for it in kept_items})
+            unique_items.update(it.item_code for it in kept_items)
+            total_units += tile_units
+            customer_tiles.append({
+                "customer_code": c.customer_code,
+                "customer_name": c.customer_name,
+                "unique_skus": tile_skus,
+                "total_units": tile_units,
+                "visited": bool(c.visited),
+            })
+            customers_grouped.append({
+                "customer_code": c.customer_code,
+                "customer_name": c.customer_name,
+                "items": [it.to_dict() for it in kept_items],
+            })
+
+        recommendation_totals = {
+            "items_count": len(unique_items),
+            "total_units": total_units,
+            "customers_count": len(customers_grouped),
+        }
+        visit_totals = {
+            "visited_count": len(planned_visited),
+            "total_actual": visited_act,
+            "total_recommended": visited_rec,
+            "avg_score": avg_score,
+            # Drop-in count surfaced separately so the UI / route header
+            # can render it without re-walking the full session.
+            "unplanned_visited_count": len(unplanned_visited),
+        }
+
         return {
             "sessionId": self.session_id,
             "routeCode": self.route_code,
             "date": self.date,
             "status": self.status,
+            # Planned-only headline counts. The route header writer
+            # reads these so customers_planned / customers_visited stay
+            # comparable across the day even as drop-ins land.
+            "plannedCustomers": len(planned),
+            "plannedVisitedCustomers": len(planned_visited),
+            "unplannedVisitedCustomers": len(unplanned_visited),
+            # Legacy session-wide totals (planned + unplanned). Kept so
+            # any client that used to read these still works, but no
+            # longer drives the route-header tile.
             "totalCustomers": self.total_customers,
             "visitedCustomers": self.visited_customers,
-            "remainingCustomers": self.total_customers - self.visited_customers,
+            "remainingCustomers": len(planned) - len(planned_visited),
             "totalRecommended": self.total_recommended,
             "totalActual": self.total_actual,
             "visitedRecommended": visited_rec,
             "visitedActual": visited_act,
             "visitedAchievement": round(visited_act / max(visited_rec, 1) * 100, 1),
             "overallAchievement": round(self.total_actual / max(self.total_recommended, 1) * 100, 1),
+            # Pure-render payload for the live UI. Frontend never
+            # aggregates the recommendations array itself.
+            "customers_grouped": customers_grouped,
+            "customer_tiles": customer_tiles,
+            "recommendation_totals": recommendation_totals,
+            "visit_totals": visit_totals,
         }
 
     def to_dict(self) -> Dict[str, Any]:

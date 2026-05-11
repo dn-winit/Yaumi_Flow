@@ -48,7 +48,7 @@ def weights_from_metric(
 ) -> dict[str, float] | None:
     """Turn ``{model: metric}`` into normalised weights.
 
-    ``lower_is_better`` uses inverse weighting (``1 / (v + eps)``) — the
+    ``lower_is_better`` uses inverse weighting (``1 / (v + eps)``) - the
     default for error metrics like RMSE. Anything else treats larger values
     as better (clipped at 0 to keep weights non-negative).
 

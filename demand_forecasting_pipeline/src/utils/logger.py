@@ -1,7 +1,7 @@
 """
 Legacy logger shim. Delegates to :mod:`demand_forecasting_pipeline.observability`.
 
-``log_dir`` is accepted for backwards compatibility but ignored — logs go to
+``log_dir`` is accepted for backwards compatibility but ignored - logs go to
 stdout so that container log drivers collect them.
 """
 

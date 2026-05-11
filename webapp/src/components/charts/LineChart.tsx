@@ -74,7 +74,7 @@ export default function LineChart({
         <h3 className="text-title font-semibold text-text-primary">{title}</h3>
       )}
       {subtitle && (
-        <p className={`text-xs text-text-muted ${title ? "mt-1" : ""}`}>{subtitle}</p>
+        <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
       )}
     </div>
   ) : null;

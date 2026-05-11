@@ -1,4 +1,4 @@
-import { TOLERANCE_BY_CLASS } from "@/lib/format";
+import { TOLERANCE_BY_CLASS, fmtBps } from "@/lib/format";
 
 /** Popup body shown by every accuracy InfoBubble. Reads `TOLERANCE_BY_CLASS`
  *  so the table cannot drift from the scoring formula. */
@@ -66,7 +66,7 @@ export default function ForecastAccuracyExplanation() {
                     </span>
                   </td>
                   <td className="px-4 py-2.5 font-semibold text-text-primary">
-                    ±{Math.round((TOLERANCE_BY_CLASS[c.key] ?? 0.20) * 100)}%
+                    ±{fmtBps(TOLERANCE_BY_CLASS[c.key] ?? 0.20)}
                   </td>
                   <td className="px-4 py-2.5 text-text-secondary">
                     {c.description}
@@ -158,9 +158,22 @@ export default function ForecastAccuracyExplanation() {
           Stable items can be predicted tightly, so we hold the model to a
           high standard. Random items are inherently unpredictable; punishing
           the model for missing them precisely would hide its real performance.
-          This formula is fair to each item's nature and gives one honest
+          This formula is fair to each item&apos;s nature and gives one honest
           number for the whole portfolio.
         </p>
+      </div>
+
+      {/* Disambiguation -- the app surfaces three accuracy-style numbers and
+          this is the one place that explains which is which. */}
+      <div className="border-l-3 border-info-500 bg-info-50/40 px-4 py-3 rounded-r-lg space-y-2">
+        <p className="text-body text-text-secondary leading-relaxed">
+          <span className="font-semibold text-text-primary">Three accuracy numbers in this app, three distinct questions:</span>
+        </p>
+        <ul className="list-disc pl-5 space-y-1 text-body text-text-secondary leading-relaxed">
+          <li><strong>Baseline accuracy</strong> (this tile) — the formula above run over the full held-out test set, all routes pooled. Frozen at training time. Tells you whether the model itself was accurate the day it was trained.</li>
+          <li><strong>Recent accuracy</strong> (Auto-Retrain section below) — the same formula run on the last 7 days of test cells. Compared against Baseline to detect drift.</li>
+          <li><strong>Recommendation match</strong> (Past-performance drawer in Van Load) — a different formula entirely: <code>min(recommended_van_load, sold) / max(recommended_van_load, sold)</code> on aggregate totals for one route over one window. Includes the leftover physically on the truck, not just the forecast. Operational lens.</li>
+        </ul>
       </div>
     </div>
   );

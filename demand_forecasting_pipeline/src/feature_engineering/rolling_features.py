@@ -2,7 +2,7 @@
 Rolling-window features + intermittent-specific features.
 
 Leakage is prevented by shifting the target by one period before the rolling
-window is applied — the feature at time ``t`` never sees ``target[t]``.
+window is applied - the feature at time ``t`` never sees ``target[t]``.
 
 ``min_periods`` is driven by ``min_periods_fraction`` (default 0.5). A roll of
 window 28 therefore requires at least 14 observations before it emits a
@@ -10,7 +10,7 @@ value; earlier rows are left NaN. This stops the "28-period mean computed
 from 2 rows" surprise that ``min_periods=1`` produces.
 
 All intermittent-specific features are vectorised via per-group cumulative
-sums. No Python expanding-apply loops — this is an O(N) module.
+sums. No Python expanding-apply loops - this is an O(N) module.
 """
 
 from __future__ import annotations
@@ -111,7 +111,7 @@ def add_intermittent_features(
                     cum_observed.to_numpy() / cum_nonzero.to_numpy(),
                     cum_observed.to_numpy(),
                 )
-            # First row of each group has no lag observation → NaN.
+            # First row of each group has no lag observation -> NaN.
             adi = np.where(lag_observed.to_numpy() == 0, np.nan, adi)
             df["inter_demand_interval"] = adi
 
@@ -128,7 +128,7 @@ def _gap_since_last_nonzero_vectorized(
 ) -> np.ndarray:
     """Per-row gap (in periods) since the last non-zero lag value.
 
-    Single vectorised pass — forward-fill the position of the most recent
+    Single vectorised pass - forward-fill the position of the most recent
     non-zero within each group, subtract from the current position. When no
     prior non-zero exists, the gap equals the number of observed zero rows
     so far within the group.
