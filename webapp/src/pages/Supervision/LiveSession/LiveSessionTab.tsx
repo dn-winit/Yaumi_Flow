@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { supervisionApi } from "@/api/supervision";
 import Badge from "@/components/ui/Badge";
 import Button from "@/components/ui/Button";
@@ -10,16 +11,17 @@ import CustomerGrid, { type CustomerStat } from "@/components/ui/CustomerGrid";
 import MetricCard from "@/components/charts/MetricCard";
 import { useUnplannedVisits, useSavedVisits } from "@/hooks/useSupervision";
 import type {
-  RecommendationTotals,
+  RedistributionView,
   SavedVisit,
-  SessionCustomerGrouped,
-  SessionCustomerTile,
-  VisitTotals,
+  SessionSummary,
+  SessionVisitTotals,
+  VisitResultPayload,
 } from "@/types/supervision";
 import CustomerVisit from "./CustomerVisit";
 import CustomerAnalysisModal, { type CustomerAnalysisContext } from "./CustomerAnalysisModal";
 import RouteAnalysisModal, { type RouteAnalysisContext } from "./RouteAnalysisModal";
 import UnplannedVisits from "./UnplannedVisits";
+import { pluralise } from "./RedistributionSection";
 
 import { GOOD_SCORE_THRESHOLD, fmtNum } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
@@ -32,7 +34,7 @@ const AUTO_VISIT_MAX_INFLIGHT = 8;
 
 interface LiveSessionTabProps {
   sessionId: string;
-  sessionData: Record<string, unknown> | null;
+  sessionData: SessionSummary | null;
   routeCode: string;
   date: string;
   /**
@@ -71,13 +73,6 @@ interface CustomerData {
   totalUnits: number;
 }
 
-interface RedistributionRecord {
-  from: string;
-  to: string;
-  itemCode: string;
-  quantity: number;
-}
-
 interface AlsoBoughtRecord {
   item_code: string;
   qty: number;
@@ -92,10 +87,12 @@ interface VisitRecord {
   // visited view from the same data the freshly-completed visit
   // produced -- without re-querying the warehouse.
   actualSales: Record<string, number>;
-  // Redistribution + off-plan purchases produced by ``process_visit``
-  // -- carried alongside the score so the customer drill-in view
-  // renders the full visit context from one source.
-  redistributions: RedistributionRecord[];
+  // Structured redistribution view (per-item groups of recipient
+  // entries + ``keptOnTruck``) produced by ``process_visit`` and
+  // re-emitted on saved hydration. Carried alongside the score so the
+  // drill-in view renders the full visit context from one source.
+  // Server owns the grouping; the client renders verbatim.
+  redistributions: RedistributionView;
   alsoBought: AlsoBoughtRecord[];
 }
 
@@ -107,8 +104,9 @@ export default function LiveSessionTab({
   extraActions,
   onPickAnotherRoute,
 }: LiveSessionTabProps) {
+  const qc = useQueryClient();
   const [visits, setVisits] = useState<Record<string, VisitRecord>>({});
-  // Tile-grid → drill-in: null = show grid, set = show that customer's visit.
+  // Tile-grid drill-in: null = show grid, set = show that customer's visit.
   const [selectedCustomerCode, setSelectedCustomerCode] = useState<string | null>(null);
 
   // AI modals
@@ -135,6 +133,10 @@ export default function LiveSessionTab({
       // when this query reruns.
       const next = { ...prev };
       for (const [code, sv] of entries) {
+        // Live in-session writes win: a fresh visit just wrote a
+        // RedistributionView with the per-item groups for this customer,
+        // and we MUST NOT clobber it with the saved snapshot on the
+        // next hydration tick. The guard below is load-bearing.
         if (next[code] != null) continue;
         next[code] = {
           customerCode: code,
@@ -142,11 +144,15 @@ export default function LiveSessionTab({
           actualQty: sv.totalActual,
           recommendedQty: sv.totalRecommended,
           actualSales: sv.actualSales,
-          // Redistribution + off-plan purchases are visit-time signals
-          // we don't persist (they're transient). Saved hydration
-          // surfaces empty arrays; a fresh auto-visit re-populates
-          // them while the supervisor is still in the session.
-          redistributions: [],
+          // Forward the server-shaped redistribution view verbatim --
+          // the saved row already carries the same ``groups`` payload
+          // the live ``/visit`` response emits, so a drill-in into a
+          // previously-visited customer renders the same panel without
+          // a fresh round-trip.
+          redistributions: sv.redistributions,
+          // Off-plan purchases remain a visit-time-only signal (not
+          // persisted on the saved row). A fresh auto-visit
+          // re-populates them while the supervisor is in-session.
           alsoBought: [],
         };
       }
@@ -169,9 +175,8 @@ export default function LiveSessionTab({
   // renderers never sum recommendedQty themselves.
   const customers = useMemo<CustomerData[]>(() => {
     if (!sessionData) return [];
-    const grouped = (sessionData.customers_grouped as SessionCustomerGrouped[] | undefined) ?? [];
-    const tilesArr =
-      (sessionData.customer_tiles as SessionCustomerTile[] | undefined) ?? [];
+    const grouped = sessionData.customers_grouped ?? [];
+    const tilesArr = sessionData.customer_tiles ?? [];
     const unitsByCode = new Map<string, number>();
     for (const t of tilesArr) unitsByCode.set(t.customer_code, t.total_units);
     return grouped.map((g) => ({
@@ -191,23 +196,36 @@ export default function LiveSessionTab({
   }, [sessionData]);
 
   // Static (non-visit) totals come straight from the session payload.
-  const recommendationTotals = (sessionData?.recommendation_totals as
-    | RecommendationTotals
-    | undefined) ?? { items_count: 0, total_units: 0, customers_count: 0 };
+  const recommendationTotals = sessionData?.recommendation_totals ?? {
+    items_count: 0,
+    total_units: 0,
+    customers_count: 0,
+  };
 
   // Live visit totals: hydrated from saved visits on mount, then
   // overwritten by each ``/visit`` response. The frontend never sums
   // the local visits map -- the server pushes the cumulative number
   // alongside every visit result.
-  const [visitTotals, setVisitTotals] = useState<VisitTotals>({
+  const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>({
     visited_count: 0,
     total_actual: 0,
     total_recommended: 0,
     avg_score: null,
+    unplanned_visited_count: 0,
   });
+  // Hydrate ONCE from the saved snapshot. After the first non-null tick,
+  // visit totals are owned exclusively by ``handleVisitComplete`` (which
+  // applies the server-pushed cumulative number from each /visit
+  // response). Without this guard, the live-tier poll of /saved would
+  // race fresh /visit writes -- a slow network can land the polled
+  // snapshot AFTER a higher-count visit response, flickering the avg
+  // score backwards in front of the supervisor.
+  const hydratedFromSavedRef = useRef(false);
   useEffect(() => {
+    if (hydratedFromSavedRef.current) return;
     if (savedVisitsData?.visit_totals) {
       setVisitTotals(savedVisitsData.visit_totals);
+      hydratedFromSavedRef.current = true;
     }
   }, [savedVisitsData?.visit_totals]);
 
@@ -215,37 +233,32 @@ export default function LiveSessionTab({
     recommendationTotals.customers_count > 0 &&
     visitTotals.visited_count === recommendationTotals.customers_count;
 
-  const handleVisitComplete = (customer: CustomerData, visitResult: Record<string, unknown>) => {
-    const score = visitResult.score as VisitRecord["score"] | undefined;
-    if (!score) return;
-    // ``actualQty`` and ``recommendedQty`` are server-computed (sum of
-    // ``min(rec, act)`` and ``sum(rec)`` across the customer's planned
-    // items). The frontend never derives them from unsold or summed
-    // input fields. ``sessionTotals`` is the cumulative aggregate
-    // including this latest visit, so the tile row updates without
-    // re-summing the local visits map.
-    const actualTotal = Number(visitResult.actualQty ?? 0);
-    const recommendedTotal = Number(visitResult.recommendedQty ?? 0);
-    const actualSales = (visitResult.actualSales ?? {}) as Record<string, number>;
-    const redistributions = (visitResult.redistributions ?? []) as RedistributionRecord[];
-    const alsoBought = (visitResult.alsoBought ?? []) as AlsoBoughtRecord[];
-    const sessionTotals = visitResult.sessionTotals as VisitTotals | undefined;
-
+  const handleVisitComplete = (customer: CustomerData, visit: VisitResultPayload) => {
+    // Every numeric here is server-computed (``actualQty`` is sum of
+    // ``min(rec, act)``, ``recommendedQty`` is ``sum(rec)``, etc.).
+    // ``sessionTotals`` is the cumulative aggregate INCLUDING this
+    // latest visit, so the tile row updates without re-summing the
+    // local visits map.
     setVisits((prev) => ({
       ...prev,
       [customer.customerCode]: {
         customerCode: customer.customerCode,
-        score,
-        actualQty: actualTotal,
-        recommendedQty: recommendedTotal,
-        actualSales,
-        redistributions,
-        alsoBought,
+        score: visit.score,
+        actualQty: visit.actualQty,
+        recommendedQty: visit.recommendedQty,
+        actualSales: visit.actualSales,
+        redistributions: visit.redistributions,
+        alsoBought: visit.alsoBought,
       },
     }));
-    if (sessionTotals) {
-      setVisitTotals(sessionTotals);
-    }
+    setVisitTotals(visit.sessionTotals);
+    // Push the new write into the saved-visits cache so a re-mount (or
+    // a sibling component that reads the same query key) sees the
+    // visit without waiting for the next poll. Mark the hydration ref
+    // as latched so the refreshed /saved response can't clobber the
+    // live totals we just applied above.
+    hydratedFromSavedRef.current = true;
+    qc.invalidateQueries({ queryKey: ["supervision-saved-visits", routeCode, date] });
   };
 
   const routeAnalysisCtx: RouteAnalysisContext | null = useMemo(() => {
@@ -320,9 +333,8 @@ export default function LiveSessionTab({
       supervisionApi
         .processVisit(sessionId, code)
         .then((res) => {
-          const v = (res?.visit ?? {}) as Record<string, unknown>;
-          if (v && !v.error) {
-            handleVisitComplete(cust, v);
+          if (res?.success && res.visit) {
+            handleVisitComplete(cust, res.visit);
           }
         })
         .catch(() => {/* logged server-side; next poll retries */})
@@ -354,7 +366,7 @@ export default function LiveSessionTab({
             {extraActions}
             {onPickAnotherRoute && (
               <Button variant="primary" size="sm" onClick={onPickAnotherRoute}>
-                Pick another route →
+                Pick another route
               </Button>
             )}
           </>
@@ -379,7 +391,12 @@ export default function LiveSessionTab({
         <MetricCard
           label="Visited"
           value={`${visitTotals.visited_count} / ${recommendationTotals.customers_count}`}
-          subtitle={allVisited ? "All done" : "In progress"}
+          subtitle={(() => {
+            const base = allVisited ? "All done" : "In progress";
+            const dropIns = unplannedData?.unplanned_count ?? 0;
+            if (dropIns <= 0) return base;
+            return `${base} - ${pluralise(dropIns, "walk-in")}`;
+          })()}
           trend={allVisited ? "up" : undefined}
         />
         <MetricCard
@@ -391,8 +408,8 @@ export default function LiveSessionTab({
           }
           subtitle={
             visitTotals.avg_score != null
-              ? "Across visited customers"
-              : "No visits yet"
+              ? "Planned customers only"
+              : "No planned visits yet"
           }
           trend={
             visitTotals.avg_score != null && visitTotals.avg_score >= GOOD_SCORE_THRESHOLD
@@ -421,7 +438,21 @@ export default function LiveSessionTab({
                   size="sm"
                   onClick={() => setSelectedCustomerCode(null)}
                 >
-                  ← Back to customers
+                  <svg
+                    className="mr-1 inline-block h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    viewBox="0 0 24 24"
+                    aria-hidden="true"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      strokeWidth={2}
+                      d="M15 19l-7-7 7-7"
+                    />
+                  </svg>
+                  Back to customers
                 </Button>
                 <CustomerVisit
                   sessionId={sessionId}
@@ -469,8 +500,7 @@ export default function LiveSessionTab({
           // ``unique_skus`` and ``total_units`` are filled server-side;
           // the only thing the client overlays is the in-session
           // ``visited`` / ``liveVisited`` flags. No counting, no sums.
-          const serverTiles =
-            (sessionData?.customer_tiles as SessionCustomerTile[] | undefined) ?? [];
+          const serverTiles = sessionData?.customer_tiles ?? [];
           const tiles: CustomerStat[] = serverTiles.map((t) => ({
             customerCode: t.customer_code,
             customerName: t.customer_name,
@@ -553,7 +583,7 @@ function VisitsTabs({
       <Tabs
         tabs={[
           { key: "planned", label: `Planned (${plannedCount})` },
-          { key: "unplanned", label: `Unplanned (${unplannedCount})` },
+          { key: "unplanned", label: `Walk-in (${unplannedCount})` },
         ]}
         activeTab={active}
         onTabChange={(k) => setActive(k as "planned" | "unplanned")}

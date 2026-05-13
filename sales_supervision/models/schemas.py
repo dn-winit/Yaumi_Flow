@@ -161,13 +161,12 @@ class Session:
         # follows the same rule -- planned-only -- because the UI's
         # denominator (recommendation_totals.customers_count) is also
         # planned-only.
-        def _is_unplanned(c: SessionCustomer) -> bool:
-            return bool(c.items) and all(it.tier == "UNPLANNED" for it in c.items)
+        from sales_supervision.core.constants import is_unplanned_customer
 
-        planned = [c for c in self.customers.values() if not _is_unplanned(c)]
+        planned = [c for c in self.customers.values() if not is_unplanned_customer(c)]
         planned_visited = [c for c in planned if c.visited]
         unplanned_visited = [c for c in self.customers.values()
-                              if _is_unplanned(c) and c.visited]
+                              if is_unplanned_customer(c) and c.visited]
 
         visited_rec = sum(c.total_recommended for c in planned_visited)
         visited_act = sum(c.total_actual for c in planned_visited)
@@ -256,32 +255,14 @@ class Session:
 
 
 @dataclass
-class RedistributionEntry:
-    from_customer: str
-    to_customer: str
-    item_code: str
-    item_name: str
-    quantity: int
-    reason: str = ""
-
-
-@dataclass
 class VisitResult:
     customer_code: str
     score: ScoreResult
     unsold_items: Dict[str, int] = field(default_factory=dict)
-    redistributions: List[RedistributionEntry] = field(default_factory=list)
-    adjustments: Dict[str, Dict[str, int]] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
             "customerCode": self.customer_code,
             "score": {"score": self.score.score, "coverage": self.score.coverage, "accuracy": self.score.accuracy},
             "unsoldItems": self.unsold_items,
-            "redistributions": [
-                {"from": r.from_customer, "to": r.to_customer,
-                 "itemCode": r.item_code, "quantity": r.quantity}
-                for r in self.redistributions
-            ],
-            "adjustments": self.adjustments,
         }

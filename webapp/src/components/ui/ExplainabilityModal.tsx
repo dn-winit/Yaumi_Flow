@@ -7,12 +7,12 @@ import {
   MODAL_BODY,
   SectionTitle,
   Stat,
+  bool,
   num,
   str,
 } from "./explain/atoms";
 import { pickDate } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
-import { accuracyTone } from "@/lib/colorize";
 import { useItemStats } from "@/hooks/useDataImport";
 import type { ItemStatsWindow } from "@/types/data-import";
 import type { Row } from "@/types/common";
@@ -49,7 +49,7 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
   // Backend computes avg as total / active_days, so the displayed figure is
   // the typical quantity on days the item actually sold -- not a calendar-day
   // average. Labelling it "/selling day" keeps the math honest: the user can
-  // verify avg × active_days ≈ total from the hint.
+  // verify avg x active_days == total from the hint.
   return (
     <Stat
       label={label}
@@ -59,7 +59,7 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
           <span className="text-caption font-normal text-text-tertiary"> /selling day</span>
         </>
       }
-      hint={`${w.active_days} selling days out of ${w.days} · total ${w.total.toFixed(0)} units`}
+      hint={`${w.active_days} selling days out of ${w.days} - total ${w.total.toFixed(0)} units`}
     />
   );
 }
@@ -76,37 +76,39 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
   // (units_to_load) -- the cron's recommended_load + opening_stock for
   // this (route, item, date). Same number the headline tile shows.
   const recommendedLoad = num(row.prediction ?? row.predicted);
-  const actual = num(row.actual_qty ?? row.TotalQuantity);
   const pDemand = num(row.p_demand);
-  const qtyIfDemand = num(row.qty_if_demand);
   // Canonical column names from the DB-mirror are
   // ``lower_bound``/``upper_bound`` and ``demand_class``. Older payloads
   // used ``q_10``/``q_90`` and ``class``; try the canonical names first.
   const q10 = num(row.lower_bound ?? row.q_10);
   const q90 = num(row.upper_bound ?? row.q_90);
   const cls = str(row.demand_class ?? row.class);
-  const nonzeroRatio = num(row.nonzero_ratio);
-  const avgGapDays = num(row.avg_gap_days);
   // Engine intermediates -- the "show your work" math.
   const openingStock = num(row.opening_stock);
   const forecastCorrected = num(row.forecast_corrected);
   const biasPct = num(row.bias_pct);
+  const predictedRaw = num(row.predicted_raw);
+  // Pattern-envelope reconciliation step. `recentAvg` is the per-selling-day
+  // baseline the envelope is measured against; `expectedDemand` is the
+  // post-envelope number the engine actually consumes. The two booleans
+  // indicate whether the envelope pulled the forecast UP (floor) or DOWN
+  // (ceiling) -- they are mutually exclusive on a given row.
+  const recentAvg = num(row.recent_avg_per_selling_day);
+  const expectedDemand = num(row.expected_demand);
+  const patternFloorApplied = bool(row.pattern_floor_applied);
+  const patternCeilingApplied = bool(row.pattern_ceiling_applied);
   const guardSkipped = row.guard_skipped === true;
+  // Wire-driven informational flag: backend sets this when the corrected
+  // forecast significantly under-shoots the item's recent activity. The
+  // frontend NEVER recomputes or thresholds -- it just renders the chip
+  // when the server says so. Falsy/missing -> chip hidden.
+  const forecastLow = bool(row.forecast_below_recent);
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
   const windows = stats.data?.windows;
 
-  // Load vs sold gap (NOT model accuracy -- this compares the truck
-  // weight against actual invoiced units; raw forecast accuracy lives
-  // on the Pipeline page).
-  const variance = recommendedLoad != null && actual != null ? actual - recommendedLoad : null;
-  const variancePct =
-    variance != null && recommendedLoad && recommendedLoad > 0
-      ? (variance / recommendedLoad) * 100
-      : null;
-
   return (
-    <Modal open={open} onClose={onClose} title="Why this forecast" size="xl">
+    <Modal open={open} onClose={onClose} title="Why this recommendation" size="xl">
       <div className={MODAL_BODY}>
         <ExplainHeader
           left={{ label: "Item", primary: itemCode, secondary: itemName }}
@@ -124,13 +126,22 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </div>
         )}
 
-        {/* Section 1: The recommendation itself */}
+        {/* Section 1: the recommendation itself. The headline number,
+            the chance it moves at all, the expected band. */}
         <div>
+          {/* Wire-driven low-forecast warning. Renders only when the
+              backend flags this (route, item, date) row. Matches the
+              guardSkipped banner tokens so the two feel of-a-piece. */}
+          {forecastLow && (
+            <div className="mb-2 rounded-md border border-warning-200 bg-warning-50 px-3 py-2 text-body text-warning-800">
+              Forecast looks low for this item&apos;s recent pattern - worth reviewing
+            </div>
+          )}
           <SectionTitle>
             Recommendation
             {cls && (
               <Badge tone={patternTone(cls)} className="ml-2 text-caption">
-                {cls} — {classDesc(cls)}
+                {cls} - {classDesc(cls)}
               </Badge>
             )}
           </SectionTitle>
@@ -138,130 +149,98 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
             <Stat
               label="Recommended van load"
               value={recommendedLoad != null ? Math.round(recommendedLoad).toLocaleString() : "-"}
-              hint="Units to put on the truck for this item — fresh + carried"
+              hint="Total units to put on the truck for this item (carried + fresh)"
               highlight
             />
             <Stat
-              label="Likely to sell today"
+              label="Chance of selling today"
               value={<ConfidenceBadge value={pDemand} demandClass={cls} />}
-              hint="Probability the item moves at least one unit today"
+              hint="Probability at least one unit moves today"
             />
             <Stat
-              label="Likely range"
+              label="Expected range"
               value={
                 q10 != null && q90 != null
-                  ? `${Math.round(q10).toLocaleString()} – ${Math.round(q90).toLocaleString()}`
+                  ? `${Math.round(q10).toLocaleString()} - ${Math.round(q90).toLocaleString()}`
                   : "-"
               }
-              hint="Conformal lower-to-upper band the load is calibrated to sit inside"
+              hint="Lower-to-upper band today's demand is calibrated to sit inside"
             />
           </div>
         </div>
 
-        {/* Section 1b: How the truck weight breaks down. Backend ships
-            opening_stock / forecast_corrected / bias_pct in every
-            payload; renders only when they're populated so legacy rows
-            without the engine intermediates stay clean. */}
-        {(openingStock != null || forecastCorrected != null || biasPct != null) && (
+        {/* Section 2: how the truck weight breaks down. Only renders
+            when at least one engine intermediate is populated, so legacy
+            rows without the diagnostics stay clean. */}
+        {(openingStock != null || forecastCorrected != null || biasPct != null || predictedRaw != null || recentAvg != null) && (
           <div>
             <SectionTitle>How we got the load</SectionTitle>
-            <div className={GRID_3}>
+            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
               <Stat
-                label="Bias-corrected forecast"
+                label="Raw forecast"
                 value={
-                  forecastCorrected != null
-                    ? Math.round(forecastCorrected).toLocaleString()
+                  predictedRaw != null
+                    ? Math.round(predictedRaw).toLocaleString()
                     : "-"
                 }
-                hint="Raw model output trimmed by the route+item bias"
+                hint="Model output before any adjustment"
               />
               <Stat
-                label="Stock on van"
-                value={
-                  openingStock != null
-                    ? Math.round(openingStock).toLocaleString()
-                    : "-"
-                }
-                hint="Units already on the truck — leftover from yesterday"
-              />
-              <Stat
-                label="Recent over/under"
+                label="Model trend"
                 value={
                   biasPct != null
                     ? `${biasPct > 0 ? "+" : ""}${(biasPct * 100).toFixed(1)}%`
                     : "-"
                 }
-                hint="Model has been over (+) or under (−) actuals for this route+item"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Section 2: Anchor the recommendation in the item's own pattern.
-            Renders only when at least one of the contextual stats exists,
-            so the popup stays clean for legacy rows that lack them. */}
-        {(qtyIfDemand != null || nonzeroRatio != null || avgGapDays != null) && (
-          <div>
-            <SectionTitle>Item demand pattern</SectionTitle>
-            <div className={GRID_3}>
-              <Stat
-                label="Expected qty when it sells"
-                value={qtyIfDemand != null ? Math.round(qtyIfDemand).toLocaleString() : "-"}
-                hint="Average size of a buying day for this item"
+                hint="How much we adjust: positive trims down, negative boosts up"
               />
               <Stat
-                label="Sells how often"
+                label="Adjusted forecast"
                 value={
-                  nonzeroRatio != null
-                    ? `${(nonzeroRatio * 100).toFixed(0)}% of days`
+                  forecastCorrected != null
+                    ? Math.round(forecastCorrected).toLocaleString()
                     : "-"
                 }
-                hint="Share of historical days this item moves on this route"
+                hint="Raw forecast x (1 - trend) = adjusted"
               />
               <Stat
-                label="Typical gap"
-                value={avgGapDays != null ? `${avgGapDays.toFixed(0)} days` : "-"}
-                hint="Average wait between purchases"
-              />
-            </div>
-          </div>
-        )}
-
-        {/* Section 3: Load vs sold (only when actuals exist).
-            NOT model accuracy -- compares the truck weight to invoiced
-            units. Raw forecast accuracy is on the Pipeline page. */}
-        {actual != null && (
-          <div>
-            <SectionTitle>How it performed</SectionTitle>
-            <div className={GRID_3}>
-              <Stat
-                label="Actually sold"
-                value={Math.round(actual).toLocaleString()}
-                hint="Units invoiced on this date"
-              />
-              <Stat
-                label="Load vs sold"
+                label="Recent average"
                 value={
-                  variancePct != null ? (
-                    <Badge tone={accuracyTone(variancePct)}>
-                      {variancePct > 0 ? "+" : ""}
-                      {variancePct.toFixed(1)}%
-                    </Badge>
-                  ) : (
-                    "-"
-                  )
+                  recentAvg != null
+                    ? Math.round(recentAvg).toLocaleString()
+                    : "-"
                 }
-                hint={
-                  variance != null
-                    ? `${variance > 0 ? "Sold" : "Loaded"} ${Math.abs(Math.round(variance)).toLocaleString()} ${variance > 0 ? "more than we recommended" : "more than sold"}`
-                    : "Difference between truck load and invoiced units"
+                hint="Item's typical units per selling day (last 28 working days)"
+              />
+              <Stat
+                label="Already on truck"
+                value={
+                  openingStock != null
+                    ? Math.round(openingStock).toLocaleString()
+                    : "-"
                 }
+                hint="Carried from yesterday - no fresh load needed for these units"
               />
             </div>
+            {patternFloorApplied && expectedDemand != null && (
+              <p className="mt-2 text-caption text-info-700">
+                Pattern floor applied: expected demand boosted to {Math.round(expectedDemand).toLocaleString()} to stay within the
+                item&apos;s recent pattern.
+              </p>
+            )}
+            {patternCeilingApplied && !patternFloorApplied && expectedDemand != null && (
+              <p className="mt-2 text-caption text-info-700">
+                Pattern ceiling applied: expected demand capped at {Math.round(expectedDemand).toLocaleString()} based on the
+                item&apos;s recent pattern.
+              </p>
+            )}
           </div>
         )}
 
-        {/* Section 3: Demand history (rolling windows) */}
+        {/* Section 3: demand history (rolling windows). Three windows
+            on one row so the supervisor sees the item's recent activity
+            at a glance -- the anchor for why today's recommendation is
+            what it is. */}
         <div>
           <SectionTitle right={stats.loading ? "loading..." : undefined}>
             Demand history

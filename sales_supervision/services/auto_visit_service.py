@@ -50,6 +50,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 # without a code change. See config/settings.py for the bounds.
 
 from sales_supervision.config.settings import Settings, get_settings
+from sales_supervision.core.constants import TIER_UNPLANNED, is_unplanned_customer
 from sales_supervision.core.session import SessionManager
 from sales_supervision.models.schemas import (
     ScoreResult,
@@ -177,15 +178,16 @@ class AutoVisitService:
         the DB sync supervisors are watching:
 
           Phase 1 -- Data sync. Walks new YaumiLive invoices and
-                     upserts visit rows in parallel (cap=8). HTTP +
-                     DB only; no LLM. Catches up the ``Visited X/Y``
+                     upserts visit rows in parallel (cap from
+                     ``auto_visit_data_phase_workers``). HTTP + DB
+                     only; no LLM. Catches up the ``Visited X/Y``
                      tile in seconds.
-          Phase 2 -- LLM analyses. Pre-visit briefings (planned-but-
-                     not-yet-visited) and customer retros (visited-but-
-                     not-yet-analysed) fire in a smaller pool (cap=2)
-                     because LLM providers rate-limit. Idempotent
-                     against the DB columns so a tick that ran phase 2
-                     can re-run cheaply.
+          Phase 2 -- LLM analyses. Pre-visit briefings and customer
+                     retros fire in a smaller pool (cap from
+                     ``auto_visit_llm_phase_workers``) because LLM
+                     providers rate-limit. Idempotent against the DB
+                     columns so a tick that ran phase 2 can re-run
+                     cheaply.
           Phase 3 -- Route-level retro. Single shot, refreshes when
                      new visits have landed since the last fire.
 
@@ -350,8 +352,10 @@ class AutoVisitService:
             if code in already_briefed:
                 continue
             # Skip unplanned drop-ins -- nothing to brief on (their
-            # items list reflects what they bought, not a plan).
-            if not cust.items or all(it.tier == "UNPLANNED" for it in cust.items):
+            # items list reflects what they bought, not a plan). A
+            # briefing-only stub with no items is treated as planned
+            # (matches the shared classifier).
+            if not cust.items or is_unplanned_customer(cust):
                 continue
             targets.append(code)
         if not targets:
@@ -525,7 +529,7 @@ class AutoVisitService:
             SessionItem(
                 item_code=str(ic), item_name="",
                 recommended_qty=0, actual_qty=int(qty), was_sold=int(qty) > 0,
-                tier="UNPLANNED",
+                tier=TIER_UNPLANNED,
                 # Minimal synthetic rec so SessionItem.to_dict() emits the
                 # canonical ItemCode / ItemName / Tier / RecommendedQuantity
                 # fields downstream consumers (DB writer, frontend) read.
@@ -533,7 +537,7 @@ class AutoVisitService:
                     "ItemCode": str(ic),
                     "ItemName": "",
                     "RecommendedQuantity": 0,
-                    "Tier": "UNPLANNED",
+                    "Tier": TIER_UNPLANNED,
                 },
             )
             for ic, qty in actual_sales.items() if int(qty) > 0
@@ -606,7 +610,7 @@ class AutoVisitService:
             {
                 "customer_code": c.customer_code,
                 "customer_name": c.customer_name,
-                "is_planned": not all(it.tier == "UNPLANNED" for it in c.items),
+                "is_planned": not is_unplanned_customer(c),
                 "score": c.score.score,
                 "coverage": c.score.coverage,
                 "accuracy": c.score.accuracy,
@@ -617,7 +621,7 @@ class AutoVisitService:
         ]
         planned_count = sum(
             1 for c in session.customers.values()
-            if any(it.tier != "UNPLANNED" for it in c.items)
+            if not is_unplanned_customer(c)
         )
         analysis = self._llm.analyze_route(
             route_code=session.route_code,

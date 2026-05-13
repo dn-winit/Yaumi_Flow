@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from typing import Any, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 # ------------------------------------------------------------------
 # Predictions
@@ -213,6 +213,59 @@ class ReconciliationResponse(_AvailableEnvelope):
     totals: dict[str, Any] = Field(default_factory=dict)
     fetched_at: Optional[str] = None
 
+class PastPerformanceItem(BaseModel):
+    """Per-(item, date) breakdown row for the past-performance window.
+
+    Each row is keyed by (itemCode, date), so the table renders one line
+    per item per active day in the window. Sums across rows reconcile
+    with the aggregate ``totals`` block within the rounding tolerance
+    (``reconciliation_items_drift_threshold``):
+
+        sum(items[*].rep_van_load)         == totals.rep_van_load_total
+        sum(items[*].actual_sold)          == totals.actual_sold_total
+        sum(items[*].recommended_van_load) == totals.recommended_van_load_total
+
+    ``leftover_to_next_day`` is the carry produced BY this row's day
+    (what carries into day + 1). The aggregate
+    ``totals.leftover_to_next_day_total`` is the sum of this field over
+    items on the LAST active day in the window -- the canonical figure
+    the next day's page-view ``carried_qty`` reads.
+
+    ``recommended_carried`` and ``recommended_fresh`` together make up
+    ``recommended_van_load`` for the row (carry into the day + fresh
+    load this day). ``past_leftover`` and ``today_allocation`` are the
+    rep's actual carry + fresh, summing to ``rep_van_load`` for the
+    row.
+
+    Envelope / sanity-flag fields (recent_avg_per_selling_day,
+    expected_demand, pattern_floor_applied, pattern_ceiling_applied,
+    forecast_below_recent, envelope_basis) are NOT carried here. The
+    BreakdownPopover that consumes items[] only renders the eight
+    numeric carry/fresh/sold/leftover fields above. The same envelope
+    diagnostics flow per (route, item, date) via ``table_rows[*].explain``
+    on the page-view endpoints, which is the single consumer surface --
+    no duplicate wire payload.
+    """
+    model_config = ConfigDict(extra="forbid")
+    itemCode: str
+    itemName: str = ""
+    date: str
+    rep_van_load: float
+    past_leftover: float
+    today_allocation: float
+    recommended_van_load: float
+    recommended_carried: float
+    recommended_fresh: float
+    actual_sold: float
+    leftover_to_next_day: float
+
+
+# Page-view's van-load endpoint emits the same per-(item, date) shape
+# scoped to a single date (today). Aliasing keeps the wire contract in
+# one place so frontend renderers can share the row component.
+VanLoadPageViewItem = PastPerformanceItem
+
+
 class PastPerformanceResponse(_AvailableEnvelope):
     """Single canonical source for the AccuracyDrawer.
 
@@ -222,6 +275,9 @@ class PastPerformanceResponse(_AvailableEnvelope):
                        holding-cost AED)
       * ``metrics`` -- derived percentages (forecast accuracy, waste %,
                        returns) for the KPI tiles
+      * ``items``   -- per-item breakdown over the same window, sorted
+                       by ``leftover_to_next_day`` desc so the items
+                       responsible for the carry surface first.
     """
     route_code: Optional[str] = None
     start_date: Optional[str] = None
@@ -231,6 +287,7 @@ class PastPerformanceResponse(_AvailableEnvelope):
     daily: list[dict[str, Any]] = Field(default_factory=list)
     totals: dict[str, Any] = Field(default_factory=dict)
     metrics: dict[str, Any] = Field(default_factory=dict)
+    items: list[PastPerformanceItem] = Field(default_factory=list)
 
 # ------------------------------------------------------------------
 # Page views -- one fetch per page state, fully pre-computed payload
@@ -313,6 +370,11 @@ class VanLoadPageView(BaseModel):
     summary: VanLoadSummaryView = Field(default_factory=VanLoadSummaryView)
     chart_top_n: list[VanLoadChartItem] = Field(default_factory=list)
     table_rows: list[VanLoadTableRow] = Field(default_factory=list)
+    # Per-(item, date) breakdown -- one row per item for today's date
+    # (the queried ``date``). Same shape as ``PastPerformanceItem`` so
+    # the page-view's popovers can render in-memory from this payload
+    # without an extra fetch to /reconciliation/past-performance.
+    items: list[VanLoadPageViewItem] = Field(default_factory=list)
 
 
 # ------------------------------------------------------------------

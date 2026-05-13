@@ -91,25 +91,29 @@ class DataSummaryResponse(BaseModel):
 # message fields, and rejects accidental scalar returns.
 
 
-class LookbackWindowResponse(BaseModel):
-    available: bool
-    lookback: str
-    working_days: int = 0
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    # Ascending list of every working day inside the window (ISO YYYY-MM-DD).
-    # Daily charts use this as the canonical X-axis so an N-working-day
-    # lookback always renders N ticks, even when scope filters strip a day.
-    active_dates: List[str] = Field(default_factory=list)
-
-
 class _AvailableEnvelope(BaseModel):
     available: bool
     message: Optional[str] = None
 
 
+class LastActiveDateResponse(BaseModel):
+    """Most recent date with sales activity in sales_recent.csv.
+
+    Used by drawers (van-load past performance, recommendation adoption)
+    to seed default reporting periods that always land on a date the
+    data actually covers -- no hardcoded "yesterday" that lands on a
+    weekend with zero rows.
+    """
+    available: bool
+    date: Optional[str] = None
+
+
 class SalesOverviewResponse(_AvailableEnvelope):
-    lookback: Optional[str] = None
+    # Echo of the (start_date, end_date) the server actually filtered on
+    # -- lets the client confirm date contract without re-parsing query
+    # params. ISO YYYY-MM-DD, same shape as the request.
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     totals: Optional[Dict[str, Any]] = None
     daily_trend: Optional[List[Dict[str, Any]]] = None
     top_routes: Optional[List[Dict[str, Any]]] = None
@@ -117,7 +121,9 @@ class SalesOverviewResponse(_AvailableEnvelope):
 
 
 class BusinessKpisResponse(_AvailableEnvelope):
-    lookback: Optional[str] = None
+    # Echo of the requested window, same as SalesOverviewResponse.
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
     anchor_date: Optional[str] = None
     working_days: Optional[int] = None
     covered_routes: Optional[int] = None

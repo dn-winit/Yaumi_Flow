@@ -33,7 +33,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         try:
             from data_import.api.dependencies import get_eda_service, get_importer
             import threading
-            from datetime import datetime
+            from datetime import datetime, timedelta
             from pathlib import Path
 
             def _startup_refresh() -> None:
@@ -75,18 +75,30 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as exc:
                     _logger.warning("Startup data refresh failed: %s", exc)
 
-                # Warm the EDA cache (always, regardless of import)
+                # Warm the EDA cache (always, regardless of import). The two
+                # date-windowed surfaces (sales_overview, business_kpis) need
+                # a real (start_date, end_date) anchor now -- warm them with
+                # the same trailing-30-day window the dashboard defaults to
+                # on cold mount, so the first user request is a cache hit.
                 try:
                     svc = get_eda_service()
                     if stale:
                         svc.invalidate()
-                    for label, fn in (
-                        ("sales_overview", svc.get_sales_overview),
-                        ("item_catalog", svc.get_item_catalog),
-                        ("business_kpis", svc.get_business_kpis),
+                    today_dt = datetime.now()
+                    today = today_dt.strftime("%Y-%m-%d")
+                    start = (today_dt - timedelta(days=29)).strftime("%Y-%m-%d")
+                    for label, runner in (
+                        ("sales_overview",
+                            lambda: svc.get_sales_overview(start, today)),
+                        ("item_catalog",
+                            lambda: svc.get_item_catalog()),
+                        ("business_kpis",
+                            lambda: svc.get_business_kpis(start, today)),
+                        ("last_active_date",
+                            lambda: svc.get_last_active_date()),
                     ):
                         try:
-                            fn()
+                            runner()
                         except Exception as exc:
                             _logger.warning("EDA warm-up skipped %s: %s", label, exc)
                     _logger.info("EDA cache warmed")

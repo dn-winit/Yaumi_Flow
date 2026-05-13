@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-from fastapi import APIRouter, BackgroundTasks, Depends
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
 
 from sales_supervision.api.dependencies import (
     get_auto_visit_service,
@@ -27,16 +27,26 @@ from sales_supervision.api.dependencies import (
     get_session_manager,
 )
 from sales_supervision.api.schemas import (
+    AlsoBoughtRow,
     InitSessionRequest,
     LlmSaveResponse,
     ProcessVisitRequest,
+    RedistributionView,
     SaveBriefingRequest,
     SaveCustomerAnalysisRequest,
     SaveRouteAnalysisRequest,
     SavedVisitsResponse,
     SessionResponse,
+    SessionSummary,
     UnplannedVisitsResponse,
     VisitResponse,
+    VisitResultPayload,
+    VisitScore,
+)
+from sales_supervision.core.redistribution import (
+    compute_buffer_ledger,
+    compute_redistribution_for_unplanned,
+    shape_redistribution_view,
 )
 from sales_supervision.core.session import SessionManager
 from sales_supervision.services.db_saver import DbSaver
@@ -161,7 +171,10 @@ def initialize_session(
         if saved:
             mgr.hydrate_saved_visits(session, saved)
     _sessions.set(session.session_id, session)
-    return SessionResponse(success=True, session=session.summary())
+    return SessionResponse(
+        success=True,
+        session=SessionSummary(**session.summary()),
+    )
 
 
 @router.post("/visit", response_model=VisitResponse)
@@ -184,19 +197,24 @@ def process_visit(
     """
     session = _sessions.get(req.session_id)
     if session is None:
-        return VisitResponse(success=False, visit={"error": f"Session {req.session_id} not found"})
+        raise HTTPException(
+            status_code=404,
+            detail=f"Session {req.session_id} not found",
+        )
 
     customer = session.customers.get(req.customer_code)
     if customer is None:
-        return VisitResponse(success=False, visit={"error": f"Customer {req.customer_code} not in session"})
+        raise HTTPException(
+            status_code=404,
+            detail=f"Customer {req.customer_code} not in session",
+        )
 
     # Per-session lock serialises in-memory mutation across concurrent
-    # ``/visit`` calls (e.g. supervisor double-tap, or rapid-fire taps
-    # across customers in the same session). Lock duration covers the
-    # live-actuals fetch, the in-memory ``mgr.process_visit`` write,
-    # and the snapshot capture for the background upsert. The DB
-    # upsert itself runs outside the lock because it's already
-    # idempotent on (session_id, customer_code).
+    # ``/visit`` calls (supervisor double-tap, rapid-fire taps across
+    # customers). Lock duration covers the live-actuals fetch, the
+    # in-memory ``mgr.process_visit`` write, and the snapshot capture
+    # for the background upsert. The DB upsert itself runs outside the
+    # lock because it's already idempotent on (session_id, customer_code).
     with _sessions.lock_for(req.session_id):
         actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
 
@@ -204,19 +222,28 @@ def process_visit(
         # customer bought as ``alsoBought`` so the UI can show them as
         # awareness-only context (no score impact).
         planned_item_codes = {it.item_code for it in customer.items}
-        also_bought = [
-            {"item_code": code, "qty": qty}
+        also_bought_rows = [
+            AlsoBoughtRow(item_code=code, qty=int(qty))
             for code, qty in actual_sales.items()
-            if code not in planned_item_codes and qty > 0
+            if code not in planned_item_codes and int(qty or 0) > 0
         ]
-        also_bought.sort(key=lambda r: r["qty"], reverse=True)
+        also_bought_rows.sort(key=lambda r: r.qty, reverse=True)
 
         result = mgr.process_visit(session, req.customer_code, actual_sales)
 
+        # Cumulative buffer ledger across the session's visited walk so
+        # this visit's allocation decisions reflect EVERY earlier visit's
+        # deposits and withdrawals. Single pass per /visit tap; cheap
+        # relative to the live-actuals fetch. The ledger is consumed
+        # server-side only -- buffer state is not surfaced on the wire.
+        buffer_ledger = compute_buffer_ledger(session)
+        redistribution_view = shape_redistribution_view(
+            session, req.customer_code, is_drop_in=False,
+            buffer_ledger=buffer_ledger,
+        )
+
         # Snapshot the current session state under the lock so the
-        # background upsert sees a coherent view. Once the snapshot is
-        # captured into the closure parameters, the worker can run
-        # without holding the lock -- it only reads the immutable dict.
+        # background upsert sees a coherent view.
         snapshot = session.to_dict()
         session_totals = snapshot["visit_totals"]
         actual_qty = customer.total_actual
@@ -229,20 +256,20 @@ def process_visit(
             req.customer_code,
         )
 
-    payload = result.to_dict()
-    payload["actualSales"] = actual_sales
-    payload["alsoBought"] = also_bought
-    payload["actualFetchedFromLive"] = True
-    # Pure-render fields the live UI used to compute on the client.
-    # ``actualQty`` is the rec-fulfilled total (sum of ``min(rec, act)``
-    # per item), identical to legacy ``recommendedTotal - unsoldTotal``.
-    payload["actualQty"] = actual_qty
-    payload["recommendedQty"] = recommended_qty
-    # Updated cumulative session-level visit aggregates so the tile
-    # row updates without the client having to re-aggregate the
-    # in-session ``visits`` map.
-    payload["sessionTotals"] = session_totals
-    return VisitResponse(success=True, visit=payload)
+    visit_payload = VisitResultPayload(
+        score=VisitScore(
+            score=result.score.score,
+            coverage=result.score.coverage,
+            accuracy=result.score.accuracy,
+        ),
+        actualSales={k: int(v) for k, v in actual_sales.items()},
+        actualQty=int(actual_qty),
+        recommendedQty=int(recommended_qty),
+        alsoBought=also_bought_rows,
+        redistributions=redistribution_view,
+        sessionTotals=session_totals,
+    )
+    return VisitResponse(success=True, visit=visit_payload)
 
 
 # ----------------------------------------------------------------------
@@ -369,9 +396,15 @@ def get_unplanned_visits(
     """
     session = _sessions.get(session_id)
     if session is None:
+        # Pydantic now requires ``route_code`` + ``date`` as strings, so
+        # the error branch emits empty strings rather than nulls. The
+        # caller surfaces ``error`` to the supervisor; the empty IDs
+        # make ``!success`` rendering unambiguous.
         return UnplannedVisitsResponse(
             success=False,
             error=f"Session {session_id} not found",
+            route_code="",
+            date="",
         )
 
     planned = {str(c).strip() for c in session.customers.keys()}
@@ -379,6 +412,11 @@ def get_unplanned_visits(
 
     planned_visited: list[str] = []
     unplanned: list[dict] = []
+    # Collect drop-in items keyed by customer_code so we can compute
+    # every redistribution view in a single shaper pass at the end --
+    # avoids building an intermediate session per customer inside the
+    # request loop.
+    dropin_items_per_customer: Dict[str, list[Dict[str, Any]]] = {}
     for v in visitors:
         code = str(v.get("customer_code", "")).strip()
         if not code:
@@ -390,8 +428,24 @@ def get_unplanned_visits(
             v["total_qty"] = sum(int(it.get("qty") or 0) for it in items)
             v["unique_skus"] = len(items)
             v["live_visited"] = True
+            dropin_items_per_customer[code] = items
             unplanned.append(v)
     unplanned.sort(key=lambda v: v.get("total_qty", 0), reverse=True)
+
+    # Shape each drop-in's view against the current session's
+    # downstream planned pool. Items are server-provided (lifted from
+    # the YaumiLive cut-through above), never client-supplied.
+    views = compute_redistribution_for_unplanned(
+        session, dropin_items_per_customer,
+    )
+    for v in unplanned:
+        code = str(v.get("customer_code", "")).strip()
+        view = views.get(code)
+        v["redistributions"] = (
+            view.model_dump()
+            if view is not None
+            else RedistributionView().model_dump()
+        )
 
     return UnplannedVisitsResponse(
         success=True,

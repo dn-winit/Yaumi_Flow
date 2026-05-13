@@ -1,36 +1,73 @@
 """
-Artifact service -- reads/writes pipeline artifacts through file storage with TTL cache.
+Artifact service -- reads/writes pipeline artifacts through file storage
+with an mtime-keyed cache.
+
+Caching contract
+----------------
+Every artifact this service vends is backed by an on-disk file managed
+by the storage layer. The cache is keyed on
+``(path, st_mtime_ns, st_size)`` -- one ``stat()`` per request, no TTL.
+The moment the daily reconciliation cron rewrites the DB mirror or any
+other artifact, the next read here observes the new ``(mtime, size)``
+tuple and re-parses the file. There is no stale window -- not 5 minutes,
+not 5 seconds. The freshness signal is the filesystem itself, the same
+pattern used by ``VanLoadService._load_csv``, ``BiasService``, and the
+enrich-side ``_recent_stats_per_selling_day_index`` /
+``_concentrated_buyers_index`` / ``_journey_index`` helpers.
+
+Dtype coercion is driven by the pipeline YAML (same source of truth the
+training/inference pipelines use) so that API responses match the types
+emitted upstream -- no silent int<->string drift between CSV and JSON.
 """
 
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.services.cache import TTLCache
 from demand_forecasting_pipeline.services.storage.base import ARTIFACT_KEYS, StorageBackend
 from demand_forecasting_pipeline.services.storage.factory import create_storage
 from demand_forecasting_pipeline.src.utils.config_loader import load_config, resolve_dtypes
 
 logger = logging.getLogger(__name__)
 
-class ArtifactService:
-    """Serves pipeline artifacts via cached file reads.
+# Cache key shape used everywhere: identifies a unique on-disk file
+# snapshot. ``mtime_ns`` flips on every write (atomic tmp+rename
+# preserves this); ``size`` is a cheap second discriminator that catches
+# the rare case where two atomic rewrites land in the same nanosecond
+# with different content. Both come from a single ``stat()`` call so
+# the per-request overhead is one syscall.
+_CacheKey = Tuple[str, int, int]
 
-    Dtype coercion is driven by the pipeline YAML (same source of truth the
-    training/inference pipelines use) so that API responses match the types
-    emitted upstream - no silent int<->string drift between CSV and JSON.
+
+class ArtifactService:
+    """Serves pipeline artifacts via mtime-keyed file reads.
+
+    The cache is a plain dict guarded by a ``threading.Lock``; entries
+    are keyed by an opaque service-level name (``test_predictions``,
+    ``future_forecast``, ``training_summary``, ...) and store
+    ``(file_snapshot_key, payload)``. A read is a ``stat()`` + dict
+    lookup on the hot path; the file is only re-parsed when the
+    snapshot key changes. No TTL -- correctness comes from observing
+    the filesystem, not from a clock.
     """
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
-        self._cache = TTLCache(default_ttl=self._s.cache_ttl_seconds)
         self._storage: StorageBackend = create_storage(self._s)
+        # Two parallel maps so a DataFrame artifact and a JSON artifact
+        # can share a key (unlikely in practice, defensive). Same lock
+        # guards both -- contention is negligible because the hot path
+        # is a dict lookup.
+        self._df_cache: Dict[str, Tuple[_CacheKey, pd.DataFrame]] = {}
+        self._json_cache: Dict[str, Tuple[_CacheKey, Dict[str, Any]]] = {}
+        self._cache_lock = threading.Lock()
 
         # Resolve dtype contract + key column names from the pipeline YAML
         # once. If the YAML is missing or can't be parsed we fall back to
@@ -216,20 +253,14 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def get_training_summary(self) -> dict[str, Any]:
-        return self._cache.get_or_load(
-            "training_summary",
-            lambda: self._storage.read_json("training_summary"),
-        ) or {}
+        return self._read_json("training_summary")
 
     def get_data_quality(self) -> dict[str, Any]:
         # data_quality.json is written by the data_processing step (~2 min
         # in), long before pair_classes.csv (end of training, ~18 min).
         # Reading it lets the dashboard surface the real pair count
         # mid-run instead of a misleading zero.
-        return self._cache.get_or_load(
-            "data_quality",
-            lambda: self._storage.read_json("data_quality"),
-        ) or {}
+        return self._read_json("data_quality")
 
     # ------------------------------------------------------------------
     # Pair model lookup
@@ -317,27 +348,35 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def write_df(self, key: str, df: pd.DataFrame) -> int:
-        rows = self._storage.write_dataframe(key, df)
-        self._cache.invalidate(key)
-        return rows
+        # No explicit invalidation: the next read will see the new
+        # mtime/size and re-parse automatically. The cached entry
+        # (if any) is replaced lazily on that next read.
+        return self._storage.write_dataframe(key, df)
 
     def write_json(self, key: str, data: dict[str, Any]) -> bool:
-        ok = self._storage.write_json(key, data)
-        self._cache.invalidate(key)
-        return ok
+        # Same lazy mtime-driven invalidation as ``write_df``.
+        return self._storage.write_json(key, data)
 
     # ------------------------------------------------------------------
     # Cache
     # ------------------------------------------------------------------
 
     def invalidate_cache(self) -> None:
-        self._cache.clear()
+        """Drop every cached entry. The mtime-keyed cache already
+        re-parses on file change, so this is purely a memory hygiene
+        hook for callers that know they want a hard reset (e.g. the
+        pipeline-completed hook in ``PipelineService``). Cheap; safe to
+        call from any thread."""
+        with self._cache_lock:
+            self._df_cache.clear()
+            self._json_cache.clear()
 
     @property
     def cache_keys(self) -> list[str]:
-        """Non-expired cache keys - exposed so the health endpoint doesn't
-        have to reach into private state."""
-        return self._cache.keys
+        """Currently-cached artifact keys -- exposed so the health
+        endpoint doesn't have to reach into private state."""
+        with self._cache_lock:
+            return sorted(set(self._df_cache) | set(self._json_cache))
 
     @property
     def target_col(self) -> str:
@@ -380,12 +419,52 @@ class ArtifactService:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
         return df
 
+    def _file_snapshot_key(self, key: str) -> Optional[_CacheKey]:
+        """Build the ``(path, mtime_ns, size)`` snapshot tuple for the
+        on-disk file backing ``key``. ``None`` when the storage layer
+        has no path for the key OR the file is missing -- both cases
+        skip caching so a transient missing file doesn't pin an empty
+        frame across a later write."""
+        path = self._storage.source_path(key)
+        if path is None or not path.exists():
+            return None
+        stat = path.stat()
+        return (str(path), stat.st_mtime_ns, stat.st_size)
+
     def _read_df(self, key: str) -> pd.DataFrame:
-        def _load() -> pd.DataFrame:
-            df = self._storage.read_dataframe(key)
-            return self._normalize_types(df) if df is not None else pd.DataFrame()
-        result = self._cache.get_or_load(key, _load)
-        return result if result is not None else pd.DataFrame()
+        """Mtime-keyed DataFrame read.
+
+        Hot path: one ``stat()`` + one dict lookup. Cold path (file
+        changed or first read): re-parse via the storage backend and
+        apply the YAML-driven dtype contract. Lock window is tight --
+        only the dict mutation is guarded, the parse runs lock-free."""
+        snapshot = self._file_snapshot_key(key)
+        if snapshot is not None:
+            with self._cache_lock:
+                cached = self._df_cache.get(key)
+                if cached is not None and cached[0] == snapshot:
+                    return cached[1]
+        df = self._storage.read_dataframe(key)
+        df = self._normalize_types(df) if df is not None else pd.DataFrame()
+        if snapshot is not None:
+            with self._cache_lock:
+                self._df_cache[key] = (snapshot, df)
+        return df
+
+    def _read_json(self, key: str) -> dict[str, Any]:
+        """Mtime-keyed JSON read. Same contract as ``_read_df`` -- one
+        stat + dict lookup on the hot path; re-parse on file change."""
+        snapshot = self._file_snapshot_key(key)
+        if snapshot is not None:
+            with self._cache_lock:
+                cached = self._json_cache.get(key)
+                if cached is not None and cached[0] == snapshot:
+                    return cached[1]
+        data = self._storage.read_json(key) or {}
+        if snapshot is not None:
+            with self._cache_lock:
+                self._json_cache[key] = (snapshot, data)
+        return data
 
     def _apply_filters(self, df: pd.DataFrame, route_code: Optional[str] = None, item_code: Optional[str] = None) -> pd.DataFrame:
         if df.empty:

@@ -21,7 +21,6 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-import httpx
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
@@ -294,15 +293,11 @@ def compute_drift_status(
 ) -> dict[str, Any]:
     """Compare live post-training accuracy against the training-time baseline.
 
-    **Primary (live)**: queries the last 7 working days of predictions vs
-    actual sales from YaumiLive via ``AccuracyService.get_comparison``.
-    The window is resolved through ``data_import``'s
-    ``/eda/lookback-window`` so "recent" aligns with the dashboard's
-    reporting period (working days, not calendar days). Falls back to a
-    7-calendar-day window if data_import is unreachable so drift never
-    silently breaks. This is real drift detection -- the model's
-    predictions are scored against what customers actually bought
-    AFTER training.
+    **Primary (live)**: queries the trailing ``drift_lookback_days``
+    calendar days of predictions vs actual sales from YaumiLive via
+    ``AccuracyService.get_comparison``. This is real drift detection --
+    the model's predictions are scored against what customers actually
+    bought AFTER training.
 
     **Fallback (test-set)**: if the live DB is unavailable, splits the static
     test predictions into recent vs baseline. Less meaningful but still a
@@ -406,37 +401,18 @@ def compute_drift_status(
     return result
 
 def _recent_window(settings: Settings) -> tuple[str, str]:
-    """Resolve the (start_date, end_date) for the "recent" drift window.
+    """Trailing N-calendar-day window used by the drift detector.
 
-    Asks data_import for the trailing N working-day span so drift aligns
-    with the dashboard's reporting period. Falls back to a calendar-day
-    window when DF_DATA_IMPORT_URL is unset or the service is unreachable
-    so drift never silently fails because of a downstream config gap.
-    Both the lookup endpoint and the calendar fallback length come from
-    Settings.
+    N comes from ``settings.drift_lookback_days``. Returns ISO
+    ``(start_date, end_date)`` inclusive, ending today. The previous
+    implementation rounded to "working days" via a data_import HTTP
+    round-trip; that endpoint is gone and the dashboard's reporting
+    period is now an arbitrary user-chosen range, so drift consistently
+    uses calendar days here -- one source of truth, no network hop.
     """
-    base = (settings.data_import_url or "").rstrip("/")
-    if base:
-        try:
-            resp = httpx.get(
-                f"{base}{settings.lookback_endpoint_path}",
-                params={"lookback": settings.lookback_query},
-                timeout=settings.lookback_timeout_seconds,
-            )
-            resp.raise_for_status()
-            payload = resp.json()
-            start = payload.get("start_date")
-            end = payload.get("end_date")
-            if payload.get("available") and start and end:
-                return start, end
-        except Exception as exc:
-            logger.warning(
-                "Drift: lookback-window fetch failed, using %d calendar days: %s",
-                settings.drift_fallback_lookback_days, exc,
-            )
     now = _utcnow()
     return (
-        (now - timedelta(days=settings.drift_fallback_lookback_days)).strftime("%Y-%m-%d"),
+        (now - timedelta(days=settings.drift_lookback_days)).strftime("%Y-%m-%d"),
         now.strftime("%Y-%m-%d"),
     )
 

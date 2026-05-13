@@ -173,9 +173,9 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
               hint="Strength of the signals behind this suggestion"
             />
             <Stat
-              label="Van carrying"
+              label="Total on van today"
               value={vanLoad != null ? fmtNum(vanLoad) : "-"}
-              hint="Total of this item on the van today"
+              hint="All units of this item loaded on the route's truck today"
             />
           </div>
         </div>
@@ -190,7 +190,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           {isFirstTime ? (
             <div className={GRID_3}>
               <Stat
-                label="Avg qty per visit"
+                label="Avg quantity per visit"
                 value="—"
                 hint="First-time suggestion (no past purchase)"
               />
@@ -208,7 +208,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           ) : (
             <div className={GRID_3}>
               <Stat
-                label="Avg qty per visit"
+                label="Avg quantity per visit"
                 value={avgQty != null ? fmtNum(avgQty) : "-"}
                 hint="Historical average when this customer buys this item"
               />

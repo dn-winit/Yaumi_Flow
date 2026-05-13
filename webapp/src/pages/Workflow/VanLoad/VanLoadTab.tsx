@@ -75,7 +75,7 @@ export default function VanLoadTab() {
         actions={
           <>
             <Button variant="ghost" size="sm" onClick={() => setRouteCode("")}>
-              ← Back to routes
+              &larr; Back to routes
             </Button>
             <Button variant="secondary" size="sm" onClick={() => setAccuracyOpen(true)}>
               Past performance
@@ -116,7 +116,11 @@ export default function VanLoadTab() {
         </Card>
       ) : (
         <div className="space-y-6 animate-fade-in">
-          <VanLoadSummary summary={view.summary} />
+          <VanLoadSummary
+            summary={view.summary}
+            items={view.items}
+            date={view.date}
+          />
 
           <Card
             title={`Top ${view.chart_top_n.length} items by van load`}

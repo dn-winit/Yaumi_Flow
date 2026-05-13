@@ -6,16 +6,11 @@ import { Skeleton } from "@/components/ui/Skeleton";
 import PageHeader from "@/components/layout/PageHeader";
 import HorizontalBarChart, { type HBarDatum } from "@/components/charts/HorizontalBarChart";
 import { CHART_COLOR } from "@/components/charts/theme";
-import { useSalesOverview, useBusinessKpis } from "@/hooks/useDataImport";
+import { useSalesOverview, useBusinessKpis, useLastActiveDate } from "@/hooks/useDataImport";
 import { useToast } from "@/hooks/useToast";
-import {
-  fmtCurrency,
-  DEFAULT_LOOKBACK,
-  DASHBOARD_TOP_N,
-  type Lookback,
-} from "@/lib/format";
-import { fmtDate } from "@/lib/date";
-import type { DashboardFilters } from "@/types/data-import";
+import { fmtCurrency, DASHBOARD_TOP_N } from "@/lib/format";
+import { defaultReportingPeriod, fmtDate } from "@/lib/date";
+import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
 import DashboardFilterBar from "./DashboardFilterBar";
 import DashboardKpis from "./DashboardKpis";
@@ -23,17 +18,30 @@ import DashboardDailyTrend from "./DashboardDailyTrend";
 
 export default function DashboardPage() {
   // Reporting period drives every tile, chart, and table on this page so
-  // a single selector controls the whole executive view in lockstep.
-  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  // a single picker controls the whole executive view in lockstep.
+  const [period, setPeriod] = useState<ReportingPeriod>(() => defaultReportingPeriod());
   // Cascading dashboard filters. Empty arrays === "all" (matches backend).
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  const sales = useSalesOverview(lookback, filters);
-  const kpis = useBusinessKpis(lookback, filters);
+  const sales = useSalesOverview(period, filters);
+  const kpis = useBusinessKpis(period, filters);
+  // lastActiveDate surfaces in the empty-state hint so the user has a
+  // concrete "try this date instead" anchor when they land on a weekend
+  // or holiday with zero rows. Static-tier cached so it costs nothing.
+  const { date: lastActiveDate } = useLastActiveDate();
   const { toast } = useToast();
 
   const salesData = sales.data?.available ? sales.data : null;
   const k = kpis.data?.available ? kpis.data : null;
+  // Transparent no-data signal: the backend returned ``available: true``
+  // but the window had zero activity in scope -- almost always a
+  // weekend / holiday pick. Compute once here so the banner, KPI grid,
+  // and chart all read from the same flag.
+  const noActivityInWindow =
+    sales.data?.available === true &&
+    !sales.loading &&
+    (salesData?.totals?.working_days ?? 0) === 0;
+  const singleDay = period.start_date === period.end_date;
 
   const handleRefresh = () => {
     sales.refetch();
@@ -93,73 +101,101 @@ export default function DashboardPage() {
       <DashboardFilterBar
         value={filters}
         onChange={setFilters}
-        lookback={lookback}
-        onLookbackChange={setLookback}
+        period={period}
+        onPeriodChange={setPeriod}
       />
 
-      {kpis.loading ? (
-        <div className="space-y-3">
-          <Skeleton className="h-3 w-44" />
-          <KpiRow>
-            {[1, 2, 3].map((i) => (
-              <div key={i} className="bg-surface-sunken rounded-lg p-4 border-l-3 border-brand-200">
-                <Skeleton className="h-3 w-20 mb-2" />
-                <Skeleton className="h-6 w-28 mb-1" />
-                <Skeleton className="h-3 w-24" />
+      {noActivityInWindow ? (
+        <Card>
+          <div className="px-2 py-6 text-center space-y-2">
+            <div className="text-h3 font-semibold text-text-primary">
+              {singleDay
+                ? `No sales activity on ${fmtDate(period.end_date)}`
+                : `No sales activity from ${fmtDate(period.start_date)} to ${fmtDate(period.end_date)}`}
+            </div>
+            <div className="text-body text-text-secondary">
+              {singleDay
+                ? "This date is most likely a weekend, holiday, or other closure. The dashboard has no rows to summarise for it."
+                : "Every day in the chosen range has zero rows in scope. The dashboard has nothing to summarise."}
+            </div>
+            {lastActiveDate && lastActiveDate !== period.end_date && (
+              <div className="text-caption text-text-tertiary pt-2">
+                The most recent date with activity is{" "}
+                <span className="font-semibold text-text-secondary">
+                  {fmtDate(lastActiveDate)}
+                </span>
+                . Adjust the reporting period to see data again.
               </div>
-            ))}
-          </KpiRow>
-        </div>
+            )}
+          </div>
+        </Card>
       ) : (
-        <DashboardKpis k={k} />
+        <>
+          {kpis.loading ? (
+            <div className="space-y-3">
+              <Skeleton className="h-3 w-44" />
+              <KpiRow>
+                {[1, 2, 3].map((i) => (
+                  <div key={i} className="bg-surface-sunken rounded-lg p-4 border-l-3 border-brand-200">
+                    <Skeleton className="h-3 w-20 mb-2" />
+                    <Skeleton className="h-6 w-28 mb-1" />
+                    <Skeleton className="h-3 w-24" />
+                  </div>
+                ))}
+              </KpiRow>
+            </div>
+          ) : (
+            <DashboardKpis k={k} />
+          )}
+
+          <DashboardDailyTrend data={salesData} loading={sales.loading} />
+
+          {/* Where the revenue lives: by category and by route, side-by-side. */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            <Card
+              title="Revenue by category"
+              actions={
+                salesData?.totals?.unique_categories ? (
+                  <span className="text-caption text-text-tertiary">
+                    top {Math.min(salesData.totals.unique_categories, DASHBOARD_TOP_N)} of {salesData.totals.unique_categories}
+                  </span>
+                ) : undefined
+              }
+            >
+              {sales.loading ? (
+                <Skeleton className="h-[240px] rounded-lg" />
+              ) : (
+                <HorizontalBarChart
+                  data={categoryBars}
+                  color={CHART_COLOR.info}
+                  emptyMessage="No category data"
+                />
+              )}
+            </Card>
+
+            <Card
+              title="Top routes by revenue"
+              actions={
+                salesData?.totals?.unique_routes ? (
+                  <span className="text-caption text-text-tertiary">
+                    top {Math.min(salesData.totals.unique_routes, DASHBOARD_TOP_N)} of {salesData.totals.unique_routes}
+                  </span>
+                ) : undefined
+              }
+            >
+              {sales.loading ? (
+                <Skeleton className="h-[240px] rounded-lg" />
+              ) : (
+                <HorizontalBarChart
+                  data={topRouteRevenueBars}
+                  color={CHART_COLOR.brandPrimary}
+                  emptyMessage="No route data"
+                />
+              )}
+            </Card>
+          </div>
+        </>
       )}
-
-      <DashboardDailyTrend data={salesData} loading={sales.loading} />
-
-      {/* Where the revenue lives: by category and by route, side-by-side. */}
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card
-          title="Revenue by category"
-          actions={
-            salesData?.totals?.unique_categories ? (
-              <span className="text-caption text-text-tertiary">
-                top {Math.min(salesData.totals.unique_categories, DASHBOARD_TOP_N)} of {salesData.totals.unique_categories}
-              </span>
-            ) : undefined
-          }
-        >
-          {sales.loading ? (
-            <Skeleton className="h-[240px] rounded-lg" />
-          ) : (
-            <HorizontalBarChart
-              data={categoryBars}
-              color={CHART_COLOR.info}
-              emptyMessage="No category data"
-            />
-          )}
-        </Card>
-
-        <Card
-          title="Top routes by revenue"
-          actions={
-            salesData?.totals?.unique_routes ? (
-              <span className="text-caption text-text-tertiary">
-                top {Math.min(salesData.totals.unique_routes, DASHBOARD_TOP_N)} of {salesData.totals.unique_routes}
-              </span>
-            ) : undefined
-          }
-        >
-          {sales.loading ? (
-            <Skeleton className="h-[240px] rounded-lg" />
-          ) : (
-            <HorizontalBarChart
-              data={topRouteRevenueBars}
-              color={CHART_COLOR.brandPrimary}
-              emptyMessage="No route data"
-            />
-          )}
-        </Card>
-      </div>
     </div>
   );
 }

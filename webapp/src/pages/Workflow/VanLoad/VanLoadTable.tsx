@@ -18,9 +18,11 @@ interface Props {
  *  Row shape the ExplainabilityModal expects. The modal reads
  *  ``prediction``, ``demand_class``, ``lower_bound``, etc., so we map
  *  the canonical page-view fields back onto the names the modal
- *  consumes. ``explain`` already carries the engine intermediates the
- *  modal renders (opening_stock, forecast_corrected, bias_pct,
- *  qty_if_demand, nonzero_ratio, avg_gap_days, actual_qty). */
+ *  consumes. ``explain`` carries the engine intermediates the modal
+ *  renders (opening_stock, predicted_raw, forecast_corrected,
+ *  bias_pct, recent_avg_per_selling_day, expected_demand,
+ *  pattern_floor_applied, pattern_ceiling_applied,
+ *  forecast_below_recent, guard_skipped). */
 function toLegacyRow(r: VanLoadTableRow, routeCode: string, date: string): Row {
   return {
     ItemCode: r.item_code,

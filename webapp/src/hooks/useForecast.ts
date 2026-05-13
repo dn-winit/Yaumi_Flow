@@ -123,22 +123,29 @@ export function useUpdateRetrainConfig() {
 /**
  * Per-day series + return metrics for the AccuracyDrawer's past-performance
  * chart. Three plottable lines (original van load, reconciled load, actually
- * sold) for the given route over the lookback window ending at ``endDate``.
+ * sold) for the given route over the ``[start_date, end_date]`` window.
  */
 export function useReconciliationPastPerformance(
   routeCode: string | undefined,
+  startDate: string | undefined,
   endDate: string | undefined,
-  lookbackDays: number,
   enabled = true,
   filters?: { item_codes?: string[]; category_codes?: string[] },
 ) {
-  const ready = enabled && Boolean(routeCode) && Boolean(endDate);
+  const ready = enabled && Boolean(routeCode) && Boolean(startDate) && Boolean(endDate);
   const itemKey = (filters?.item_codes ?? []).slice().sort().join("|");
   const catKey = (filters?.category_codes ?? []).slice().sort().join("|");
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["reconciliation-past-performance", routeCode ?? "", endDate ?? "", lookbackDays, itemKey, catKey],
+    queryKey: [
+      "reconciliation-past-performance",
+      routeCode ?? "",
+      startDate ?? "",
+      endDate ?? "",
+      itemKey,
+      catKey,
+    ],
     queryFn: () =>
-      forecastApi.getReconciliationPastPerformance(routeCode!, endDate!, lookbackDays, filters),
+      forecastApi.getReconciliationPastPerformance(routeCode!, startDate!, endDate!, filters),
     enabled: ready,
     ...tier("windowed"),
   });

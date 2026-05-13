@@ -74,21 +74,28 @@ class VanLoadService:
     def past_performance(
         self,
         route_code: str,
-        lookback_working_days: int,
-        end_date: str | None = None,
+        start_date: str,
+        end_date: str,
     ) -> dict[str, Any]:
         """Active-day axis for the past-performance chart.
 
-        Returns the **N most recent active days** for ``route_code``, where
-        active = any day with allocation / sales / returns activity. So
-        ``lookback_working_days = 1`` returns exactly 1 day -- the most
-        recent one with activity -- and ``= 7`` returns 7 active days,
-        skipping weekends and holidays automatically. ``end_date`` caps
-        how far forward we look (defaults to the latest available activity
-        for the route); we walk backward from there until we have N days
-        with activity, or run out.
+        Returns every day in ``[start_date, end_date]`` (inclusive) that
+        had activity for this route -- allocation / sales / returns. A
+        day with zero activity is silently dropped from the daily array
+        because the downstream chart has nothing to plot for it; the
+        ``start_date`` / ``end_date`` echo lets the client confirm the
+        requested window.
         """
         rcode = str(route_code)
+        try:
+            start = pd.Timestamp(start_date).normalize()
+            end   = pd.Timestamp(end_date).normalize()
+        except (ValueError, TypeError):
+            return {"route_code": rcode, "start_date": start_date, "end_date": end_date,
+                    "active_days": 0, "daily": []}
+        if start > end:
+            return {"route_code": rcode, "start_date": start_date, "end_date": end_date,
+                    "active_days": 0, "daily": []}
 
         alloc   = self._load_csv(self._s.load_allocation_file)
         sales   = self._load_csv(self._s.sales_recent_file)
@@ -100,20 +107,16 @@ class VanLoadService:
             return set(df[df.RouteCode.astype(str) == rcode].TrxDate.unique())
 
         all_active = sorted(_route_dates(alloc) | _route_dates(sales) | _route_dates(returns))
-        if end_date is not None:
-            cap = pd.Timestamp(end_date).normalize()
-            all_active = [d for d in all_active if d <= cap]
-        active = all_active[-lookback_working_days:] if lookback_working_days > 0 else []
+        active = [d for d in all_active if start <= d <= end]
 
         rows = [{"date": d.strftime("%Y-%m-%d")} for d in active]
 
         return {
-            "route_code": rcode,
-            "start_date": (active[0].strftime("%Y-%m-%d")  if active else None),
-            "end_date":   (active[-1].strftime("%Y-%m-%d") if active else None),
-            "lookback_days": lookback_working_days,
+            "route_code":  rcode,
+            "start_date":  start_date,
+            "end_date":    end_date,
             "active_days": len(rows),
-            "daily": rows,
+            "daily":       rows,
         }
 
     def typical_allocation(

@@ -5,9 +5,14 @@ type Trend = "up" | "down" | "neutral";
 
 interface MetricCardProps {
   label: string;
-  value: string | number;
+  /** Either a pre-formatted string (animated on change) or an arbitrary
+   *  ReactNode -- e.g. a clickable BreakdownPopover trigger embedded
+   *  alongside text. ReactNode values skip the count-up animation. */
+  value: string | number | ReactNode;
   trend?: Trend;
-  subtitle?: string;
+  /** Same string/ReactNode contract as ``value`` so subtitles can host
+   *  clickable popover triggers without losing the muted typography. */
+  subtitle?: string | ReactNode;
   className?: string;
   loading?: boolean;
   /** Optional element rendered next to the label (intended for InfoBubble). */
@@ -22,7 +27,7 @@ const trendConfig: Record<Trend, { icon: string; color: string }> = {
 
 // Matches strings with exactly ONE numeric value (possibly with prefix/suffix
 // like "AED 45.8K" or "55.3%"). Compound values like "1 / 21" or "12 routes"
-// contain multiple number groups and must NOT be animated — stripping non-digits
+// contain multiple number groups and must NOT be animated -- stripping non-digits
 // would concatenate them into a wrong number.
 const SINGLE_NUMBER = /^[^0-9]*(\d+\.?\d*)[^0-9]*$/;
 
@@ -34,7 +39,7 @@ function useAnimatedValue(target: string): string {
     const prev = prevRef.current;
     prevRef.current = target;
 
-    // Only animate single-number values to avoid corrupting "1 / 21" → "121"
+    // Only animate single-number values to avoid corrupting "1 / 21" -> "121"
     const prevMatch = prev.match(SINGLE_NUMBER);
     const targetMatch = target.match(SINGLE_NUMBER);
     const prevNum = prevMatch ? parseFloat(prevMatch[1]) : NaN;
@@ -72,6 +77,13 @@ function useAnimatedValue(target: string): string {
   return display;
 }
 
+// Animate count-ups only for plain primitive values. ReactNode values
+// (popover triggers, mixed nodes) bypass animation entirely -- they
+// would either get coerced to "[object Object]" or visually flicker.
+function isAnimatable(v: unknown): v is string | number {
+  return typeof v === "string" || typeof v === "number";
+}
+
 export default function MetricCard({
   label,
   value,
@@ -81,7 +93,8 @@ export default function MetricCard({
   loading = false,
   info,
 }: MetricCardProps) {
-  const animatedValue = useAnimatedValue(String(value));
+  const animatable = isAnimatable(value);
+  const animatedValue = useAnimatedValue(animatable ? String(value) : "");
 
   return (
     <div
@@ -103,15 +116,21 @@ export default function MetricCard({
         </>
       ) : (
         <>
-          <div className="flex items-baseline gap-2 animate-fadeIn">
-            <span className="text-xl font-bold text-text-primary">{animatedValue}</span>
+          <div className="flex flex-wrap items-baseline gap-2 animate-fadeIn">
+            <span className="text-xl font-bold text-text-primary">
+              {animatable ? animatedValue : value}
+            </span>
             {trend && (
               <span className={`text-body font-medium ${trendConfig[trend].color}`}>
                 {trendConfig[trend].icon}
               </span>
             )}
           </div>
-          {subtitle && <p className="text-caption text-text-tertiary mt-1">{subtitle}</p>}
+          {subtitle && (
+            <div className="text-caption text-text-tertiary mt-1">
+              {subtitle}
+            </div>
+          )}
         </>
       )}
     </div>

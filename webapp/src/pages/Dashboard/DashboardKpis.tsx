@@ -98,7 +98,7 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
               title="Unique items sold"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>Distinct SKUs that appeared in any invoice over the period.</p>
+                  <p>Distinct items that appeared in any invoice over the period.</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     count = nunique(ItemCode) in VW_GET_SALES_DETAILS<br />
                     daily_avg = mean of nunique(ItemCode) per active sales day

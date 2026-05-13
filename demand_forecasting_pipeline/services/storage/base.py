@@ -6,7 +6,8 @@ Both file and database backends implement this contract.
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from typing import Any, Dict
+from pathlib import Path
+from typing import Any, Dict, Optional
 
 import pandas as pd
 
@@ -71,6 +72,20 @@ class StorageBackend(ABC):
     def check_all(self) -> Dict[str, bool]:
         """Check existence of all known artifacts."""
         return {k: self.exists(k) for k in ARTIFACT_KEYS}
+
+    # ------------------------------------------------------------------
+    # Source path (for mtime-keyed caching upstream)
+    # ------------------------------------------------------------------
+
+    @abstractmethod
+    def source_path(self, key: str) -> Optional[Path]:
+        """Return the on-disk path the read path will consult for ``key``.
+
+        Used by callers that want to mtime-key an in-memory cache on top
+        of the storage layer: a single ``stat()`` on the returned path
+        is the freshness signal, with no need to re-read the underlying
+        file when nothing has changed on disk. Returns ``None`` when the
+        key has no path representation (e.g. an unknown key)."""
 
     # ------------------------------------------------------------------
     # Name

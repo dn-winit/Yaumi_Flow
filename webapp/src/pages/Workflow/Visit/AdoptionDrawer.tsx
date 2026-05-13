@@ -13,18 +13,16 @@ import { CHART_COLOR } from "@/components/charts/theme";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
 import { useAdoption } from "@/hooks/useRecommendedOrder";
-import { useLookbackWindow } from "@/hooks/useDataImport";
-import { fmtDate, fmtDateRange } from "@/lib/date";
+import { useLastActiveDate } from "@/hooks/useDataImport";
+import { addDays, fmtDate, fmtDateRange, todayIso } from "@/lib/date";
 import {
   fmtNum,
   fmtCurrency,
   fmtPct,
   fmtBps,
   DELIVERY_GOOD,
-  DEFAULT_LOOKBACK,
-  type Lookback,
 } from "@/lib/format";
-import type { DashboardFilters } from "@/types/data-import";
+import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
 
 const MISSING = "--";
@@ -43,44 +41,69 @@ interface Props {
  * Past-analysis drawer for recommendation adoption. Mirrors the Plan
  * step's Past-analysis drawer: same filter bar (Reporting period +
  * Category + Item, with Warehouse / Route hidden as redundant), same
- * lookback enum, same shared FilterDimensions hook.
+ * shared FilterDimensions hook, and the same ``(start_date, end_date)``
+ * wire shape every dashboard surface now uses.
  *
  * Backend `/analytics/adoption` honours category_codes + item_codes
  * directly so the metrics + charts here are real scoped views, not a
  * cosmetic filter bar over unfiltered data.
  */
 export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
-  const [lookback, setLookback] = useState<Lookback>(DEFAULT_LOOKBACK);
+  // Adoption pivots on the most recent date sales_recent.csv actually
+  // covers, not on a hardcoded calendar offset -- a Monday open onto a
+  // Saturday "yesterday" would surface the empty state. Hook is static-
+  // tier cached so subsequent opens are instant.
+  const { date: lastActiveDate, loading: lastActiveLoading } = useLastActiveDate();
+
+  const [period, setPeriod] = useState<ReportingPeriod | null>(null);
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  // Seed filter scope with the active route on every open. The user can
-  // still widen via the bar; the route field is hidden in UI but pinned
-  // in state so backend calls stay scoped.
+  // Seed both filters and the period whenever the drawer opens, the
+  // route changes, or the data's last active date shifts (e.g. after
+  // the morning data_import cron). Period gates downstream queries so
+  // nothing fires against a wrong calendar default.
+  //
+  // Wait for ``useLastActiveDate`` to resolve, then fall back to today
+  // if the CSV is empty -- otherwise the drawer would render its
+  // loading state indefinitely with no way for the user to recover.
   useEffect(() => {
     if (!open) return;
+    if (lastActiveLoading) return;
     setFilters({
       ...EMPTY_FILTERS,
       route_codes: routeCode ? [routeCode] : [],
     });
+    const anchor = lastActiveDate ?? todayIso();
+    setPeriod({
+      start_date: addDays(anchor, -29),
+      end_date: anchor,
+    });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, routeCode]);
+  }, [open, routeCode, lastActiveDate, lastActiveLoading]);
 
-  // The reporting period maps to a *working-day* window served by
-  // data_import (same dates the dashboard slices to for the same
-  // lookback). One source of truth for "what counts as 30 working
-  // days" -- this drawer never recomputes it from calendar deltas.
-  const window = useLookbackWindow(open ? lookback : undefined);
-  const w = window.data;
-  const params = useMemo(() => {
-    if (!w?.available || !w.start_date || !w.end_date) return null;
-    return {
-      start_date: w.start_date,
-      end_date: w.end_date,
-      ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
-      ...(filters.category_codes.length > 0 ? { category_codes: filters.category_codes } : {}),
-      ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
-    };
-  }, [w, filters]);
+  // The picker emits ISO ``(start_date, end_date)`` directly -- no
+  // working-day resolution round-trip required. Empty windows / weekend-
+  // only selections naturally surface as "no recommendations stored" in
+  // the empty-state path below.
+  const params = useMemo(
+    () =>
+      period
+        ? {
+            start_date: period.start_date,
+            end_date: period.end_date,
+            ...(filters.route_codes.length === 1
+              ? { route_code: filters.route_codes[0] }
+              : {}),
+            ...(filters.category_codes.length > 0
+              ? { category_codes: filters.category_codes }
+              : {}),
+            ...(filters.item_codes.length > 0
+              ? { item_codes: filters.item_codes }
+              : {}),
+          }
+        : null,
+    [period, filters],
+  );
 
   const { data, loading } = useAdoption(
     params ?? { start_date: "", end_date: "" },
@@ -136,30 +159,43 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       ? "up"
       : "down";
 
-  return (
-    <Drawer open={open} onClose={onClose} title="Past performance — what customers actually bought" width="xl">
-      <div className="space-y-6">
-        <DashboardFilterBar
-          value={filters}
-          onChange={setFilters}
-          lookback={lookback}
-          onLookbackChange={setLookback}
-          hideWarehouse
-          hideRoute
-        />
+  const singleDay = period != null && period.start_date === period.end_date;
 
-        {loading ? (
-          <Loading message="Checking which recommendations sold..." />
-        ) : !data?.available ? (
-          <EmptyState
-            icon="📭"
-            title="Not enough history"
-            message={
-              data?.message ??
-              `No recommendations were stored for ${windowLabel} matching the current filters.`
-            }
-          />
+  return (
+    <Drawer open={open} onClose={onClose} title="Past performance - what customers actually bought" width="xl">
+      <div className="space-y-6">
+        {period == null ? (
+          <Loading message="Finding the latest day with activity..." />
         ) : (
+          <>
+            <DashboardFilterBar
+              value={filters}
+              onChange={setFilters}
+              period={period}
+              onPeriodChange={setPeriod}
+              maxDate={lastActiveDate ?? undefined}
+              hideWarehouse
+              hideRoute
+            />
+
+            {loading || lastActiveLoading ? (
+              <Loading message="Checking which recommendations sold..." />
+            ) : !data?.available ? (
+              <EmptyState
+                icon="📭"
+                title={
+                  singleDay
+                    ? `No recommendations recorded on ${fmtDate(period.end_date)}`
+                    : "Not enough history"
+                }
+                message={
+                  data?.message ??
+                  (singleDay
+                    ? `This date may be a weekend, holiday, or a day with no route activity. Try the previous working day or widen the period.`
+                    : `No recommendations were stored for ${windowLabel} matching the current filters.`)
+                }
+              />
+            ) : (
           <>
             <SectionLabel>How customers responded to our recommendations</SectionLabel>
             <KpiRow>
@@ -175,7 +211,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 subtitle={
                   !s || s.recommended_volume <= 0
                     ? "No recommendations bought yet"
-                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units actually sold · ${fmtNum(s.skus_adopted)} items`
+                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units actually sold - ${fmtNum(s.skus_adopted)} items`
                 }
                 trend={revenueArrow}
                 info={
@@ -190,7 +226,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                           &nbsp;&nbsp;recommended_orders.csv  AND<br />
                           &nbsp;&nbsp;VW_GET_SALES_DETAILS (TrxType=&apos;SalesInvoice&apos;)
                         </p>
-                        <p>This isolates the revenue our recommendations <em>actually</em> drove — not just total revenue, but the slice attributable to suggestions the rep made.</p>
+                        <p>This isolates the revenue our recommendations <em>actually</em> drove - not just total revenue, but the slice attributable to suggestions the rep made.</p>
                       </div>
                     }
                   />
@@ -235,7 +271,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
                 subtitle={
                   s && s.skus_adopted > 0
-                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within ±${fmtBps(s.perfect_pick_tolerance)} of suggested`
+                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within +/-${fmtBps(s.perfect_pick_tolerance)} of suggested`
                     : "No adopted items to score"
                 }
                 trend={perfectPickArrow}
@@ -244,11 +280,11 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                     title="Right quantity, right item"
                     body={
                       <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                        <p>Of the items the customer bought from our recommendations, the percentage where the bought quantity was within ±{s ? fmtBps(s.perfect_pick_tolerance) : "20%"} of the recommended quantity.</p>
+                        <p>Of the items the customer bought from our recommendations, the percentage where the bought quantity was within +/-{s ? fmtBps(s.perfect_pick_tolerance) : "20%"} of the recommended quantity.</p>
                         <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                           perfect_pick = items_within_tolerance ÷ items_adopted × 100
                         </p>
-                        <p>Tighter than &quot;Items the customer took&quot; — this checks both the SKU choice and the volume. The tolerance is set per-deployment in the recommendation engine config.</p>
+                        <p>Tighter than &quot;Items the customer took&quot; - this checks both the item choice and the volume. The tolerance is set per-deployment in the recommendation engine config.</p>
                       </div>
                     }
                   />
@@ -267,7 +303,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 subtitle={
                   !s || s.unsold_volume === 0
                     ? "Every recommended unit was bought"
-                    : `${fmtNum(s.unsold_volume)} units across ${fmtNum(s.unsold_sku_count)} items where customers didn't buy what we suggested — opportunity to re-pitch next visit`
+                    : `${fmtNum(s.unsold_volume)} units across ${fmtNum(s.unsold_sku_count)} items where customers didn't buy what we suggested - opportunity to re-pitch next visit`
                 }
                 trend={s?.unsold_volume != null && s.unsold_volume > 0 ? "up" : undefined}
                 info={
@@ -280,8 +316,8 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                           unsold_per_(customer,item,day) = max(recommended_qty − bought_qty, 0)<br />
                           unsold_revenue = Σ unsold × avg_unit_price
                         </p>
-                        <p><strong>Read it as opportunity, not error.</strong> A high number means the recommendations identified demand the customer hasn&apos;t yet acted on — items the team can re-pitch on the next visit, or that signal a stocking / pricing barrier.</p>
-                        <p>This number sits alongside Dashboard&apos;s &quot;Sales opportunity flagged&quot; tile — same opportunity-positive framing, scoped here to recommendation-vs-purchase per customer rather than forecast-vs-sales per route.</p>
+                        <p><strong>Read it as opportunity, not error.</strong> A high number means the recommendations identified demand the customer hasn&apos;t yet acted on - items the team can re-pitch on the next visit, or that signal a stocking / pricing barrier.</p>
+                        <p>This number sits alongside Dashboard&apos;s &quot;Sales opportunity flagged&quot; tile - same opportunity-positive framing, scoped here to recommendation-vs-purchase per customer rather than forecast-vs-sales per route.</p>
                       </div>
                     }
                   />
@@ -331,6 +367,8 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 )}
               </div>
             </div>
+          </>
+        )}
           </>
         )}
       </div>

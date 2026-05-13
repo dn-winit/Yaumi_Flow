@@ -186,12 +186,9 @@ class Settings(BaseSettings):
     conformal_offsets_file: str = Field(default="conformal_offsets.csv")
     pair_coverage_file: str = Field(default="pair_coverage.csv")
 
-    # Cache
-    cache_ttl_seconds: int = Field(default=300, ge=0)
     # Outbound HTTP request timeout (van composition pull from
-    # data_import). Distinct from ``cache_ttl_seconds`` so a long cache
-    # window doesn't translate into an equally long blocking wait when
-    # the upstream service is slow.
+    # data_import). Bounds how long a blocking call to the upstream
+    # service can take before a request handler abandons it.
     http_request_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
 
     # Pagination + read limits. Surfaced here so ops can tune memory
@@ -202,6 +199,12 @@ class Settings(BaseSettings):
     reconciliation_default_lookback_days: int = Field(default=14, ge=1, le=365)
     reconciliation_min_lookback_days: int = Field(default=1, ge=1)
     reconciliation_max_lookback_days: int = Field(default=90, ge=1, le=365)
+    # Drift tolerance for the past-performance items[] sum vs totals
+    # identity check. Totals are emitted at 2dp; max accumulated rounding
+    # drift across thousands of items is on the order of 0.005 * N, so a
+    # 0.5u threshold flags real bugs while staying quiet for the
+    # rounding-only case.
+    reconciliation_items_drift_threshold: float = Field(default=0.5, ge=0.0)
 
     # Daily reconciliation refresh cron. Recomputes the four
     # ``yf_demand_forecast`` reconciliation columns (recommended_load,
@@ -252,12 +255,11 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Drift / lookback knobs.
+    # Drift-detection window. The retrain scheduler scores the last N
+    # calendar days of live predictions vs actual sales to detect drift
+    # against the training-time baseline.
     drift_cache_ttl_seconds: int = Field(default=300, ge=0)
-    drift_fallback_lookback_days: int = Field(default=7, ge=1, le=365)
-    lookback_endpoint_path: str = Field(default="/api/v1/data/eda/lookback-window")
-    lookback_query: str = Field(default="last_7_working_days")
-    lookback_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
+    drift_lookback_days: int = Field(default=7, ge=1, le=365)
 
     # Van-load service caches.
     van_load_max_cache_entries: int = Field(default=500, ge=1)
@@ -368,6 +370,91 @@ class Settings(BaseSettings):
     loading_quantile_default: float = Field(default=0.50, ge=0.05, le=0.95)
     quantile_loading_enabled: bool = Field(default=True)
 
+    # Class-aware bias trim caps. The bias-correction step (forecast_corrected
+    # = predicted * (1 - bias_pct), or its calibration-ratio equivalent) can
+    # amplify model swings on erratic / lumpy items where the trailing bias
+    # is noisy. Capping the |bias_pct| applied for these classes -- and the
+    # equivalent deviation of calibration_ratio from 1.0 -- prevents a
+    # single noisy window from pushing the corrected forecast far from the
+    # historical pattern. Smooth and intermittent items keep the raw bias
+    # since their patterns are stable.
+    bias_trim_cap_erratic_pct: float = Field(default=0.10, ge=0.0, le=1.0,
+        description="Max |bias_pct| applied to demand_class='erratic' rows.")
+    bias_trim_cap_lumpy_pct: float = Field(default=0.10, ge=0.0, le=1.0,
+        description="Max |bias_pct| applied to demand_class='lumpy' rows.")
+
+    # Sanity-flag thresholds. ``forecast_below_recent`` is set True when the
+    # corrected forecast for a row falls below ``forecast_below_recent_factor``
+    # of the item's recent per-selling-day average over the last
+    # ``forecast_below_recent_window_days`` working days. Both thresholds are
+    # read at refresh time so ops can tune them without code changes.
+    forecast_below_recent_factor: float = Field(default=0.5, gt=0.0, le=1.0,
+        description="Forecast falls below this fraction of recent_avg_per_selling_day -> flag. "
+                    "Fallback when the demand_class has no class-specific override.")
+    forecast_below_recent_window_days: int = Field(default=28, ge=7, le=365,
+        description="Trailing window (working days) used to compute recent per-selling-day average.")
+
+    # Class-aware ``forecast_below_recent`` thresholds. Stable items
+    # (smooth / intermittent) should flag earlier because their pattern
+    # is reliable -- a 30% drop already signals trouble. Erratic / lumpy
+    # items legitimately swing wider so the threshold must be looser to
+    # avoid alarm fatigue. The scalar ``forecast_below_recent_factor``
+    # above remains the fallback when the row's class is unknown.
+    forecast_below_recent_factor_smooth:       float = Field(default=0.7, gt=0.0, le=1.0)
+    forecast_below_recent_factor_intermittent: float = Field(default=0.7, gt=0.0, le=1.0)
+    forecast_below_recent_factor_erratic:      float = Field(default=0.5, gt=0.0, le=1.0)
+    forecast_below_recent_factor_lumpy:        float = Field(default=0.5, gt=0.0, le=1.0)
+
+    # ------------------------------------------------------------------
+    # Pattern envelope (class-aware floor/ceiling around recent average).
+    # ------------------------------------------------------------------
+    # The bias-corrected forecast (``forecast_corrected``) is clipped
+    # against ``recent_avg_per_selling_day * factor`` on BOTH sides:
+    #   floor   = recent_avg * pattern_floor_factor[class]
+    #   ceiling = recent_avg * pattern_ceiling_factor[class]
+    #   expected_demand = clip(forecast_corrected, floor, ceiling)
+    # The engine then loads against ``expected_demand`` instead of
+    # ``forecast_corrected``, so a stable item the model under-shoots
+    # (or a wild item the model over-shoots) gets pulled toward its
+    # recent pattern. Class-aware because stable items shouldn't deviate
+    # as much from their pattern, while erratic / lumpy items have
+    # legitimate high variance that a tight envelope would over-clip.
+    # All values env-overridable via DF_PATTERN_*_FACTOR_<CLASS>.
+    pattern_floor_factor_smooth:       float = Field(default=0.7, ge=0.0, le=1.0)
+    pattern_floor_factor_intermittent: float = Field(default=0.6, ge=0.0, le=1.0)
+    pattern_floor_factor_erratic:      float = Field(default=0.4, ge=0.0, le=1.0)
+    pattern_floor_factor_lumpy:        float = Field(default=0.3, ge=0.0, le=1.0)
+    pattern_ceiling_factor_smooth:       float = Field(default=1.5, ge=1.0, le=10.0)
+    pattern_ceiling_factor_intermittent: float = Field(default=1.6, ge=1.0, le=10.0)
+    pattern_ceiling_factor_erratic:      float = Field(default=2.5, ge=1.0, le=10.0)
+    pattern_ceiling_factor_lumpy:        float = Field(default=3.0, ge=1.0, le=10.0)
+
+    # ------------------------------------------------------------------
+    # Per-(route, item) z-score envelope (preferred path).
+    # ------------------------------------------------------------------
+    # The multiplicative class factors above (smooth=0.7..1.5, etc.)
+    # apply the SAME width to every item in a class -- ignoring per-pair
+    # variance. Two smooth items can have wildly different std; a tight
+    # 0.7..1.5 collar on a noisy smooth item over-clips legitimate dips
+    # / spikes, and a loose 0.3..3.0 collar on a quiet lumpy item misses
+    # outlier days. The z-score envelope replaces those factors with
+    #     floor   = max(0, recent_avg - z[class] * recent_std)
+    #     ceiling = recent_avg + z[class] * recent_std
+    # so the envelope width is driven by the pair's OWN std. Class
+    # tuning then lives in the z multiplier alone: stable classes get a
+    # tight envelope in std-units (smaller z), volatile classes get a
+    # looser one. Pairs with < ``pattern_envelope_min_active_days``
+    # selling days in the recent window fall back to the multiplicative
+    # factors above -- those remain the cold-start safety net.
+    pattern_envelope_z_smooth:       float = Field(default=1.5, ge=0.0, le=10.0)
+    pattern_envelope_z_intermittent: float = Field(default=2.0, ge=0.0, le=10.0)
+    pattern_envelope_z_erratic:      float = Field(default=2.5, ge=0.0, le=10.0)
+    pattern_envelope_z_lumpy:        float = Field(default=3.0, ge=0.0, le=10.0)
+    # Minimum selling days observed in the recent window required to
+    # trust the per-(route, item) std. Below this we fall back to
+    # the multiplicative class factors.
+    pattern_envelope_min_active_days: int = Field(default=5, ge=1, le=365)
+
     def loading_quantile_for_class(self, demand_class: str | None) -> float:
         """Return per-class loading quantile. Falls back to the default
         for unknown / missing classes so a sparse classifier never
@@ -379,6 +466,74 @@ class Settings(BaseSettings):
             "erratic": self.loading_quantile_erratic,
             "lumpy": self.loading_quantile_lumpy,
         }.get(key, self.loading_quantile_default)
+
+    def bias_trim_cap_for_class(self, demand_class: str | None) -> float | None:
+        """Return the |bias_pct| cap for a given demand_class, or ``None``
+        when the class is trustworthy (smooth / intermittent) and bias
+        should pass through unchanged. Driven entirely by the
+        ``bias_trim_cap_*_pct`` settings so ops can tune without code
+        changes."""
+        key = (demand_class or "").strip().lower()
+        if key == "erratic":
+            return float(self.bias_trim_cap_erratic_pct)
+        if key == "lumpy":
+            return float(self.bias_trim_cap_lumpy_pct)
+        return None
+
+    def pattern_floor_factor_for_class(self, demand_class: str | None) -> float:
+        """Multiplier on ``recent_avg_per_selling_day`` for the envelope
+        lower bound. Unknown / missing classes use the smooth factor as
+        the safe default -- pulling under-shoots up to 70% of recent
+        pattern is the most defensive behaviour we'd want for a row we
+        cannot otherwise classify."""
+        key = (demand_class or "").strip().lower()
+        return {
+            "smooth":       float(self.pattern_floor_factor_smooth),
+            "intermittent": float(self.pattern_floor_factor_intermittent),
+            "erratic":      float(self.pattern_floor_factor_erratic),
+            "lumpy":        float(self.pattern_floor_factor_lumpy),
+        }.get(key, float(self.pattern_floor_factor_smooth))
+
+    def pattern_ceiling_factor_for_class(self, demand_class: str | None) -> float:
+        """Multiplier on ``recent_avg_per_selling_day`` for the envelope
+        upper bound. Unknown / missing classes fall back to the smooth
+        factor (1.5x) -- a tight cap is the safe default; erratic /
+        lumpy rows opt into a wider ceiling explicitly via their class
+        label."""
+        key = (demand_class or "").strip().lower()
+        return {
+            "smooth":       float(self.pattern_ceiling_factor_smooth),
+            "intermittent": float(self.pattern_ceiling_factor_intermittent),
+            "erratic":      float(self.pattern_ceiling_factor_erratic),
+            "lumpy":        float(self.pattern_ceiling_factor_lumpy),
+        }.get(key, float(self.pattern_ceiling_factor_smooth))
+
+    def pattern_envelope_z_for_class(self, demand_class: str | None) -> float:
+        """Z multiplier on per-(route, item) recent_std for the z-score
+        envelope. Tighter for stable classes, looser for volatile ones.
+        Unknown classes use the smooth z (tight) as the safe default --
+        a row we can't classify gets the most conservative collar so a
+        spurious bias correction can't blow it past a plausible band."""
+        key = (demand_class or "").strip().lower()
+        return {
+            "smooth":       float(self.pattern_envelope_z_smooth),
+            "intermittent": float(self.pattern_envelope_z_intermittent),
+            "erratic":      float(self.pattern_envelope_z_erratic),
+            "lumpy":        float(self.pattern_envelope_z_lumpy),
+        }.get(key, float(self.pattern_envelope_z_smooth))
+
+    def forecast_below_recent_factor_for_class(self, demand_class: str | None) -> float:
+        """Class-aware threshold for the ``forecast_below_recent`` flag.
+        Falls back to the legacy scalar ``forecast_below_recent_factor``
+        for unknown / missing classes so a sparse classifier never
+        crashes the sanity flag."""
+        key = (demand_class or "").strip().lower()
+        return {
+            "smooth":       float(self.forecast_below_recent_factor_smooth),
+            "intermittent": float(self.forecast_below_recent_factor_intermittent),
+            "erratic":      float(self.forecast_below_recent_factor_erratic),
+            "lumpy":        float(self.forecast_below_recent_factor_lumpy),
+        }.get(key, float(self.forecast_below_recent_factor))
     bias_table_file: str = Field(default="bias_table.parquet",
         description="Persisted bias cache; recomputed only when forecast CSV mtime changes.")
     # Shared CSVs produced by data_import that the layer reads.

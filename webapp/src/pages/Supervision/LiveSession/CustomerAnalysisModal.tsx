@@ -92,7 +92,7 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
       ) : !hydrated && loading ? (
         <Loading message="Analyzing this visit..." />
       ) : !hydrated && error ? (
-        <EmptyState icon="⚠️" title="Analysis failed" message={error} />
+        <EmptyState icon="[!]" title="Analysis failed" message={error} />
       ) : !hydrated && !result ? (
         <Loading message="Starting analysis..." />
       ) : (
@@ -104,9 +104,9 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
             <Badge variant="neutral">{ctx.date}</Badge>
             <span
               className="ml-auto text-body text-text-tertiary"
-              title="Overall = weighted score. Items matched = share of recommended items bought. Qty accuracy = how close actual quantities were to recommended."
+              title="Overall = weighted score. Items matched = share of recommended items bought. Quantity accuracy = how close actual quantities were to recommended."
             >
-              Overall {ctx.score.score.toFixed(1)}% - Items matched {ctx.score.coverage.toFixed(1)}% - Qty accuracy {ctx.score.accuracy.toFixed(1)}%
+              Overall {ctx.score.score.toFixed(1)}% - Items matched {ctx.score.coverage.toFixed(1)}% - Quantity accuracy {ctx.score.accuracy.toFixed(1)}%
             </span>
           </div>
 

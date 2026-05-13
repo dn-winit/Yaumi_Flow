@@ -8,6 +8,11 @@ interface DatePickerProps {
   onChange: (value: string) => void;
   label?: string;
   className?: string;
+  /** Inclusive lower / upper bound, both ISO `YYYY-MM-DD`. Pass through to
+   *  the native input so the OS calendar greys out forbidden dates -- much
+   *  better UX than rejecting the value after the user picks it. */
+  min?: string;
+  max?: string;
 }
 
 /**
@@ -28,6 +33,8 @@ export default function DatePicker({
   onChange,
   label,
   className = "",
+  min,
+  max,
 }: DatePickerProps) {
   const inputRef = useRef<HTMLInputElement>(null);
 
@@ -64,6 +71,8 @@ export default function DatePicker({
           ref={inputRef}
           type="date"
           value={value}
+          min={min}
+          max={max}
           onChange={(e) => {
             const next = e.target.value;
             // Native picker only fires onChange with a full ISO date or

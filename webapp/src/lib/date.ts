@@ -64,6 +64,22 @@ export function trailingWindow(days: number, today: string = todayIso()): {
 }
 
 /**
+ * Default ``ReportingPeriod`` for any page that mounts without a user
+ * selection: trailing 30 calendar days ending today.
+ *
+ * Pages that need a different default (e.g. AccuracyDrawer grading past
+ * performance anchors on ``lastActiveDate`` from /eda/last-active-date,
+ * not today) compute their own seed and pass it into ``useState``; this
+ * helper is the floor everyone else can lean on.
+ */
+export function defaultReportingPeriod(today: string = todayIso()): {
+  start_date: string;
+  end_date: string;
+} {
+  return trailingWindow(30, today);
+}
+
+/**
  * Coerce any value the backend or a Date object may hand us into a
  * canonical `YYYY-MM-DD` string. Returns null for nullish/invalid input.
  * Accepts ISO date, ISO datetime ("...T..."), `Date`, or epoch number.

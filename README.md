@@ -294,15 +294,17 @@ ANCHOR = { ItemCode  |  exists in demand_forecast.csv
 
 Items the rep loaded but we didn't predict are **excluded**. We never claim phantom credit on items we made no call on.
 
-### Window: "Last N working days"
+### Window: `(start_date, end_date)`
 
-`lookback_days` is interpreted as **N most recent active days**, not a calendar window. Today's in-progress data is excluded so comparisons are over completed days only.
+Every dashboard and drawer surface accepts an arbitrary inclusive date range on the wire (`start_date=YYYY-MM-DD&end_date=YYYY-MM-DD`). Both bounds are ISO-validated server-side with `^\d{4}-\d{2}-\d{2}$`; `start_date > end_date` and out-of-cap ranges return `available=False` with a clear `message`.
 
-| Lookback | Meaning |
+| Surface | Default window |
 |---|---|
-| Last working day | The single most recent active day before today |
-| Last 7 working days | 7 most recent active days (skips weekends/holidays) |
-| Last 30 working days | 30 most recent active days |
+| Dashboard | Trailing 30 calendar days through **today** |
+| AccuracyDrawer (past performance) | Trailing 30 calendar days through **lastActiveDate** (from `/eda/last-active-date`) |
+| AdoptionDrawer (recommendation adoption) | Trailing 30 calendar days through **lastActiveDate** |
+
+`lastActiveDate = MAX(TrxDate) FROM sales_recent` so the drawer defaults never land on a zero-data weekend or holiday. Days with no activity inside the window contribute zero rows; the daily chart still renders the X-axis tick.
 
 ### Rep van load (per day)
 

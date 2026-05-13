@@ -6,6 +6,7 @@ import type {
   RetrainHistoryEntry,
   DriftStatus,
   PastPerformanceResponse,
+  PastPerformanceItem,
 } from "@/types/forecast";
 import type { ForecastSummary } from "@/types/common";
 
@@ -84,10 +85,13 @@ export interface VanLoadTableRow {
   lower_bound: number | null;
   upper_bound: number | null;
   has_real_confidence: boolean;
-  /** Engine intermediates for the explainability popup
-   *  (opening_stock, forecast_corrected, bias_pct, qty_if_demand,
-   *  nonzero_ratio, avg_gap_days, actual_qty, guard_skipped).
-   *  Not rendered by the table itself. */
+  /** Engine intermediates for the explainability modal:
+   *  opening_stock, predicted_raw, forecast_corrected, bias_pct,
+   *  recent_avg_per_selling_day, expected_demand,
+   *  pattern_floor_applied, pattern_ceiling_applied,
+   *  forecast_below_recent, guard_skipped. The table itself never
+   *  reads these -- they're spread onto the legacy Row passed to
+   *  ExplainabilityModal. */
   explain: Record<string, number | boolean | null>;
 }
 
@@ -101,6 +105,12 @@ export interface VanLoadPageView {
   summary: VanLoadSummaryView;
   chart_top_n: VanLoadChartItem[];
   table_rows: VanLoadTableRow[];
+  /** Per-(item, date) rows feeding the click-to-explain popovers on the
+   *  VanLoadSummary tile. Single-date here, so every row's ``date`` is
+   *  the page's ``date`` -- the field is kept for shape parity with the
+   *  past-performance payload. Non-optional on the wire; backend
+   *  defaults to []. */
+  items: PastPerformanceItem[];
 }
 
 /* ---- ForecastDrawer (Upcoming plan) page view ---- */
@@ -230,23 +240,28 @@ export const forecastApi = {
 
   /**
    * Past-performance for the AccuracyDrawer -- single canonical source.
-   * Returns three daily series (allocated · reconciled · sold), aggregate
+   * Returns three daily series (allocated, reconciled, sold), aggregate
    * tiles, and per-item top-N over the same window. Optional ``filters``
    * scope every series and item to a category / item-code subset
    * server-side, so chart and tile totals always reconcile.
+   *
+   * Wire shape mirrors ``/eda/sales`` and ``/analytics/adoption``: every
+   * date-bounded endpoint takes ``(start_date, end_date)`` so the
+   * frontend never has to translate between calendar deltas and ISO
+   * dates at the network boundary.
    */
   getReconciliationPastPerformance: (
     routeCode: string,
+    startDate: string,
     endDate: string,
-    lookbackDays: number = 14,
     filters?: { item_codes?: string[]; category_codes?: string[] },
   ) =>
     c()
       .get<PastPerformanceResponse>("/reconciliation/past-performance", {
         params: {
           route_code: routeCode,
+          start_date: startDate,
           end_date: endDate,
-          lookback_days: lookbackDays,
           ...(filters?.item_codes?.length ? { item_codes: filters.item_codes } : {}),
           ...(filters?.category_codes?.length ? { category_codes: filters.category_codes } : {}),
         },

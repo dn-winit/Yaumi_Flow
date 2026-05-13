@@ -83,7 +83,10 @@ export interface ItemStatsWindow {
 export interface BusinessKpis {
   available: boolean;
   message?: string;
-  lookback?: string;
+  // Echo of the (start_date, end_date) the server filtered on.
+  // ISO YYYY-MM-DD, same shape as the request.
+  start_date?: string;
+  end_date?: string;
   anchor_date?: string;
   // Distinct active sales dates inside the lookback slice -- denominator
   // for tiles 1/2/3 daily averages.
@@ -161,7 +164,10 @@ export interface CategoryBreakdown {
 export interface SalesOverviewResponse {
   available: boolean;
   message?: string;
-  lookback?: string;
+  // Echo of the (start_date, end_date) the server filtered on.
+  // ISO YYYY-MM-DD, same shape as the request.
+  start_date?: string;
+  end_date?: string;
   totals?: SalesTotals;
   daily_trend?: DailyTrendPoint[];
   // Backend returns these already sorted by revenue desc, capped at 10.
@@ -206,18 +212,25 @@ export const EMPTY_FILTERS: DashboardFilters = {
   item_codes: [],
 };
 
-// Backend resolution of a reporting-period enum to the actual trailing
-// N working-day window over sales_recent.csv. Drawers in other services
-// call this before querying their own data so the window is identical
-// to what the dashboard shows for the same lookback.
-export interface LookbackWindowResponse {
+// Reporting period -- the user-chosen date window every dashboard tile
+// and drawer slices its data against. Both bounds are ISO ``YYYY-MM-DD``
+// in the user's local timezone (matches the rest of the wire). A single
+// day is represented as ``start_date == end_date``; no separate type.
+//
+// Invariant enforced by the picker:
+//   start_date <= end_date <= today
+//
+// Backend endpoints validate the same two regexes and reject otherwise.
+export interface ReportingPeriod {
+  start_date: string;
+  end_date: string;
+}
+
+// Most recent date in sales_recent.csv. Drawers query this on open to
+// seed defaults that always land on a date the data actually covers
+// (so a Monday open never lands on a zero-data Saturday). Null when
+// the CSV is empty -- callers fall back to today.
+export interface LastActiveDateResponse {
   available: boolean;
-  lookback: string;
-  working_days: number;
-  start_date: string | null;
-  end_date: string | null;
-  // Ascending list of every working day inside the window (ISO YYYY-MM-DD).
-  // Charts use this as the canonical X-axis so an N-working-day lookback
-  // always renders N ticks, even when scope filters strip a day's activity.
-  active_dates: string[];
+  date: string | null;
 }

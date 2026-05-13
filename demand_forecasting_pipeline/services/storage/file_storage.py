@@ -69,6 +69,26 @@ _PREDICTIONS_RENAME: Dict[str, str] = {
     "OpeningStock":       "opening_stock",
     "LoadLowerBound":     "load_lower_bound",
     "LoadUpperBound":     "load_upper_bound",
+    # Per-row sanity flag emitted by ``enrich_with_load``. PascalCase
+    # mirrors the convention used by every other reconciliation column;
+    # rows that pre-date the column read as missing and the route layer
+    # defaults to False on read for backward compatibility.
+    "ForecastBelowRecent": "forecast_below_recent",
+    # Pattern-envelope reconciliation outputs (CSV-only -- no DB schema
+    # today). ``ExpectedDemand`` is the class-aware envelope clip of
+    # ``forecast_corrected`` that the engine consumes for fresh-load
+    # calculation; ``RecentAvgPerSellingDay`` is the per-(route, item)
+    # anchor used by the envelope; the two booleans surface which side
+    # of the envelope (if any) bound the row. Rows persisted before
+    # these columns existed deserialize cleanly because consumers
+    # default to 0.0 / False on missing. ``recent_std_per_selling_day``
+    # and ``envelope_basis`` are internal engine diagnostics, computed
+    # for the envelope step but not persisted -- no downstream surface
+    # reads them.
+    "RecentAvgPerSellingDay": "recent_avg_per_selling_day",
+    "ExpectedDemand":         "expected_demand",
+    "PatternFloorApplied":    "pattern_floor_applied",
+    "PatternCeilingApplied":  "pattern_ceiling_applied",
 }
 
 # Keys served from the DB-mirror CSV instead of local artifact files.
@@ -211,3 +231,19 @@ class FileStorage(StorageBackend):
             return self._predictions_mirror.exists()
         path = self._paths.get(key)
         return path is not None and path.exists()
+
+    # ------------------------------------------------------------------
+    # Source path (drives upstream mtime-keyed caches)
+    # ------------------------------------------------------------------
+
+    def source_path(self, key: str) -> Optional[Path]:
+        """Return the file the read path will consult for ``key``.
+
+        For prediction keys this is the DB-mirror CSV (the actual source
+        of truth at read time), NOT the legacy local artifact file the
+        write path still touches. For every other key it is the single
+        artifact file registered in ``self._paths``. ``None`` for an
+        unknown key so upstream cache-key code can bail out cleanly."""
+        if key in _DB_BACKED_PREDICTION_KEYS:
+            return self._predictions_mirror
+        return self._paths.get(key)

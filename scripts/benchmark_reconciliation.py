@@ -33,7 +33,10 @@ from demand_forecasting_pipeline.config.settings import get_settings as df_setti
 from demand_forecasting_pipeline.services.reconciliation.engine import ReconciliationEngine
 
 END_DATE = "2026-05-03"
+# Calendar-day span ending at END_DATE; matches the new past-performance
+# wire shape (start_date, end_date).
 LOOKBACK = 7
+START_DATE = (pd.Timestamp(END_DATE) - pd.Timedelta(days=LOOKBACK - 1)).strftime("%Y-%m-%d")
 ROUTES = ("9105", "9108", "9114", "9115", "9126", "9142",
           "9202", "9204", "9209", "9218", "9219", "9221")
 
@@ -45,7 +48,7 @@ engine = ReconciliationEngine(df_settings())
 
 def benchmark_route(ROUTE: str):
     """Build inputs + run both policies on one route. Returns metrics."""
-    base = van.past_performance(ROUTE, lookback_working_days=LOOKBACK, end_date=END_DATE)
+    base = van.past_performance(ROUTE, start_date=START_DATE, end_date=END_DATE)
     if not base.get("daily"):
         return None
     window_dates = {pd.Timestamp(r["date"]).normalize() for r in base["daily"]}

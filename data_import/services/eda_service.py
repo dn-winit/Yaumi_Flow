@@ -12,6 +12,7 @@ metrics still read raw values from the Pipeline page (different question).
 from __future__ import annotations
 
 import logging
+import re
 import threading
 import time
 from collections import OrderedDict
@@ -50,25 +51,31 @@ except Exception as _exc:
     )
 
 
-# Reporting-period enum exposed to the dashboard. A "working day" is any
-# date that has actual sales activity in sales_recent.csv -- this naturally
-# excludes weekends, public holidays, and any other closure without us
-# having to hard-code a calendar. The numeric value is the count of such
-# active dates to include in the trailing window.
-LOOKBACK_OPTIONS: Dict[str, int] = {
-    "last_working_day": 1,
-    "last_7_working_days": 7,
-    "last_30_working_days": 30,
-}
-DEFAULT_LOOKBACK = "last_30_working_days"
+_DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def _resolve_lookback(lookback: Optional[str]) -> tuple[str, int]:
-    """Return (canonical key, working-day count). Unknown values fall back
-    to the default so a stale frontend can never crash a backend call.
+def _validate_period(start_date: str, end_date: str) -> tuple[pd.Timestamp, pd.Timestamp]:
+    """Parse and validate a ``[start_date, end_date]`` reporting period.
+
+    Both bounds must be ISO ``YYYY-MM-DD`` and ``start_date <= end_date``.
+    Raises ``ValueError`` on malformed or inverted ranges -- callers
+    surface this through the existing ``available: False`` envelope so
+    the frontend renders a clean empty-state instead of a crash.
     """
-    key = lookback if lookback in LOOKBACK_OPTIONS else DEFAULT_LOOKBACK
-    return key, LOOKBACK_OPTIONS[key]
+    if not _DATE_RE.match(start_date) or not _DATE_RE.match(end_date):
+        raise ValueError(f"reporting_period requires ISO YYYY-MM-DD, got [{start_date}, {end_date}]")
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    if start > end:
+        raise ValueError(f"reporting_period inverted: start={start_date} > end={end_date}")
+    return start, end
+
+
+def _period_key(start_date: str, end_date: str) -> str:
+    """Cache-key fragment for a reporting period. Validation lives in
+    ``_validate_period``; this is purely a deterministic string used by
+    the LRU cache to dedupe identical windows across callers."""
+    return f"{start_date}::{end_date}"
 
 
 class EdaService:
@@ -347,46 +354,31 @@ class EdaService:
         return {str(k): round(float(v), 2) for k, v in grouped.items()}
 
     # ------------------------------------------------------------------
-    # Lookback window resolution -- shared with downstream services
+    # Last active date -- the most recent calendar day with sales activity
+    # in sales_recent.csv. Drawers use this to seed defaults that always
+    # land on a date the data actually covers (so the user never opens a
+    # drawer onto an empty weekend). The value is purely a query against
+    # the local CSV mirror; no calendar assumptions about which days are
+    # working days, holidays, etc.
     # ------------------------------------------------------------------
 
-    def get_lookback_window(self, lookback: Optional[str] = None) -> Dict[str, Any]:
-        """Resolve a reporting-period enum to the actual ``(start_date, end_date)``
-        of the trailing N working days from sales_recent.csv.
+    def get_last_active_date(self) -> Dict[str, Any]:
+        """Most recent date in sales_recent.csv (route-agnostic).
 
-        Used by drawers in other services (recommended_order's adoption,
-        for instance) so they can filter their own data on exactly the
-        same date span the dashboard uses, without each service having
-        to reimplement working-day detection.
+        Cached for the full LRU TTL. The mtime-keyed DataFrame memo
+        invalidates the underlying parse the moment the importer rewrites
+        the CSV, so a fresh import (data_import cron) propagates without
+        explicit cache busting here.
         """
-        canonical, n_working = _resolve_lookback(lookback)
-        key = f"lookback_window::{canonical}"
-        return self._cached(key, lambda: self._compute_lookback_window(canonical, n_working))
+        return self._cached("last_active_date", self._compute_last_active_date)
 
-    def _compute_lookback_window(self, canonical: str, n_working: int) -> Dict[str, Any]:
+    def _compute_last_active_date(self) -> Dict[str, Any]:
         df = self._load_sales_df()
-        empty = {
-            "available": False, "lookback": canonical, "working_days": 0,
-            "start_date": None, "end_date": None, "active_dates": [],
-        }
         if df.empty:
-            return empty
-        active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
-        if not active_dates:
-            return empty
-        # Ascending, ISO-formatted -- single source of truth for any
-        # daily chart that needs to render every working day in the
-        # window (chart axes pad to this list to avoid gap-skipping
-        # when scope filters strip a day's activity).
-        active_iso = [pd.Timestamp(d).strftime("%Y-%m-%d") for d in active_dates]
-        active_iso.sort()
+            return {"available": False, "date": None}
         return {
             "available": True,
-            "lookback": canonical,
-            "working_days": len(active_iso),
-            "start_date": active_iso[0],
-            "end_date":   active_iso[-1],
-            "active_dates": active_iso,
+            "date": df["TrxDate"].max().strftime("%Y-%m-%d"),
         }
 
     # ------------------------------------------------------------------
@@ -395,16 +387,16 @@ class EdaService:
 
     def get_sales_overview(
         self,
-        lookback: Optional[str] = None,
+        start_date: str,
+        end_date: str,
         warehouse_codes: Optional[List[str]] = None,
         route_codes: Optional[List[str]] = None,
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        canonical, _ = _resolve_lookback(lookback)
         w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
-        key = f"sales_overview::{canonical}::" + self._filter_key(w, r, c, i)
-        return self._cached(key, lambda: self._compute_sales_overview(canonical, w, r, c, i))
+        key = f"sales_overview::{_period_key(start_date, end_date)}::" + self._filter_key(w, r, c, i)
+        return self._cached(key, lambda: self._compute_sales_overview(start_date, end_date, w, r, c, i))
 
     def _load_sales_df(self) -> pd.DataFrame:
         path = self._s.data_path(self._s.sales_recent_file)
@@ -424,51 +416,54 @@ class EdaService:
 
     def _compute_sales_overview(
         self,
-        lookback: str = DEFAULT_LOOKBACK,
+        start_date: str,
+        end_date: str,
         warehouse_codes: Optional[List[str]] = None,
         route_codes: Optional[List[str]] = None,
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Sales aggregates for the trailing N working-day window, optionally
-        scoped to the dashboard FilterBar selection.
+        """Sales aggregates for the ``[start_date, end_date]`` window,
+        optionally scoped to the dashboard FilterBar selection.
 
-        A "working day" is any date that has actual sales activity in
-        sales_recent.csv -- naturally excludes weekends, holidays, and any
-        other closure without a hard-coded calendar. All breakdowns share
-        the window so the dashboard period selector drives every chart
-        consistently. Both leaderboards (top routes, categories) are
+        The daily chart axis pads to every calendar day in the window so
+        a weekend / holiday inside the range shows as a zero bar, not as
+        a missing tick. Both leaderboards (top routes, categories) are
         sorted by REVENUE so the response order matches the card titles
         the dashboard shows -- no silent re-sort on the frontend.
         """
+        try:
+            start, end = _validate_period(start_date, end_date)
+        except ValueError as exc:
+            return {"available": False, "message": str(exc)}
+
         df = self._load_sales_df()
         if df.empty:
-            return {"available": False, "message": "sales_recent.csv not found or empty"}
+            return {
+                "available": False,
+                "message": "sales_recent.csv not found or empty",
+                "start_date": start_date, "end_date": end_date,
+            }
 
-        canonical, n_working = _resolve_lookback(lookback)
-        # Working-day slice: pick the last N distinct dates with sales,
-        # then keep only rows whose TrxDate falls in that set. Silently
-        # clamps when CSV has fewer than N active dates.
-        active_dates = sorted(df["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
-        if not active_dates:
-            return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
-                    "top_routes": [], "categories": []}
-        df = df[df["TrxDate"].dt.normalize().isin(active_dates)]
+        ts = df["TrxDate"].dt.normalize()
+        df = df[(ts >= start) & (ts <= end)]
         df = self._apply_sales_filters(
             df, warehouse_codes or [], route_codes or [], category_codes or [], item_codes or [],
         )
+        empty_envelope = {
+            "available": True, "start_date": start_date, "end_date": end_date,
+            "totals": {}, "daily_trend": [], "top_routes": [], "categories": [],
+        }
         if df.empty:
-            return {"available": True, "lookback": canonical, "totals": {}, "daily_trend": [],
-                    "top_routes": [], "categories": []}
+            return empty_envelope
 
         total_qty = float(df["TotalQuantity"].sum())
         total_rev = float(df["revenue"].sum())
 
-        # Reindex daily series to the full working-day window so the
-        # chart axis always shows N ticks for an N-working-day lookback,
-        # even when the filter scope strips activity from some days.
-        # Missing days surface as zero rather than as gaps.
-        full_dates = pd.DatetimeIndex(active_dates).normalize()
+        # Reindex daily series to every calendar day in [start, end] so
+        # the chart axis renders contiguously regardless of scope. Days
+        # with no activity show as zeros, not as gaps.
+        full_dates = pd.date_range(start, end, freq="D").normalize()
         daily = (
             df.groupby(df["TrxDate"].dt.normalize())
             .agg(quantity=("TotalQuantity", "sum"), revenue=("revenue", "sum"))
@@ -497,7 +492,8 @@ class EdaService:
 
         return {
             "available": True,
-            "lookback": canonical,
+            "start_date": start_date,
+            "end_date":   end_date,
             "totals": {
                 "transactions": int(len(df)),
                 "total_quantity": round(total_qty, 1),
@@ -508,6 +504,10 @@ class EdaService:
                 "unique_categories": int(df["CategoryName"].nunique()),
                 "first_date": df["TrxDate"].min().strftime("%Y-%m-%d"),
                 "last_date": df["TrxDate"].max().strftime("%Y-%m-%d"),
+                # Count of distinct dates inside the window that had activity
+                # (after scope filters). Lets the UI distinguish "30-day
+                # window, 22 days had sales" from "30-day window, all days
+                # active" without recomputing from the daily_trend array.
                 "working_days": int(df["TrxDate"].dt.normalize().nunique()),
             },
             "daily_trend": daily.to_dict("records"),
@@ -561,16 +561,29 @@ class EdaService:
 
     def get_business_kpis(
         self,
-        lookback: Optional[str] = None,
+        start_date: str,
+        end_date: str,
         warehouse_codes: Optional[List[str]] = None,
         route_codes: Optional[List[str]] = None,
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        canonical, _ = _resolve_lookback(lookback)
+        # Validate up front -- the message contract here must match the
+        # sister ``/eda/sales`` endpoint exactly so a bad input gives
+        # the same explanation on every dashboard surface (inverted range
+        # is "inverted", not the generic "no rows in scope" that the
+        # downstream merge would otherwise emit).
+        try:
+            _validate_period(start_date, end_date)
+        except ValueError as exc:
+            return {
+                "available": False,
+                "message": str(exc),
+                "start_date": start_date, "end_date": end_date,
+            }
         w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
-        key = f"business_kpis::{canonical}::" + self._filter_key(w, r, c, i)
-        return self._cached(key, lambda: self._compute_business_kpis(canonical, w, r, c, i))
+        key = f"business_kpis::{_period_key(start_date, end_date)}::" + self._filter_key(w, r, c, i)
+        return self._cached(key, lambda: self._compute_business_kpis(start_date, end_date, w, r, c, i))
 
     # ------------------------------------------------------------------
     # Demand-forecast loader -- the van-load source. Predicted = what we
@@ -624,7 +637,8 @@ class EdaService:
 
     def _actual_vs_forecast_merge(
         self,
-        lookback: str,
+        start_date: str,
+        end_date: str,
         warehouse_codes: List[str],
         route_codes: List[str],
         category_codes: List[str],
@@ -638,35 +652,39 @@ class EdaService:
         across the two endpoints (which is the common dashboard case)
         amortises the merge to a single compute.
         """
-        key = f"av_merge::{lookback}::" + self._filter_key(
+        key = f"av_merge::{_period_key(start_date, end_date)}::" + self._filter_key(
             warehouse_codes, route_codes, category_codes, item_codes,
         )
         return self._cached(
             key,
             lambda: self._compute_actual_vs_forecast_merge(
-                lookback, warehouse_codes, route_codes, category_codes, item_codes,
+                start_date, end_date, warehouse_codes, route_codes, category_codes, item_codes,
             ),
         )
 
     def _compute_actual_vs_forecast_merge(
         self,
-        lookback: str,
+        start_date: str,
+        end_date: str,
         warehouse_codes: List[str],
         route_codes: List[str],
         category_codes: List[str],
         item_codes: List[str],
     ) -> Optional[Dict[str, Any]]:
         """Build the per-(date, route, item) merge of past forecasts vs
-        actual sales over the lookback window. Returns None when there is
-        nothing in scope; otherwise a dict with:
+        actual sales over ``[start_date, end_date]``. Returns None when
+        there is nothing in scope; otherwise a dict with:
 
             sales         -- filtered + date-restricted sales rows
             merged        -- forecast OUTER-JOIN sold, with price fallback
-            anchor        -- max active date
-            working_days  -- count of active dates
+            anchor        -- max active date inside the window
+            working_days  -- count of active dates inside the window
             covered_routes / covered_days -- forecast scope counters
         """
-        _, n_working = _resolve_lookback(lookback)
+        try:
+            start, end = _validate_period(start_date, end_date)
+        except ValueError:
+            return None
 
         sales = self._apply_sales_filters(
             self._load_sales_df(),
@@ -675,11 +693,11 @@ class EdaService:
         if sales.empty:
             return None
 
-        active_dates = sorted(sales["TrxDate"].dt.normalize().unique(), reverse=True)[:n_working]
-        if not active_dates:
+        ts = sales["TrxDate"].dt.normalize()
+        sales = sales[(ts >= start) & (ts <= end)].copy()
+        if sales.empty:
             return None
-        active_set = set(active_dates)
-        sales = sales[sales["TrxDate"].dt.normalize().isin(active_set)].copy()
+        active_set = set(sales["TrxDate"].dt.normalize().unique())
         sales["TrxDate"] = sales["TrxDate"].dt.normalize()
         sales["RouteCode"] = sales["RouteCode"].astype(str).str.strip()
         sales["ItemCode"] = sales["ItemCode"].astype(str).str.strip()
@@ -787,14 +805,15 @@ class EdaService:
             "merged": merged,
             "forecast": forecast,
             "anchor": anchor,
-            "working_days": len(active_dates),
+            "working_days": len(active_set),
             "covered_routes": covered_routes,
             "covered_days": covered_days,
         }
 
     def _compute_business_kpis(
         self,
-        lookback: str,
+        start_date: str,
+        end_date: str,
         warehouse_codes: List[str],
         route_codes: List[str],
         category_codes: List[str],
@@ -806,17 +825,21 @@ class EdaService:
             2. total_volume    -- total units sold + transaction count
             3. unique_items    -- count of distinct SKUs that sold
             4. lost_opportunity -- AED of forecast that didn't sell
-                                  (Σ max(0, predicted - actual) × price)
+                                  (Sigma max(0, predicted - actual) x price)
 
-        All four are derived from the shared (sales ⋈ forecast) merge --
+        All four are derived from the shared (sales merge forecast) helper --
         the same helper that powers the Past-analysis drawer, so the
         numbers can never drift between the two surfaces.
         """
         ctx = self._actual_vs_forecast_merge(
-            lookback, warehouse_codes, route_codes, category_codes, item_codes,
+            start_date, end_date, warehouse_codes, route_codes, category_codes, item_codes,
         )
         if ctx is None:
-            return {"available": False, "message": "sales_recent.csv not found or no rows in scope"}
+            return {
+                "available": False,
+                "message": "sales_recent.csv not found or no rows in scope",
+                "start_date": start_date, "end_date": end_date,
+            }
 
         sales = ctx["sales"]
         merged = ctx["merged"]
@@ -895,7 +918,8 @@ class EdaService:
 
         return {
             "available": True,
-            "lookback": lookback,
+            "start_date": start_date,
+            "end_date":   end_date,
             "anchor_date": anchor.strftime("%Y-%m-%d"),
             # Denominator for tiles 1/2/3 averages (active sales dates).
             "working_days": working_days,

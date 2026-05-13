@@ -23,6 +23,7 @@ from demand_forecasting_pipeline.api.dependencies import (
     get_van_load_service,
 )
 from demand_forecasting_pipeline.api.schemas import (
+    PastPerformanceItem,
     PastPerformanceResponse,
     ReconciliationResponse,
     VanLoadResponse,
@@ -38,6 +39,11 @@ from demand_forecasting_pipeline.services.reconciliation_refresh import refresh_
 logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/reconciliation", tags=["reconciliation"])
+
+# Single ISO-date regex shared by every endpoint that accepts a date
+# query param. Matches the regex on data_import's /eda/* endpoints so a
+# bad date is rejected with the same HTTP 422 surface across services.
+_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
 
 @router.post("/refresh")
@@ -67,7 +73,7 @@ def manual_refresh(
 @router.get("/van-load", response_model=VanLoadResponse)
 def van_load(
     route_code: str = Query(..., description="Route code, e.g. 9105"),
-    date: str = Query(..., description="YYYY-MM-DD"),
+    date: str = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
     svc: VanLoadService = Depends(get_van_load_service),
 ):
     """Per-item van composition for one (route, date)."""
@@ -76,7 +82,7 @@ def van_load(
 @router.get("/recommend", response_model=ReconciliationResponse)
 def recommend(
     route_code: str = Query(...),
-    date: str = Query(...),
+    date: str = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
     typical_lookback_days: int = Query(
         default_factory=lambda: get_settings().reconciliation_default_lookback_days,
         ge=1,
@@ -268,11 +274,10 @@ def recommend(
 @router.get("/past-performance", response_model=PastPerformanceResponse)
 def past_performance(
     route_code: str = Query(..., description="Route code"),
-    end_date: str = Query(..., description="Latest date in window (YYYY-MM-DD)"),
-    lookback_days: int = Query(
-        default_factory=lambda: get_settings().reconciliation_default_lookback_days,
-        ge=1, le=365,
-    ),
+    start_date: str = Query(..., pattern=_DATE_RE,
+        description="Inclusive lower bound of the window (YYYY-MM-DD)"),
+    end_date:   str = Query(..., pattern=_DATE_RE,
+        description="Inclusive upper bound of the window (YYYY-MM-DD), >= start_date"),
     item_codes: list[str] = Query(default_factory=list, alias="item_codes",
         description="Optional whitelist of ItemCodes to scope every total/series to."),
     category_codes: list[str] = Query(default_factory=list, alias="category_codes",
@@ -309,18 +314,46 @@ def past_performance(
     ``Predicted > 0`` flow into either side.
     """
     settings = get_settings()
-    lookback_days = min(
-        int(lookback_days),
-        int(settings.reconciliation_max_lookback_days),
-    )
+    # Reject ranges wider than the configured cap so a fat-fingered date
+    # selection never burns the engine on a multi-year scan. Surface as
+    # ``available=False`` so the UI renders empty-state, not an error.
+    # The regex on the Query param admits regex-pass-but-invalid dates
+    # like ``2026-13-01``; pd.Timestamp raises on those, so wrap the
+    # parse and convert the failure into the same envelope shape
+    # downstream handlers expect.
+    try:
+        span_days = (
+            pd.Timestamp(end_date).normalize() - pd.Timestamp(start_date).normalize()
+        ).days + 1
+    except (ValueError, TypeError) as exc:
+        return PastPerformanceResponse(
+            available=False,
+            message=f"invalid reporting_period: {exc}",
+            route_code=str(route_code),
+            start_date=start_date, end_date=end_date,
+            lookback_days=0, active_days=0,
+        )
+    if span_days < 1:
+        return PastPerformanceResponse(
+            available=False,
+            message=f"reporting_period inverted: start_date={start_date} > end_date={end_date}",
+            route_code=str(route_code),
+            start_date=start_date, end_date=end_date,
+            lookback_days=0, active_days=0,
+        )
+    if span_days > int(settings.reconciliation_max_lookback_days):
+        return PastPerformanceResponse(
+            available=False,
+            message=(
+                f"reporting_period too wide: requested {span_days} days, "
+                f"cap is {settings.reconciliation_max_lookback_days}"
+            ),
+            route_code=str(route_code),
+            start_date=start_date, end_date=end_date,
+            lookback_days=span_days, active_days=0,
+        )
     rcode = str(route_code)
-    # Working-day semantics: lookback_days = number of MOST RECENT ACTIVE
-    # days for this route, capped at end_date. So lookback_days=1 always
-    # returns exactly 1 day (the most recent active one), regardless of
-    # whether the calendar day before was also active.
-    base = van.past_performance(route_code,
-                                lookback_working_days=lookback_days,
-                                end_date=end_date)
+    base = van.past_performance(route_code, start_date=start_date, end_date=end_date)
     daily_rows = base.get("daily", [])
     if not daily_rows:
         return PastPerformanceResponse(
@@ -329,7 +362,7 @@ def past_performance(
             route_code=route_code,
             start_date=base.get("start_date"),
             end_date=base.get("end_date"),
-            lookback_days=lookback_days,
+            lookback_days=span_days,
             active_days=0,
         )
 
@@ -362,12 +395,19 @@ def past_performance(
         "Predicted"  if "Predicted"  in fc_df.columns else
         None
     )
+    # ``fc_df_full`` is the route-scoped frame BEFORE the window filter,
+    # kept so the per-item leftover lookup at items[] payload time can
+    # read ``opening_stock`` on ``last_day_in_window + 1`` (which sits
+    # outside the window). Same row enrich_with_load writes the canonical
+    # actuals-grounded next-day opening into.
+    fc_df_full = fc_df
     if not fc_df.empty and pred_col is not None:
         fc_df = fc_df.copy()
         fc_df["TrxDate"] = pd.to_datetime(fc_df["TrxDate"], errors="coerce").dt.normalize()
         fc_df = fc_df[fc_df[pred_col] > 0]
         fc_df["RouteCode"] = fc_df["RouteCode"].astype(str)
         fc_df["ItemCode"]  = fc_df["ItemCode"].astype(str)
+        fc_df_full = fc_df.copy()
         fc_df = fc_df[fc_df.TrxDate.isin(window_dates)]
         if item_whitelist is not None:
             fc_df = fc_df[fc_df.ItemCode.isin(item_whitelist)]
@@ -467,7 +507,7 @@ def past_performance(
             route_code=route_code,
             start_date=base.get("start_date"),
             end_date=base.get("end_date"),
-            lookback_days=lookback_days,
+            lookback_days=span_days,
             active_days=0,
         )
 
@@ -501,6 +541,21 @@ def past_performance(
 
     alloc_daily = _by_day(alloc_df, "AllocatedPC")
     sales_daily = _by_day(sales_df, "TotalQuantity")
+
+    def _by_item_day(df: pd.DataFrame, qty_col: str) -> dict[tuple[str, str], float]:
+        """Per-(ItemCode, date_str) sum of ``qty_col`` over the scoped slice."""
+        sub = _scoped(df, qty_col)
+        if sub.empty:
+            return {}
+        sub = sub.assign(
+            _ic=sub.ItemCode.astype(str),
+            _d=pd.to_datetime(sub.TrxDate).dt.strftime("%Y-%m-%d"),
+        )
+        grouped = sub.groupby(["_ic", "_d"])[qty_col].sum().astype(float)
+        return {(str(ic), str(d)): float(v) for (ic, d), v in grouped.items()}
+
+    alloc_by_item_day = _by_item_day(alloc_df, "AllocatedPC")
+    sold_by_item_day  = _by_item_day(sales_df, "TotalQuantity")
 
     # Per-item opening (logged ClosingQty[d-1] or 0) summed across the
     # active days. Surfaced as ``past_leftover`` context -- it is REP's
@@ -544,6 +599,13 @@ def past_performance(
     recommended_carried_per_day: dict[str, float] = {}
     recommended_van_load_per_day: dict[str, float] = {}
     our_van_load_per_item: dict[str, float] = {}
+    # Per-(item, day) canonical reconciled values from fc_df. Keyed by
+    # (item_code, date_str) so the per-(item, date) emission below reads
+    # the same cell the per-day totals aggregate (single source of
+    # truth, no drift).
+    rec_carried_by_item_day: dict[tuple[str, str], float] = {}
+    rec_fresh_by_item_day:   dict[tuple[str, str], float] = {}
+    rec_van_by_item_day:     dict[tuple[str, str], float] = {}
 
     # Drawer aggregates the canonical reconciled values the daily cron
     # already wrote to yf_demand_forecast. Same cells the page-view tile
@@ -562,7 +624,6 @@ def past_performance(
             _ic   = fc_df.ItemCode.astype(str),
             _load = pd.to_numeric(fc_df[rload_col],  errors="coerce").fillna(0.0).clip(lower=0.0),
             _open = pd.to_numeric(fc_df[opening_col], errors="coerce").fillna(0.0).clip(lower=0.0),
-            _pred = pd.to_numeric(fc_df[pred_col],   errors="coerce").fillna(0.0),
         )
         canon["_van"] = canon["_open"] + canon["_load"]
 
@@ -580,6 +641,15 @@ def past_performance(
         our_van_load_per_item.update(
             canon.groupby("_ic")["_van"].sum().astype(float).to_dict()
         )
+
+        # Per-(item, day) breakdown -- one row per (item, date) the
+        # per-(item, date) emission consumes verbatim.
+        for _, r in canon.iterrows():
+            d_str = pd.Timestamp(r["TrxDate"]).strftime("%Y-%m-%d")
+            key = (str(r["_ic"]), d_str)
+            rec_carried_by_item_day[key] = float(r["_open"])
+            rec_fresh_by_item_day[key]   = float(r["_load"])
+            rec_van_by_item_day[key]     = float(r["_van"])
 
     # ---- Daily rebuild over anchor scope -----------------------------
     # Three chart lines:
@@ -647,8 +717,80 @@ def past_performance(
     # Per-item holding cost mirrors the same separation: rep uses rep's
     # truck (real leftover + real allocation), we use ours (simulated
     # van_load summed across days).
+    #
+    # We also assemble the per-item breakdown rows in the same single
+    # pass so totals and per-item sums come out of identical inputs (no
+    # parallel iteration, no risk of drift).
     rep_holding_value = 0.0
     our_holding_value = 0.0
+    # Build ancillary per-item lookups for the items[] payload:
+    #   * item-name (from the forecast frame's name column if present)
+    #   * per-item leftover that becomes the NEXT day's opening.
+    #
+    # Canonical "carry to next day" per item == fc_df_full's
+    # ``opening_stock`` on the FIRST forecast day strictly after
+    # ``last_day_in_window``. ``enrich_with_load`` writes this cell
+    # under the actuals-grounded simulation, so the same value the
+    # van-load page-view ``carried_qty`` reads on that next active day.
+    last_day_in_window = max(window_dates)
+    item_name_lookup: dict[str, str] = {}
+    leftover_per_item: dict[str, float] = {}
+
+    def _ingest_names(df: pd.DataFrame, name_col: str) -> None:
+        if df.empty or name_col not in df.columns:
+            return
+        pairs = (
+            df.assign(_ic=df.ItemCode.astype(str))
+            .groupby("_ic")[name_col]
+            .agg(lambda s: next(
+                (str(v).strip() for v in s if pd.notna(v) and str(v).strip()),
+                "",
+            ))
+            .to_dict()
+        )
+        for k, v in pairs.items():
+            if k not in item_name_lookup and v:
+                item_name_lookup[k] = str(v)
+
+    # Forecast frame first (canonical name on the dashboard), then sales
+    # frame as a fallback for windows where the artifact's ItemName is
+    # NaN (test/train rows merged via column intersection drop the name).
+    if not fc_df.empty and pred_col is not None:
+        for nc in ("ItemName", "item_name"):
+            if nc in fc_df.columns:
+                _ingest_names(fc_df, nc)
+                break
+    if not sales_df.empty:
+        sales_scope = sales_df[
+            (sales_df.RouteCode.astype(str) == rcode)
+            & (sales_df.ItemCode.astype(str).isin(anchor_items))
+        ]
+        for nc in ("ItemName", "item_name"):
+            if nc in sales_scope.columns:
+                _ingest_names(sales_scope, nc)
+                break
+    if (
+        not fc_df_full.empty
+        and pred_col is not None
+        and opening_col is not None
+    ):
+        future = fc_df_full[fc_df_full.TrxDate > last_day_in_window]
+        if not future.empty:
+            next_day = future.TrxDate.min()
+            nxt = future[future.TrxDate == next_day]
+            if not nxt.empty:
+                grp = (
+                    nxt.assign(_ic=nxt.ItemCode.astype(str))
+                    .groupby("_ic")[opening_col]
+                    .sum()
+                )
+                for ic, v in grp.items():
+                    val = float(v) if pd.notna(v) else 0.0
+                    if val > 0:
+                        leftover_per_item[ic] = val
+
+    # Holding cost: single pass over anchor items using window-aggregate
+    # values. This is independent of the per-(item, date) emission below.
     for ic in anchor_items:
         sold_v       = float(sold_per_item.get(ic, 0.0))
         rep_load_i   = (
@@ -663,6 +805,114 @@ def past_performance(
             rep_holding_value += rep_excess_i * price
             our_holding_value += our_excess_i * price
     holding_savings = rep_holding_value - our_holding_value
+
+    # ---- Per-(item, date) row emission --------------------------------
+    # One row per (anchor_item, active_day) in the window. Each row is
+    # self-describing: rep_van_load = past_leftover + today_allocation,
+    # recommended_van_load = recommended_carried + recommended_fresh,
+    # plus actual_sold and leftover_to_next_day for THIS row's day.
+    #
+    # leftover_to_next_day per (item, date):
+    #   - For the LAST active day in the window, prefer the canonical
+    #     fc_df_full.opening_stock on the NEXT forecast day (what the
+    #     daily cron already wrote -- same cell the page-view's
+    #     ``carried_qty`` reads on day+1). Falls back to
+    #     max(0, recommended_van_load - actual_sold) when the next
+    #     forecast day is missing (cron has not yet projected).
+    #   - For non-last days, the rep's actual closing log gives the
+    #     ground truth that becomes opening on the next active day:
+    #     read closing_pivot at THIS row's day for (item).
+    sorted_active_days = sorted(window_dates)
+    last_active_day = sorted_active_days[-1]
+    last_active_str = last_active_day.strftime("%Y-%m-%d")
+
+    # ``next_day_opening_per_item`` -- canonical carry into day+1 for
+    # the LAST active day in the window, read from fc_df_full on the
+    # first forecast date strictly after last_active_day. Same source
+    # already computed above as ``leftover_per_item``; alias for clarity.
+    next_day_opening_per_item = leftover_per_item
+
+    def _closing_for(d: pd.Timestamp, item: str) -> float:
+        """ClosingQty for (route, item) on day d -- what carries to d+1.
+
+        Returns 0.0 when no closing was logged (the system never logs
+        ClosingQty == 0; missing row == empty truck convention).
+        """
+        if closing_pivot is None:
+            return 0.0
+        if d not in closing_pivot.index or item not in closing_pivot.columns:
+            return 0.0
+        v = closing_pivot.at[d, item]
+        return float(v) if pd.notna(v) else 0.0
+
+    items_payload: list[PastPerformanceItem] = []
+    leftover_total_last_day = 0.0
+    for d_ts in sorted_active_days:
+        d_str = d_ts.strftime("%Y-%m-%d")
+        is_last = d_ts == last_active_day
+        for ic in anchor_items:
+            ic_str = str(ic)
+            key = (ic_str, d_str)
+            past_left  = opening_for(d_ts, ic_str)
+            today_alloc_i = float(alloc_by_item_day.get(key, 0.0))
+            rep_van_i  = past_left + today_alloc_i
+            rec_carry  = float(rec_carried_by_item_day.get(key, 0.0))
+            rec_fresh  = float(rec_fresh_by_item_day.get(key, 0.0))
+            rec_van    = float(rec_van_by_item_day.get(key, rec_carry + rec_fresh))
+            sold_i     = float(sold_by_item_day.get(key, 0.0))
+            if is_last:
+                # Canonical: opening_stock on the next forecast day for
+                # this (route, item). Falls back to truck-minus-sold
+                # when the cron hasn't yet projected day+1.
+                if ic_str in next_day_opening_per_item:
+                    leftover_i = float(next_day_opening_per_item[ic_str])
+                else:
+                    leftover_i = max(0.0, rec_van - sold_i)
+                leftover_total_last_day += leftover_i
+            else:
+                # Mid-window: rep's actual closing on this day IS the
+                # carry into the next active day (one ground truth).
+                leftover_i = _closing_for(d_ts, ic_str)
+
+            # Skip rows that are completely empty across every field --
+            # no rep activity, no recommendation, no sale, no carry. An
+            # anchor item with Predicted>0 in the window is rarely empty
+            # on every active day, but the filter keeps the response
+            # tight when sparse.
+            if (
+                rep_van_i == 0.0
+                and rec_van == 0.0
+                and sold_i == 0.0
+                and leftover_i == 0.0
+            ):
+                continue
+            items_payload.append(
+                PastPerformanceItem(
+                    itemCode=ic_str,
+                    itemName=item_name_lookup.get(ic_str, ""),
+                    date=d_str,
+                    rep_van_load=round(rep_van_i, 2),
+                    past_leftover=round(past_left, 2),
+                    today_allocation=round(today_alloc_i, 2),
+                    recommended_van_load=round(rec_van, 2),
+                    recommended_carried=round(rec_carry, 2),
+                    recommended_fresh=round(rec_fresh, 2),
+                    actual_sold=round(sold_i, 2),
+                    leftover_to_next_day=round(leftover_i, 2),
+                )
+            )
+
+    # Sort: date asc, then leftover desc (carry drivers surface first
+    # for the last day), then recommended van load desc, then itemCode
+    # asc for determinism.
+    items_payload.sort(
+        key=lambda it: (
+            it.date,
+            -it.leftover_to_next_day,
+            -it.recommended_van_load,
+            it.itemCode,
+        )
+    )
     rep_excess_units = max(rep_van_load_total - sold_total, 0.0)
     our_excess_units = max(recommended_van_load_total - sold_total, 0.0)
     excess_units_savings = rep_excess_units - our_excess_units
@@ -756,6 +1006,12 @@ def past_performance(
         "our_excess_units":           round(our_excess_units, 2),
         "excess_units_savings":       round(excess_units_savings, 2),
         "active_days":               len(daily_rows),
+        # Canonical carry-into-day+1 for the LAST active day. Per-item
+        # rows for that day sum here. NOT a sum across all days in the
+        # window -- that would double-count carries that already became
+        # mid-window openings. Frontend reads this field directly; it
+        # does NOT sum items[*].leftover_to_next_day itself.
+        "leftover_to_next_day_total": round(leftover_total_last_day, 2),
     }
     # Two metrics, two questions. Each maps 1:1 to a tile on the drawer
     # so every wire field has a visible UI consumer (no dead payload):
@@ -766,14 +1022,43 @@ def past_performance(
         "forecast_coverage_pct": forecast_coverage_pct,
     }
 
+    # Identity checks: per-(item, date) sums must reconcile with the
+    # aggregate totals block (the contract the supervisor relies on).
+    # Threshold lifted from settings -- rounding tolerance, not a real
+    # business gap. Drift beyond the threshold is logged as a warning
+    # but never blocks the emission; the frontend renders what it gets.
+    drift_threshold = float(settings.reconciliation_items_drift_threshold)
+    items_rep_sum      = round(sum(it.rep_van_load          for it in items_payload), 2)
+    items_van_load_sum = round(sum(it.recommended_van_load  for it in items_payload), 2)
+    items_sold_sum     = round(sum(it.actual_sold           for it in items_payload), 2)
+    items_leftover_last_day_sum = round(
+        sum(it.leftover_to_next_day for it in items_payload if it.date == last_active_str),
+        2,
+    )
+
+    def _drift(label: str, lhs: float, rhs: float) -> None:
+        if abs(lhs - rhs) > drift_threshold:
+            logger.warning(
+                "past_performance %s items-sum %.2f does not reconcile with "
+                "totals %.2f (drift %.2f) for route=%s window=%s..%s span=%d",
+                label, lhs, rhs, lhs - rhs, rcode, start_date, end_date, span_days,
+            )
+
+    _drift("rep_van_load",         items_rep_sum,              totals["rep_van_load_total"])
+    _drift("recommended_van_load", items_van_load_sum,         totals["recommended_van_load_total"])
+    _drift("actual_sold",          items_sold_sum,             totals["actual_sold_total"])
+    _drift("leftover_to_next_day_last_day",
+           items_leftover_last_day_sum, totals["leftover_to_next_day_total"])
+
     return PastPerformanceResponse(
         available=True,
         route_code=route_code,
         start_date=base.get("start_date"),
         end_date=base.get("end_date"),
-        lookback_days=lookback_days,
+        lookback_days=span_days,
         active_days=len(daily_rows),
         daily=daily_rows,
         totals=totals,
         metrics=metrics,
+        items=items_payload,
     )

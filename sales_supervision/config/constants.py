@@ -1,5 +1,5 @@
 """
-Business constants -- scoring weights, redistribution limits, accuracy zones.
+Business constants -- scoring weights, accuracy zones.
 All configurable, nothing hardcoded in logic files.
 """
 
@@ -24,16 +24,7 @@ class ScoringWeights:
 
 
 @dataclass(frozen=True)
-class RedistributionLimits:
-    """Constraints for unsold item redistribution."""
-    max_recipients: int = 5            # Max customers to redistribute to
-    max_increase_pct: float = 0.50     # Max 50% increase per customer-item
-    tier_priority: tuple[str, ...] = ("MUST_STOCK", "SHOULD_STOCK", "CONSIDER", "MONITOR")
-
-
-@dataclass(frozen=True)
 class SupervisionConstants:
     """Top-level container for all business constants."""
     accuracy: AccuracyZone = field(default_factory=AccuracyZone)
     scoring: ScoringWeights = field(default_factory=ScoringWeights)
-    redistribution: RedistributionLimits = field(default_factory=RedistributionLimits)

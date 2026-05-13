@@ -14,6 +14,14 @@ export function str(v: unknown): string {
   return v == null ? "" : String(v);
 }
 
+/** Tolerant boolean coercion for wire/CSV-mirror values. The CSV-mirror
+ *  sometimes ships booleans as "True"/"False" strings and sometimes as
+ *  1/0, so we accept the canonical JSON shape plus those legacy forms.
+ *  Anything else collapses to false -- callers never see undefined. */
+export function bool(v: unknown): boolean {
+  return v === true || v === 1 || v === "true" || v === "True";
+}
+
 export function SectionTitle({ children, right }: { children: React.ReactNode; right?: React.ReactNode }) {
   return (
     <div className="flex items-center justify-between mb-2">

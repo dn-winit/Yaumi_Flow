@@ -1,7 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { dataImportApi } from "@/api/data-import";
-import type { DashboardFilters } from "@/types/data-import";
+import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { tier } from "./refresh";
+
+// React Query key fragment for a reporting period. Stable string makes the
+// cache slot deterministic across renders (same dates -> same slot).
+function periodKey(p: ReportingPeriod): string {
+  return `${p.start_date}::${p.end_date}`;
+}
 
 // Stable, sorted-tuple cache key for a filter combination so different
 // orderings of the same selection share a query slot (mirrors the backend
@@ -18,19 +24,19 @@ function filterKey(f?: Partial<DashboardFilters>): string {
   ].join(";");
 }
 
-export function useSalesOverview(lookback?: string, filters?: Partial<DashboardFilters>) {
+export function useSalesOverview(period: ReportingPeriod, filters?: Partial<DashboardFilters>) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-sales", lookback ?? "default", filterKey(filters)],
-    queryFn: () => dataImportApi.getSalesOverview(lookback, filters),
+    queryKey: ["eda-sales", periodKey(period), filterKey(filters)],
+    queryFn: () => dataImportApi.getSalesOverview(period, filters),
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-export function useBusinessKpis(lookback?: string, filters?: Partial<DashboardFilters>) {
+export function useBusinessKpis(period: ReportingPeriod, filters?: Partial<DashboardFilters>) {
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: ["eda-business-kpis", lookback ?? "default", filterKey(filters)],
-    queryFn: () => dataImportApi.getBusinessKpis(lookback, filters),
+    queryKey: ["eda-business-kpis", periodKey(period), filterKey(filters)],
+    queryFn: () => dataImportApi.getBusinessKpis(period, filters),
     ...tier("dashboard"),
   });
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
@@ -57,6 +63,25 @@ export function useFilterDimensions(filters?: Partial<DashboardFilters>, enabled
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
+/**
+ * Most recent date in sales_recent.csv. Drawers call this to seed
+ * defaults that always land on a date with data. Cached at the static
+ * tier because the value only changes when the data_import cron runs.
+ */
+export function useLastActiveDate() {
+  const { data, isLoading, error } = useQuery({
+    queryKey: ["eda-last-active-date"],
+    queryFn: () => dataImportApi.getLastActiveDate(),
+    ...tier("static"),
+  });
+  return {
+    date: data?.date ?? null,
+    available: Boolean(data?.available),
+    loading: isLoading,
+    error: error ? String(error) : null,
+  };
+}
+
 export function useItemCatalog(enabled = true) {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["eda-items"],
@@ -72,23 +97,6 @@ export function useItemStats(itemCode: string | undefined, routeCode?: string) {
   const { data, isLoading, error } = useQuery({
     queryKey: ["eda-item-stats", itemCode, routeCode ?? ""],
     queryFn: () => dataImportApi.getItemStats(itemCode as string, routeCode),
-    enabled,
-    ...tier("dashboard"),
-  });
-  return { data, loading: isLoading, error: error ? String(error) : null };
-}
-
-/**
- * Resolve a reporting-period enum (``last_7_working_days`` etc.) to the
- * actual ``(start_date, end_date)`` over sales_recent.csv. Used by drawers
- * in other services that need to slice their own data on the same window
- * the dashboard uses, with real working-day semantics.
- */
-export function useLookbackWindow(lookback: string | undefined) {
-  const enabled = Boolean(lookback);
-  const { data, isLoading, error } = useQuery({
-    queryKey: ["eda-lookback-window", lookback ?? ""],
-    queryFn: () => dataImportApi.getLookbackWindow(lookback as string),
     enabled,
     ...tier("dashboard"),
   });

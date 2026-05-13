@@ -10,7 +10,7 @@ interface DrawerContextBarProps {
 
 /**
  * Compact strip shown at the top of analytics drawers. Gives the supervisor a
- * one-line read of what the numbers below are filtered by -- route, SKU
+ * one-line read of what the numbers below are filtered by -- route, item
  * selection, and the time window.
  */
 export default function DrawerContextBar({
@@ -21,10 +21,10 @@ export default function DrawerContextBar({
 }: DrawerContextBarProps) {
   const skuLabel =
     !itemCodes || itemCodes.length === 0
-      ? "All SKUs"
+      ? "All items"
       : itemCodes.length === 1
       ? itemCodes[0]
-      : `${itemCodes.length} SKUs`;
+      : `${itemCodes.length} items`;
 
   const items = [
     {
@@ -34,7 +34,7 @@ export default function DrawerContextBar({
       ),
     },
     {
-      label: "SKUs",
+      label: "Items",
       value: <Badge variant="neutral">{skuLabel}</Badge>,
     },
   ];

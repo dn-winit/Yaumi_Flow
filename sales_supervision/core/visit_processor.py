@@ -1,14 +1,18 @@
 """
-Visit processor -- handles a single customer visit (scoring + redistribution).
+Visit processor -- handles a single customer visit (apply actuals + score).
+
+The legacy in-session redistribution adjuster has been retired. The
+redistribution view shown to the supervisor is the pure, deterministic
+output of :func:`shape_redistribution_view`; it is computed at request
+time and never mutates session state.
 """
 
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Dict, Optional
 
 from sales_supervision.config.constants import SupervisionConstants
-from sales_supervision.core.redistribution import RedistributionEngine
 from sales_supervision.core.scoring import ScoringEngine
 from sales_supervision.models.schemas import Session, VisitResult
 
@@ -16,12 +20,11 @@ logger = logging.getLogger(__name__)
 
 
 class VisitProcessor:
-    """Processes a customer visit: apply actuals, score, redistribute unsold."""
+    """Processes a customer visit: apply actuals + score."""
 
     def __init__(self, constants: Optional[SupervisionConstants] = None) -> None:
         c = constants or SupervisionConstants()
         self._scorer = ScoringEngine(c)
-        self._redistributor = RedistributionEngine(c)
 
     def process(
         self,
@@ -31,9 +34,9 @@ class VisitProcessor:
     ) -> VisitResult:
         """
         Process a visit:
-        1. Apply actual quantities
-        2. Score the customer
-        3. Redistribute unsold items
+        1. Mark visited + stamp visit_sequence.
+        2. Apply actual quantities to each planned item.
+        3. Compute the customer score (coverage + accuracy).
         """
         customer = session.customers.get(customer_code)
         if customer is None:
@@ -54,7 +57,7 @@ class VisitProcessor:
             item.actual_qty = qty
             item.was_sold = qty > 0
 
-            # Calculate unsold for redistribution
+            # Surface the per-item shortfall (rec > actual) for diagnostics.
             diff = item.effective_recommended - qty
             if diff > 0:
                 unsold[item.item_code] = diff
@@ -63,20 +66,8 @@ class VisitProcessor:
         score = self._scorer.customer_score(customer)
         customer.score = score
 
-        # Redistribute unsold items to unvisited customers
-        redistributions = self._redistributor.redistribute(session, customer_code, unsold)
-
-        # Build adjustments map {to_customer: {item_code: qty}}
-        adjustments: Dict[str, Dict[str, int]] = {}
-        for r in redistributions:
-            adjustments.setdefault(r.to_customer, {})[r.item_code] = (
-                adjustments.get(r.to_customer, {}).get(r.item_code, 0) + r.quantity
-            )
-
         return VisitResult(
             customer_code=customer_code,
             score=score,
             unsold_items=unsold,
-            redistributions=redistributions,
-            adjustments=adjustments,
         )

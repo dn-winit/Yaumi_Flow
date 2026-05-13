@@ -1,17 +1,19 @@
 import { useEffect } from "react";
 import Card from "@/components/ui/Card";
 import MultiSelect from "@/components/ui/MultiSelect";
-import Select from "@/components/ui/Select";
 import Button from "@/components/ui/Button";
+import ReportingPeriodPicker from "@/components/ui/ReportingPeriodPicker";
 import { useFilterDimensions } from "@/hooks/useDataImport";
-import { LOOKBACK_OPTIONS, type Lookback } from "@/lib/format";
-import type { DashboardFilters } from "@/types/data-import";
+import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 
 interface Props {
   value: DashboardFilters;
   onChange: (next: DashboardFilters) => void;
-  lookback: Lookback;
-  onLookbackChange: (next: Lookback) => void;
+  period: ReportingPeriod;
+  onPeriodChange: (next: ReportingPeriod) => void;
+  /** Inclusive upper bound for the period picker. Drawers pass
+   *  lastActiveDate so weekends past the data go grey in the calendar. */
+  maxDate?: string;
   // Hide controls that are redundant in the calling context (e.g. the
   // VanLoad "Past analysis" drawer is already scoped to one route, so
   // showing Warehouse + Route again would just clutter the strip).
@@ -32,8 +34,9 @@ interface Props {
 export default function DashboardFilterBar({
   value,
   onChange,
-  lookback,
-  onLookbackChange,
+  period,
+  onPeriodChange,
+  maxDate,
   hideWarehouse = false,
   hideRoute = false,
 }: Props) {
@@ -136,13 +139,7 @@ export default function DashboardFilterBar({
           loading={dims.loading}
         />
 
-        <Select
-          label="Reporting period"
-          value={lookback}
-          onChange={(v) => onLookbackChange(v as Lookback)}
-          options={LOOKBACK_OPTIONS.map((o) => ({ value: o.key, label: o.label }))}
-          className="min-w-[220px]"
-        />
+        <ReportingPeriodPicker value={period} onChange={onPeriodChange} maxDate={maxDate} />
 
         <div className="ml-auto flex items-center gap-2">
           {activeCount > 0 && (

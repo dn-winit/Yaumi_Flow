@@ -9,7 +9,8 @@ import type {
   BusinessKpis,
   DashboardFilters,
   FilterDimensions,
-  LookbackWindowResponse,
+  LastActiveDateResponse,
+  ReportingPeriod,
 } from "@/types/data-import";
 import type { DataSummary } from "@/types/common";
 
@@ -31,19 +32,30 @@ export const dataImportApi = {
 
   getSummary: () => c().get<DataSummary>("/summary").then((r) => r.data),
 
-  getSalesOverview: (lookback?: string, filters?: Partial<DashboardFilters>) =>
+  getSalesOverview: (period: ReportingPeriod, filters?: Partial<DashboardFilters>) =>
     c()
       .get<SalesOverviewResponse>("/eda/sales", {
-        params: { ...(lookback ? { lookback } : {}), ...filterParams(filters) },
+        params: {
+          start_date: period.start_date,
+          end_date: period.end_date,
+          ...filterParams(filters),
+        },
       })
       .then((r) => r.data),
 
   getItemCatalog: () => c().get<ItemCatalogResponse>("/eda/items").then((r) => r.data),
 
-  getBusinessKpis: (lookback?: string, filters?: Partial<DashboardFilters>) =>
+  getLastActiveDate: () =>
+    c().get<LastActiveDateResponse>("/eda/last-active-date").then((r) => r.data),
+
+  getBusinessKpis: (period: ReportingPeriod, filters?: Partial<DashboardFilters>) =>
     c()
       .get<BusinessKpis>("/eda/business-kpis", {
-        params: { ...(lookback ? { lookback } : {}), ...filterParams(filters) },
+        params: {
+          start_date: period.start_date,
+          end_date: period.end_date,
+          ...filterParams(filters),
+        },
       })
       .then((r) => r.data),
 
@@ -67,11 +79,6 @@ export const dataImportApi = {
       .get<ItemStatsResponse>("/eda/item-stats", {
         params: { item_code: itemCode, ...(routeCode ? { route_code: routeCode } : {}) },
       })
-      .then((r) => r.data),
-
-  getLookbackWindow: (lookback: string) =>
-    c()
-      .get<LookbackWindowResponse>("/eda/lookback-window", { params: { lookback } })
       .then((r) => r.data),
 
   importDataset: (dataset: string, mode = "incremental") =>

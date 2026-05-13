@@ -87,7 +87,7 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
       ) : !hydrated && loading ? (
         <Loading message="Analyzing the route..." />
       ) : !hydrated && error ? (
-        <EmptyState icon="⚠️" title="Analysis failed" message={error} />
+        <EmptyState icon="[!]" title="Analysis failed" message={error} />
       ) : !hydrated && !result ? (
         <Loading message="Starting analysis..." />
       ) : (

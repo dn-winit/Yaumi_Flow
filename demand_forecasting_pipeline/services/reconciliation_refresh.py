@@ -124,21 +124,20 @@ def refresh_reconciliation(
         return {"success": True, "rows_updated": 0, "window": window,
                 "duration_seconds": 0.0, "message": "mirror empty"}
 
-    # 2. Slice to the requested splits inside the window. The default
-    #    ``('Forecast',)`` is what the daily cron uses; one-shot
-    #    backfills that include ``Test`` opt in explicitly.
     df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce")
-    df = df[df["DataSplit"].astype(str).str.strip().str.lower().isin(splits_norm)]
-    df = df[(df["TrxDate"].dt.date >= start) & (df["TrxDate"].dt.date <= end)]
-    if df.empty:
-        return {
-            "success": True, "rows_updated": 0, "window": window,
-            "data_splits": list(data_splits),
-            "duration_seconds": round((pd.Timestamp.now() - t0).total_seconds(), 2),
-            "message": "no rows in window for the requested splits",
-        }
 
-    # 3. Run the canonical engine -- same function db_pusher and the API use.
+    # 2. Pass the FULL mirror to the canonical engine. The per-(route,
+    #    item) carry simulation inside ``enrich_with_load`` walks dates
+    #    in ascending order and seeds ``opening_stock`` from the prior
+    #    row's ``van_load - sold``. Pre-slicing the frame to just the
+    #    write-back window (e.g. ``Forecast`` + today..today+14) breaks
+    #    that walk: every (route, item) timeline restarts from
+    #    ``opening = 0`` on the first in-window date, so today's
+    #    ``opening_stock`` is wrong (it is yesterday's leftover from a
+    #    Test-split row that lives just outside the window).
+    #    Passing the full mirror costs ~1s extra on the daily cron --
+    #    the kernel is O(N) and ~50k rows is trivial -- and guarantees
+    #    the simulation has the full history it needs at every refresh.
     enriched = enrich_with_load(
         df,
         predicted_col="Predicted",
@@ -155,18 +154,37 @@ def refresh_reconciliation(
             "window": window,
         }
 
+    # 3. Slice for write-back ONLY. Project rows in the requested
+    #    ``(start, end)`` window AND ``data_splits`` for the DB UPDATE +
+    #    CSV patch. The simulation already produced correct values for
+    #    every row (including those outside the window); we just don't
+    #    UPDATE the out-of-window rows because (a) Test-split historical
+    #    predictions reflect a past inference run (see module docstring)
+    #    and (b) re-writing past dates is not the cron's contract.
+    enriched["TrxDate"] = pd.to_datetime(enriched["TrxDate"], errors="coerce")
+    in_splits = enriched["DataSplit"].astype(str).str.strip().str.lower().isin(splits_norm)
+    in_window = (enriched["TrxDate"].dt.date >= start) & (enriched["TrxDate"].dt.date <= end)
+    update_df_full = enriched[in_splits & in_window]
+    if update_df_full.empty:
+        return {
+            "success": True, "rows_updated": 0, "window": window,
+            "data_splits": list(data_splits),
+            "duration_seconds": round((pd.Timestamp.now() - t0).total_seconds(), 2),
+            "message": "no rows in window for the requested splits",
+        }
+
     # 4. Project to the DB shape -- one row per natural key, four floats.
     #    Carry the original split through (capitalised to match how
     #    db_pusher writes it: ``Forecast`` / ``Test``) so the MERGE join
     #    targets the exact source row.
     update_df = pd.DataFrame({
-        "trx_date":    enriched["TrxDate"].dt.strftime("%Y-%m-%d"),
-        "route_code":  enriched["RouteCode"].astype(str),
-        "item_code":   enriched["ItemCode"].astype(str),
-        "data_split":  enriched["DataSplit"].astype(str).str.strip().str.capitalize(),
+        "trx_date":    update_df_full["TrxDate"].dt.strftime("%Y-%m-%d"),
+        "route_code":  update_df_full["RouteCode"].astype(str),
+        "item_code":   update_df_full["ItemCode"].astype(str),
+        "data_split":  update_df_full["DataSplit"].astype(str).str.strip().str.capitalize(),
     })
     for c in _RECON_COLS:
-        update_df[c] = pd.to_numeric(enriched[c], errors="coerce").fillna(0.0).astype(float)
+        update_df[c] = pd.to_numeric(update_df_full[c], errors="coerce").fillna(0.0).astype(float)
 
     rows_updated = _merge_update(s, update_df)
 
@@ -179,6 +197,14 @@ def refresh_reconciliation(
     cascade_lookback = max(int(horizon_days_behind) + int(horizon_days_ahead) + 2, 7)
     cascade = _cascade_data_import_refresh(s, lookback_days=cascade_lookback)
 
+    # CSV-only columns (no DB counterpart). The cascade above re-writes
+    # the mirror from yf_demand_forecast which does NOT carry the
+    # ``forecast_below_recent`` sanity flag -- so without this patch,
+    # the flag computed by ``enrich_with_load`` would be erased every
+    # cycle. Atomic write via tmp + os.replace so an interrupted run
+    # never leaves a torn CSV (matches save_dataframe's contract).
+    csv_patched = _patch_csv_flags(src, enriched)
+
     return {
         "success": True,
         "rows_updated": rows_updated,
@@ -186,6 +212,132 @@ def refresh_reconciliation(
         "data_splits": list(data_splits),
         "duration_seconds": round((pd.Timestamp.now() - t0).total_seconds(), 2),
         "cascade": cascade,
+        "csv_patched": csv_patched,
+    }
+
+
+def _patch_csv_flags(src: "pd.Path | object", enriched: pd.DataFrame) -> Dict[str, Any]:
+    """Patch the CSV mirror with columns produced by ``enrich_with_load``
+    but absent from the DB schema (and therefore erased by the cascade
+    pull from yf_demand_forecast). Each column persisted here has a live
+    consumer on the page-view endpoints:
+
+      * ``forecast_below_recent``      -- modal warning banner (bool)
+      * ``recent_avg_per_selling_day`` -- modal "Recent average" stat
+      * ``expected_demand``            -- modal envelope chip callout
+      * ``pattern_floor_applied``      -- modal envelope chip (floor) (bool)
+      * ``pattern_ceiling_applied``    -- modal envelope chip (ceiling) (bool)
+
+    Atomic write via tmp + os.replace -- a killed process never leaves
+    a half-written mirror visible to readers. Returns a small status
+    dict for caller telemetry.
+    """
+    import os
+    import tempfile
+
+    # PascalCase wire column -> (enrich column, dtype). Mirrors the
+    # rename map in services.storage.file_storage so a reader of either
+    # surface gets identical column semantics. Persisted set is the
+    # MINIMAL set the page-view ``explain`` dict consumes -- internal
+    # engine diagnostics (recent_std_per_selling_day, envelope_basis)
+    # are computed for the envelope logic but not persisted because no
+    # downstream surface reads them.
+    csv_only_cols: list[tuple[str, str, str]] = [
+        ("ForecastBelowRecent",     "forecast_below_recent",       "bool"),
+        ("RecentAvgPerSellingDay",  "recent_avg_per_selling_day",  "float"),
+        ("ExpectedDemand",          "expected_demand",             "float"),
+        ("PatternFloorApplied",     "pattern_floor_applied",       "bool"),
+        ("PatternCeilingApplied",   "pattern_ceiling_applied",     "bool"),
+    ]
+    missing_in_enriched = [src_col for _, src_col, _ in csv_only_cols
+                           if src_col not in enriched.columns]
+    if missing_in_enriched:
+        return {
+            "skipped": True,
+            "reason": f"enrich did not emit {missing_in_enriched}",
+        }
+    try:
+        full = pd.read_csv(str(src), low_memory=False)
+    except Exception as exc:
+        logger.error("reconciliation refresh: CSV reload failed: %s", exc)
+        return {"skipped": False, "success": False, "error": str(exc)}
+    if full.empty:
+        return {"skipped": True, "reason": "mirror empty"}
+
+    full["TrxDate"] = pd.to_datetime(full["TrxDate"], errors="coerce")
+    enr = enriched.copy()
+    enr["TrxDate"] = pd.to_datetime(enr["TrxDate"], errors="coerce")
+    enr["RouteCode"] = enr["RouteCode"].astype(str)
+    enr["ItemCode"]  = enr["ItemCode"].astype(str)
+    enr["DataSplit"] = enr["DataSplit"].astype(str).str.strip().str.capitalize()
+    full["RouteCode"] = full["RouteCode"].astype(str)
+    full["ItemCode"]  = full["ItemCode"].astype(str)
+    full["DataSplit"] = full["DataSplit"].astype(str).str.strip().str.capitalize()
+
+    # Pre-build per-row update map keyed on the natural key. One map per
+    # CSV-only column so each is updated independently.
+    key_cols = ["TrxDate", "RouteCode", "ItemCode", "DataSplit"]
+    enr_keys = list(zip(*(enr[c] for c in key_cols)))
+    update_maps: Dict[str, Dict[tuple, Any]] = {}
+    for _, src_col, dtype in csv_only_cols:
+        vals = enr[src_col].tolist()
+        if dtype == "bool":
+            vals = [bool(v) for v in vals]
+        else:
+            vals = [float(v) if pd.notna(v) else 0.0 for v in vals]
+        update_maps[src_col] = dict(zip(enr_keys, vals))
+
+    full_keys = list(zip(*(full[c] for c in key_cols)))
+    updated = 0
+    for dst_col, src_col, dtype in csv_only_cols:
+        # Initial column. Backward compatible: rows untouched by this
+        # refresh keep their prior value if the column already exists
+        # on disk, otherwise default False / 0.0 by dtype.
+        if dst_col in full.columns:
+            if dtype == "bool":
+                seed = full[dst_col].astype(str).str.strip().str.lower().isin(
+                    {"true", "1", "t", "yes"}
+                ).tolist()
+            else:
+                seed = pd.to_numeric(full[dst_col], errors="coerce").fillna(0.0).tolist()
+        else:
+            if dtype == "bool":
+                seed = [False] * len(full)
+            else:
+                seed = [0.0] * len(full)
+
+        umap = update_maps[src_col]
+        for i, k in enumerate(full_keys):
+            if k in umap:
+                seed[i] = umap[k]
+        full[dst_col] = seed
+        # ``updated`` counts the number of rows touched in THIS refresh
+        # (same across columns by construction); count once.
+        if dst_col == csv_only_cols[0][0]:
+            updated = sum(1 for k in full_keys if k in umap)
+
+    parent = os.path.dirname(str(src)) or "."
+    os.makedirs(parent, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(
+        dir=parent, prefix=os.path.basename(str(src)) + ".", suffix=".tmp",
+    )
+    os.close(fd)
+    try:
+        full.to_csv(tmp, index=False)
+        os.replace(tmp, str(src))
+    except Exception as exc:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        logger.error("reconciliation refresh: CSV write failed: %s", exc)
+        return {"skipped": False, "success": False, "error": str(exc)}
+
+    return {
+        "skipped": False,
+        "success": True,
+        "rows_updated": int(updated),
+        "rows_total": int(len(full)),
     }
 
 

@@ -11,6 +11,7 @@ import { fmtDate } from "@/lib/date";
 import { useWorkflow, useWorkflowNavigate } from "@/pages/Workflow/workflowContext";
 import LiveSessionTab from "@/pages/Supervision/LiveSession/LiveSessionTab";
 import { supervisionApi } from "@/api/supervision";
+import type { SessionSummary } from "@/types/supervision";
 import AdoptionDrawer from "./AdoptionDrawer";
 import UpcomingPlanDrawer from "./UpcomingPlanDrawer";
 
@@ -61,7 +62,7 @@ function VisitSession({
 }) {
   const navigate = useWorkflowNavigate();
   const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sessionData, setSessionData] = useState<Record<string, unknown> | null>(null);
+  const [sessionData, setSessionData] = useState<SessionSummary | null>(null);
   const [initError, setInitError] = useState<string | null>(null);
   const [adoptionOpen, setAdoptionOpen] = useState(false);
   const [upcomingOpen, setUpcomingOpen] = useState(false);
@@ -97,10 +98,11 @@ function VisitSession({
           date,
           recordings as unknown as Record<string, unknown>[],
         );
-        const session = sessionRes.session ?? {};
-        const id = String(session.session_id ?? session.sessionId ?? "");
-        setSessionId(id);
-        setSessionData({ ...session, recommendations: recordings });
+        // Backend emits camelCase ``sessionId`` only -- no snake_case
+        // fallback (Pydantic ``extra="forbid"`` enforces the contract).
+        const session = sessionRes.session;
+        setSessionId(session.sessionId);
+        setSessionData(session);
       } catch (err) {
         setInitError(err instanceof Error ? err.message : "Failed to initialize session");
       }

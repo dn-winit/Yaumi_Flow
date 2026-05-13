@@ -7,6 +7,7 @@ import CustomerGrid, { type CustomerStat } from "@/components/ui/CustomerGrid";
 import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
 import { useUnplannedVisits } from "@/hooks/useSupervision";
 import type { UnplannedVisitor } from "@/types/supervision";
+import RedistributionSection from "./RedistributionSection";
 
 /**
  * Read-only list of customers who invoiced on the session's route/date but
@@ -19,6 +20,13 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const customers: UnplannedVisitor[] = data?.customers ?? [];
+
+  // Server-side error: the wire payload arrived but the supervision
+  // service couldn't enumerate drop-ins (bad sessionId, transient DB
+  // hiccup, etc.). The contract guarantees ``error`` is a non-empty
+  // string in that case and ``customers`` is empty, so we surface the
+  // message visibly rather than rendering a silent empty grid.
+  const serverError = data && data.success === false ? (data.error ?? "Walk-in visits unavailable.") : null;
 
   // Tiles for the grid. ``unique_skus``, ``total_qty`` and
   // ``live_visited`` are all server-supplied; the client just maps
@@ -40,7 +48,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
     <Card
       title={
         <span className="flex items-center gap-2">
-          Unplanned visits today
+          Walk-in visits today
           {data && <Badge variant="warning">{data.unplanned_count}</Badge>}
         </span>
       }
@@ -58,13 +66,35 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
       }
     >
       {loading && !data ? (
-        <Loading message="Loading unplanned visits..." />
+        <Loading message="Loading walk-in visits..." />
       ) : error ? (
         <p className="text-body text-danger-600">{error}</p>
+      ) : serverError ? (
+        <div
+          role="alert"
+          className="rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-body leading-relaxed text-danger-700"
+        >
+          <strong className="font-semibold">Walk-in visits unavailable:</strong>{" "}
+          {serverError}
+        </div>
       ) : selected ? (
         <div className="space-y-3">
           <Button variant="ghost" size="sm" onClick={() => setSelectedCode(null)}>
-            ← Back to customers
+            <svg
+              className="mr-1 inline-block h-4 w-4"
+              fill="none"
+              stroke="currentColor"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                strokeWidth={2}
+                d="M15 19l-7-7 7-7"
+              />
+            </svg>
+            Back to customers
           </Button>
           <div className="border border-default rounded-xl bg-surface-raised overflow-hidden">
             <div className="flex items-center justify-between gap-3 px-4 py-3">
@@ -83,16 +113,16 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
               </div>
               <div className="flex items-center gap-2 shrink-0">
                 <Badge variant="warning">{selected.items.length} items</Badge>
-                <Badge variant="info">{selected.total_qty} qty</Badge>
+                <Badge variant="info">{selected.total_qty} quantity</Badge>
               </div>
             </div>
-            <div className="border-t border-default bg-surface-sunken/40 px-4 py-3">
+            <div className="border-t border-default bg-surface-sunken/40 px-4 py-3 space-y-4">
               <div className={TABLE_SCROLL_CLASS}>
                 <table className="w-full text-body">
                   <thead className="sticky top-0 z-10 bg-surface-sunken border-b border-default">
                     <tr className="text-left text-caption font-medium text-text-tertiary uppercase tracking-wide">
                       <th className="px-2 py-2 w-32">Item code</th>
-                      <th className="px-2 py-2 text-right">Qty sold</th>
+                      <th className="px-2 py-2 text-right">Quantity sold</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-subtle">
@@ -105,6 +135,11 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
                   </tbody>
                 </table>
               </div>
+              <RedistributionSection
+                view={selected.redistributions}
+                customerCode={selected.customer_code}
+                customerName={selected.customer_name ?? ""}
+              />
             </div>
           </div>
         </div>
@@ -112,7 +147,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
         <CustomerGrid
           customers={tiles}
           onSelect={setSelectedCode}
-          emptyMessage="No drop-in visits on this route today — every live invoice came from a planned customer."
+          emptyMessage="No walk-in visits on this route today - every live invoice came from a planned customer."
         />
       )}
     </Card>

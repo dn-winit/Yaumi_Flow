@@ -23,8 +23,8 @@ from data_import.api.schemas import (
     ItemStatsResponse,
     LiveCustomerSalesResponse,
     LiveRouteSalesResponse,
+    LastActiveDateResponse,
     LiveVanCompositionResponse,
-    LookbackWindowResponse,
     SalesOverviewResponse,
     StatusResponse,
 )
@@ -113,12 +113,13 @@ def health(importer: DataImporter = Depends(get_importer)):
     )
 
 
+_DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
+
+
 @router.get("/eda/sales", response_model=SalesOverviewResponse)
 def eda_sales(
-    lookback: str = Query(
-        default="last_30_working_days",
-        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
-    ),
+    start_date: str = Query(..., pattern=_DATE_RE, description="Inclusive lower bound (YYYY-MM-DD)"),
+    end_date:   str = Query(..., pattern=_DATE_RE, description="Inclusive upper bound (YYYY-MM-DD), >= start_date"),
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
     category_codes: List[str] = Query(default=[], alias="category_codes"),
@@ -127,13 +128,14 @@ def eda_sales(
 ):
     """Aggregated EDA over sales_recent.csv: totals, daily trend, top items, top routes, categories.
 
-    The `lookback` enum slices the data to the trailing N **working days**
-    (active dates with sales), so weekends / holidays / closures are
-    excluded automatically. FilterBar selections are honoured together
-    against the same windowed slice.
+    Slice = ``[start_date, end_date]`` inclusive. Dates with no activity
+    contribute zero (the chart still renders the X-axis tick) so a
+    weekend / holiday inside the window is visible as a gap, not silently
+    folded out. FilterBar selections are honoured together against the
+    same windowed slice.
     """
     return svc.get_sales_overview(
-        lookback, warehouse_codes, route_codes, category_codes, item_codes,
+        start_date, end_date, warehouse_codes, route_codes, category_codes, item_codes,
     )
 
 
@@ -143,28 +145,20 @@ def eda_items(svc: EdaService = Depends(get_eda_service)):
     return svc.get_item_catalog()
 
 
-@router.get("/eda/lookback-window", response_model=LookbackWindowResponse)
-def eda_lookback_window(
-    lookback: str = Query(
-        default="last_30_working_days",
-        description="last_working_day | last_7_working_days | last_30_working_days",
-    ),
-    svc: EdaService = Depends(get_eda_service),
-):
-    """Resolve a reporting-period enum to a concrete (start_date, end_date)
-    based on the most recent N **working days** in sales_recent.csv. Used by
-    drawers in other services that need to filter their own data on the same
-    window the dashboard uses, without re-implementing working-day detection.
-    """
-    return svc.get_lookback_window(lookback)
+@router.get("/eda/last-active-date", response_model=LastActiveDateResponse)
+def eda_last_active_date(svc: EdaService = Depends(get_eda_service)):
+    """Most recent date in sales_recent.csv. Drawers (van-load past
+    performance, recommendation adoption) call this on open to seed
+    defaults that always land on a date the data actually covers,
+    instead of hardcoding "yesterday" -- which on a weekend / holiday
+    would surface the empty-state every Monday morning."""
+    return svc.get_last_active_date()
 
 
 @router.get("/eda/business-kpis", response_model=BusinessKpisResponse)
 def eda_business_kpis(
-    lookback: str = Query(
-        default="last_30_working_days",
-        description="Reporting period: last_working_day | last_7_working_days | last_30_working_days",
-    ),
+    start_date: str = Query(..., pattern=_DATE_RE, description="Inclusive lower bound (YYYY-MM-DD)"),
+    end_date:   str = Query(..., pattern=_DATE_RE, description="Inclusive upper bound (YYYY-MM-DD), >= start_date"),
     warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
     route_codes: List[str] = Query(default=[], alias="route_codes"),
     category_codes: List[str] = Query(default=[], alias="category_codes"),
@@ -179,11 +173,12 @@ def eda_business_kpis(
         4. Peer uplift potential -- AED if every route adopted at the
            rate of the top quartile
 
-    All four respect the FilterBar + the active reporting period, and are
-    evaluated only over (route, date) cells that actually have rec coverage.
+    All four respect the FilterBar + the active reporting period
+    ``[start_date, end_date]``, and are evaluated only over (route, date)
+    cells that actually have rec coverage.
     """
     return svc.get_business_kpis(
-        lookback, warehouse_codes, route_codes, category_codes, item_codes,
+        start_date, end_date, warehouse_codes, route_codes, category_codes, item_codes,
     )
 
 
@@ -220,7 +215,7 @@ def eda_filter_dimensions(
 @router.get("/eda/live-route-sales", response_model=LiveRouteSalesResponse)
 def eda_live_route_sales(
     route_code: str = Query(..., description="Route code"),
-    date: str = Query(..., description="YYYY-MM-DD"),
+    date: str = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
     svc: EdaService = Depends(get_eda_service),
 ):
     return svc.get_live_route_sales(route_code, date)
@@ -229,7 +224,7 @@ def eda_live_route_sales(
 @router.get("/eda/live-customer-sales", response_model=LiveCustomerSalesResponse)
 def eda_live_customer_sales(
     route_code: str = Query(..., description="Route code"),
-    date: str = Query(..., description="YYYY-MM-DD"),
+    date: str = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
     customer_code: str = Query(..., description="Customer code"),
     svc: EdaService = Depends(get_eda_service),
 ):
@@ -239,7 +234,7 @@ def eda_live_customer_sales(
 @router.get("/eda/live-van-composition", response_model=LiveVanCompositionResponse)
 def eda_live_van_composition(
     route_code: str = Query(..., description="Route code"),
-    date: str = Query(..., description="YYYY-MM-DD"),
+    date: str = Query(..., pattern=_DATE_RE, description="YYYY-MM-DD"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Reconstructed van state for one (route, date): per item -- past

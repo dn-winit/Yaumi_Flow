@@ -258,6 +258,13 @@ def _str_clip(value: Any, max_len: int) -> str:
     return s if len(s) <= max_len else s[:max_len]
 
 
+def _empty_redistribution_dict() -> Dict[str, Any]:
+    """Pydantic-driven empty RedistributionView dump. Single source of
+    truth so a future wire-schema field is reflected here automatically."""
+    from sales_supervision.api.schemas import RedistributionView
+    return RedistributionView().model_dump()
+
+
 # NVARCHAR limits per scripts/create_tables.sql. The 'session_id' column is
 # defined NVARCHAR(100) on all three tables (foreign key alignment).
 _LEN_SESSION_ID = 100
@@ -778,7 +785,20 @@ class DbSaver:
                 custs, items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=True,
                 )
-                return self._build_visits_payload(sid, route_header, custs, items)
+                # Pull the full canonical set (visited + not) so the
+                # redistribution shaper can see every planned downstream
+                # candidate. The returned ``visits`` map still surfaces
+                # ONLY visited rows (preserves the existing wire
+                # contract); the unvisited rows are used purely to
+                # populate the synthetic Session that ``shape_redistri
+                # bution_view`` walks during replay.
+                all_custs, all_items = self._fetch_canonical_rows(
+                    cursor, route_code, date, visited_only=False,
+                )
+                return self._build_visits_payload(
+                    sid, route_header, custs, items,
+                    all_custs=all_custs, all_items=all_items,
+                )
         except Exception as exc:
             logger.error(
                 "DB load_session_visits failed for %s/%s: %s",
@@ -789,12 +809,23 @@ class DbSaver:
     @staticmethod
     def _build_visits_payload(
         sid: str, route_header: Dict, custs: List[Dict], items: List[Dict],
+        *,
+        all_custs: Optional[List[Dict]] = None,
+        all_items: Optional[List[Dict]] = None,
     ) -> Dict[str, Any]:
         """Translate stored rows into the visit-result shape the live
         UI consumes. Single source of truth for the column-to-JSON
         mapping so the live ``/visit`` response and this hydration
         path stay aligned. LLM payloads ride along as raw strings (the
-        analytics layer handles JSON parsing on the way back in)."""
+        analytics layer handles JSON parsing on the way back in).
+
+        ``all_custs`` / ``all_items`` -- the full canonical set
+        (visited + unvisited planned). Optional; when present the
+        redistribution view is replayed for every visited row against
+        the full downstream pool. When omitted (callers that haven't
+        opted in yet) the visit rows carry the safe-default empty
+        ``redistributions`` view.
+        """
         actuals_by_cust: Dict[str, Dict[str, int]] = {}
         for it in items:
             cc = str(it.get("customer_code", ""))
@@ -804,6 +835,106 @@ class DbSaver:
             if not ic:
                 continue
             actuals_by_cust.setdefault(cc, {})[ic] = int(it.get("actual_qty") or 0)
+
+        # Build the redistribution views in one pass. Local imports
+        # avoid a hard import cycle (api.schemas -> models, but
+        # core.redistribution imports api.schemas) and keep the
+        # db_saver import surface stable for callers that only need
+        # the per-visit upsert path.
+        redistributions_by_cust: Dict[str, Dict[str, Any]] = {}
+        try:
+            from sales_supervision.core.redistribution import (
+                compute_redistributions_for_saved_visits,
+            )
+            from sales_supervision.models.schemas import (
+                ScoreResult,
+                Session as _Session,
+                SessionCustomer as _SessionCustomer,
+                SessionItem as _SessionItem,
+            )
+
+            # Rebuild a minimal in-memory Session from the full canonical
+            # row set so the shaper can see every planned downstream
+            # customer. Items carry the original recommendation +
+            # actuals; tier (UNPLANNED vs planned) is preserved so the
+            # planned/unplanned classifier inside the shaper agrees with
+            # the live path.
+            roster_custs = all_custs if all_custs is not None else custs
+            roster_items = all_items if all_items is not None else items
+            items_by_cust_for_replay: Dict[str, List[_SessionItem]] = {}
+            for it in roster_items:
+                cc = str(it.get("customer_code", ""))
+                if not cc:
+                    continue
+                ic = str(it.get("item_code", ""))
+                if not ic:
+                    continue
+                # ``van_inventory_qty`` must round-trip into the replayed
+                # SessionItem -- the ledger uses it to compute spare
+                # van-load and drive allocation decisions on replay.
+                # Without it, replayed allocations diverge from live.
+                items_by_cust_for_replay.setdefault(cc, []).append(_SessionItem(
+                    item_code=ic,
+                    item_name=str(it.get("item_name") or ""),
+                    recommended_qty=int(it.get("original_recommended_qty") or 0),
+                    actual_qty=int(it.get("actual_qty") or 0),
+                    was_sold=bool(it.get("was_item_sold") or False),
+                    tier=str(it.get("recommendation_tier") or ""),
+                    van_inventory_qty=int(it.get("van_inventory_qty") or 0),
+                ))
+            roster: Dict[str, _SessionCustomer] = {}
+            for c in roster_custs:
+                cc = str(c.get("customer_code", ""))
+                if not cc:
+                    continue
+                seq = int(c.get("visit_sequence") or 0)
+                roster[cc] = _SessionCustomer(
+                    customer_code=cc,
+                    customer_name=str(c.get("customer_name") or ""),
+                    items=items_by_cust_for_replay.get(cc, []),
+                    visited=seq > 0,
+                    visit_sequence=seq,
+                    score=ScoreResult(
+                        score=float(c.get("customer_performance_score") or 0),
+                        coverage=float(c.get("sku_coverage_rate") or 0),
+                        accuracy=float(c.get("customer_accuracy_avg") or 0),
+                    ),
+                )
+            replay_session = _Session(
+                session_id=sid,
+                route_code=str(route_header.get("route_code") or ""),
+                date=str(route_header.get("supervision_date") or ""),
+                customers=roster,
+            )
+
+            # Walk visited customers in canonical visit_sequence order
+            # (legacy rows with seq==0 land at the front, stable across
+            # customer_code). Drop-ins (UNPLANNED-only items) are NOT
+            # surfaced here -- the saved-visits payload only carries
+            # planned visits; drop-ins ride on /session/unplanned.
+            from sales_supervision.core.constants import is_unplanned_customer
+
+            visited_codes = [
+                cc for cc, cust in roster.items()
+                if cust.visited and not is_unplanned_customer(cust)
+            ]
+            visited_codes.sort(key=lambda cc: (
+                int(roster[cc].visit_sequence or 0), cc,
+            ))
+            views = compute_redistributions_for_saved_visits(
+                replay_session, visited_codes,
+            )
+            for cc, view in views.items():
+                redistributions_by_cust[cc] = view.model_dump()
+        except Exception as exc:
+            # Safe default: leave the per-visit redistributions empty.
+            # ``logger.exception`` captures the traceback so future
+            # regressions in the replay path are debuggable from the
+            # supervision log without re-running the failing payload.
+            logger.exception(
+                "saved-visits redistribution replay failed (sid=%s): %s",
+                sid, exc,
+            )
 
         visits: Dict[str, Dict[str, Any]] = {}
         for c in custs:
@@ -821,6 +952,14 @@ class DbSaver:
                 "totalRecommended": int(c.get("qty_recommended") or 0),
                 "preVisitBriefing":  c.get("llm_pre_visit_briefing") or None,
                 "customerAnalysis":  c.get("llm_performance_analysis") or None,
+                # Replayed redistribution view, or an empty default
+                # when the replay couldn't run (legacy data, missing
+                # full roster, etc.). Always built from the Pydantic
+                # model so a wire-schema field added tomorrow stays in
+                # sync without touching this fallback.
+                "redistributions":   redistributions_by_cust.get(
+                    cc, _empty_redistribution_dict(),
+                ),
             }
 
         # Pre-aggregated visit totals so the live UI can show the
@@ -1184,7 +1323,7 @@ class DbSaver:
         # PurchaseCount / AvgQuantityPerVisit / Signals / Source) are not
         # persisted in the supervision tables -- they live on the
         # recommended_order side. Hydrated rows therefore lack them; the
-        # modal degrades to "—" for those sections (vs the live path
+        # modal degrades to "-" for those sections (vs the live path
         # which carries them through ``SessionItem.raw``).
         items_by_cust: Dict[str, list] = {}
         for it in items:

@@ -10,7 +10,9 @@ import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
 import { fmtDate } from "@/lib/date";
 import { fmtNum } from "@/lib/format";
 import type { Row } from "@/types/common";
+import type { RedistributionView } from "@/types/supervision";
 import AnalysisList from "./AnalysisList";
+import RedistributionSection from "./RedistributionSection";
 
 interface CustomerItem {
   itemCode: string;
@@ -29,13 +31,6 @@ interface VisitScore {
   accuracy: number;
 }
 
-interface RedistributionEntry {
-  from: string;
-  to: string;
-  itemCode: string;
-  quantity: number;
-}
-
 interface AlsoBoughtEntry {
   item_code: string;
   qty: number;
@@ -48,8 +43,11 @@ interface InitialVisit {
   totalRecommended: number;
   // Visit-time signals carried alongside actuals so the drill-in view
   // renders the same context an auto-fired ``process_visit`` produced,
-  // even after a drill-out / drill-in round trip.
-  redistributions?: RedistributionEntry[];
+  // even after a drill-out / drill-in round trip. ``redistributions``
+  // is the structured server view (per-item groups of recipient
+  // entries plus ``keptOnTruck``). Always present -- the server emits
+  // an empty-groups shape when there's nothing to redistribute.
+  redistributions: RedistributionView;
   alsoBought?: AlsoBoughtEntry[];
   // Previously-saved LLM payloads (JSON strings). When present, the
   // briefing / customer-review modals open them directly instead of
@@ -113,8 +111,8 @@ export default function CustomerVisit({
   // dictionary so the render path doesn't need separate state.
   const visited = !!initialVisit;
   const score = initialVisit?.score;
-  const actuals = (initialVisit?.actualSales ?? {}) as Record<string, number>;
-  const redistributions = initialVisit?.redistributions ?? [];
+  const actuals: Record<string, number> = initialVisit?.actualSales ?? {};
+  const redistributionView = initialVisit?.redistributions;
   const alsoBought = initialVisit?.alsoBought ?? [];
 
   // Hydrate the briefing from a previously-saved JSON payload when
@@ -216,7 +214,7 @@ export default function CustomerVisit({
         <div className="flex items-center gap-2 shrink-0">
           <Badge variant="neutral">{items.length} items</Badge>
           {visited ? (
-            <Badge variant={scoreBadgeVariant(score!.score)}>Visited · {score!.score.toFixed(0)}%</Badge>
+            <Badge variant={scoreBadgeVariant(score!.score)}>Visited - {score!.score.toFixed(0)}%</Badge>
           ) : liveVisited ? (
             <Badge variant="success">Visited live</Badge>
           ) : (
@@ -234,7 +232,7 @@ export default function CustomerVisit({
                 <th className="px-2 py-2">Name</th>
                 <th className="px-2 py-2 w-28 text-right">Recommended</th>
                 <th className="px-2 py-2 w-28 text-right">Actual (live)</th>
-                <th className="px-2 py-2 w-24 text-right">Delta</th>
+                <th className="px-2 py-2 w-24 text-right">Change</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-subtle">
@@ -284,7 +282,7 @@ export default function CustomerVisit({
                 loading={briefingLoading}
                 onClick={handleBriefing}
               >
-                {briefing ? "Briefing read ✓" : "Read briefing"}
+                {briefing ? "Briefing read" : "Read briefing"}
               </Button>
               <p className="text-caption text-text-tertiary">
                 Actuals + score appear automatically as soon as the rep
@@ -306,7 +304,7 @@ export default function CustomerVisit({
                 </span>
                 <span title="How close the actual quantities were to what we recommended">
                   <span className="text-brand-700 font-semibold">{score.accuracy.toFixed(1)}%</span>
-                  <span className="text-brand-600 ml-1 text-caption">qty accuracy</span>
+                  <span className="text-brand-600 ml-1 text-caption">quantity accuracy</span>
                 </span>
               </div>
               <Button variant="secondary" size="sm" onClick={handleAiClick}>
@@ -337,25 +335,19 @@ export default function CustomerVisit({
             </div>
           )}
 
-          {redistributions.length > 0 && (
-            <div>
-              <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">Moved to other customers</p>
-              <div className="space-y-1">
-                {redistributions.map((r, idx) => (
-                  <div key={idx} className="flex items-center gap-2 text-caption text-text-secondary">
-                    <Badge variant="info">{r.itemCode}</Badge>
-                    <span>{r.quantity} units: {r.from} &rarr; {r.to}</span>
-                  </div>
-                ))}
-              </div>
-            </div>
+          {visited && redistributionView && (
+            <RedistributionSection
+              view={redistributionView}
+              customerCode={customerCode}
+              customerName={customerName}
+            />
           )}
         </div>
 
       <Modal
         open={briefingOpen}
         onClose={() => setBriefingOpen(false)}
-        title={`Pre-visit briefing — ${customerName || customerCode}`}
+        title={`Pre-visit briefing - ${customerName || customerCode}`}
         size="xl"
       >
         {briefingLoading ? (
@@ -368,7 +360,7 @@ export default function CustomerVisit({
               <span className="text-body text-text-tertiary">Date</span>
               <Badge variant="neutral">{fmtDate(date)}</Badge>
               <span className="ml-auto text-body text-text-tertiary">
-                {fmtNum(items.length)} items - {fmtNum(totalUnits)} units
+                {fmtNum(items.length)} items / {fmtNum(totalUnits)} units
               </span>
             </div>
 
