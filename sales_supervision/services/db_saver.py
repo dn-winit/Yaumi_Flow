@@ -33,6 +33,14 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import pyodbc
 
+# Cross-service import: the bounded AIML pool lives in
+# demand_forecasting_pipeline so every YaumiAIML writer (this module,
+# recommended_order/db_pusher, the demand-forecast pusher) shares one
+# semaphore-bounded connection cap. The cross-service shape mirrors
+# what auto_visit_service already does (it imports df settings for the
+# cascade refresh) and what data/manager imports (recon engine), so no
+# new dependency direction is introduced.
+from demand_forecasting_pipeline.services.db_pool import get_pool
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -292,27 +300,31 @@ class DbSaver:
             and bool(self._s.item_details_table)
         )
 
-    def _connect(self) -> pyodbc.Connection:
-        """Open a transaction-mode connection with the configured query
-        timeout already applied. Centralised so every caller gets the
-        same shape -- no per-call ``conn.timeout =`` reminders."""
-        conn = pyodbc.connect(self._db.connection_string(), autocommit=False)
-        conn.timeout = self._db.query_timeout
-        return conn
+    def _pool(self):
+        """Resolve (and lazily create) the shared AIML pool for this
+        saver's connection string. Sized to accommodate concurrent
+        BackgroundTask upserts (one per /visit fired in flight) plus
+        the auto-visit reconciler tick -- floor of 4 leaves headroom
+        for both. Pool sizing applies only on first creation of a
+        given (conn_str, autocommit) key; later calls reuse the
+        existing pool unchanged."""
+        return get_pool(
+            self._db.connection_string(),
+            max_connections=4,
+            connect_timeout=int(self._db.connection_timeout),
+            query_timeout=int(self._db.query_timeout),
+            autocommit=False,
+        )
 
     @contextmanager
     def _open_conn(self) -> Iterator[pyodbc.Connection]:
-        """Context manager that guarantees the connection is closed,
-        even if the caller raises. Centralises the duplicated
-        ``finally: conn.close()`` block that lived on every method."""
-        conn = self._connect()
-        try:
+        """Context manager that yields a pooled connection. The pool's
+        ``acquire()`` already guarantees the connection is closed on
+        exit (and the bounding semaphore released) so this wrapper only
+        survives because callers reference ``self._open_conn()`` from
+        many methods -- it now thin-wraps the pool's context."""
+        with self._pool().acquire() as conn:
             yield conn
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
 
     # ------------------------------------------------------------------
     # Per-visit upsert

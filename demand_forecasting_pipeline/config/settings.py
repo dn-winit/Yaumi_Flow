@@ -205,6 +205,10 @@ class Settings(BaseSettings):
     # 0.5u threshold flags real bugs while staying quiet for the
     # rounding-only case.
     reconciliation_items_drift_threshold: float = Field(default=0.5, ge=0.0)
+    # Probability threshold below which a per-day class probability is
+    # flagged as "risky" on the van-load page-view's at_risk count.
+    # Owned server-side so frontend never re-derives the rule.
+    at_risk_prob_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
     # Daily reconciliation refresh cron. Recomputes the four
     # ``yf_demand_forecast`` reconciliation columns (recommended_load,
@@ -223,7 +227,17 @@ class Settings(BaseSettings):
     reconciliation_refresh_timezone: str = Field(default="Asia/Dubai")
     reconciliation_refresh_hour: int = Field(default=3, ge=0, le=23)
     reconciliation_refresh_minute: int = Field(default=30, ge=0, le=59)
-    reconciliation_refresh_horizon_days: int = Field(default=14, ge=1, le=90)
+    # ``horizon_days_behind`` for the daily cron. Default 1 (= refresh
+    # today + yesterday in one simulation pass) eliminates the
+    # cross-pass chain drift documented in enrich.py:752 -- adjacent
+    # days reconciled by different cron runs see different input states
+    # (late invoices, updated forecasts), so the chain identity
+    # ``leftover_to_next_day[d] == opening_stock[d+1]`` only holds within
+    # a single pass. Setting this to 1+ guarantees the boundary between
+    # yesterday and today is always written by the SAME pass, so the
+    # chain is internally consistent across the cron cadence.
+    # Override per environment via DF_RECONCILIATION_REFRESH_HORIZON_DAYS.
+    reconciliation_refresh_horizon_days: int = Field(default=1, ge=0, le=30)
 
     # Log rotation. The rotating file handler in ``observability.py``
     # reads these so ops can adjust retention without redeploying.
@@ -455,6 +469,27 @@ class Settings(BaseSettings):
     # the multiplicative class factors.
     pattern_envelope_min_active_days: int = Field(default=5, ge=1, le=365)
 
+    # ------------------------------------------------------------------
+    # Dormancy guard (zero expected demand for cold (route, item) pairs).
+    # ------------------------------------------------------------------
+    # When the rep has not sold an item across the last N trip days of a
+    # route's journey plan, the engine treats the pair as dormant: its
+    # ``expected_demand`` is zeroed BEFORE the leftover-subtraction step
+    # so no fresh load is recommended. ``opening_stock`` (carry) still
+    # flows through unchanged -- we stop ADDING fresh, not pretend the
+    # carry doesn't exist. Universally applied to every (route, item)
+    # the engine evaluates; no class gating in v1 (a class-specific
+    # threshold knob can be added later if needed).
+    dormancy_enabled: bool = Field(default=True)
+    dormancy_zero_sale_threshold_trip_days: int = Field(
+        default=7, ge=1, le=90,
+        description=(
+            "A (route, item) is marked dormant if it has zero sales "
+            "across the trailing N route-trip days. Reuses the existing "
+            "sales_recent + journey_plan indices."
+        ),
+    )
+
     def loading_quantile_for_class(self, demand_class: str | None) -> float:
         """Return per-class loading quantile. Falls back to the default
         for unknown / missing classes so a sparse classifier never
@@ -542,6 +577,7 @@ class Settings(BaseSettings):
     sales_recent_file: str = Field(default="sales_recent.csv")
     returns_recent_file: str = Field(default="returns_recent.csv")
     demand_forecast_file: str = Field(default="demand_forecast.csv")
+    sales_transactions_file: str = Field(default="sales_transactions.csv")
     customer_data_file: str = Field(default="customer_data.csv")
     journey_plan_file: str = Field(default="journey_plan.csv")
     shared_data_dir: str = Field(default_factory=lambda: str(_data_root() / "imports"))
@@ -603,6 +639,11 @@ class Settings(BaseSettings):
     # we just wrote. Empty -> cascade is skipped (production deployments
     # that orchestrate data_import separately leave this unset).
     data_import_url: str = Field(default="", description="Base URL of the data_import service, e.g. http://localhost:8005")
+
+    # Forward cascade -- POST recommended_order /generate after each
+    # reconciliation_refresh. Empty skips the cascade.
+    recommended_order_url: str = Field(default="", description="e.g. http://localhost:8001")
+    recommended_order_generate_timeout_seconds: float = Field(default=600.0, ge=10.0)
 
     # YaumiLive (read-only) -- for live actual sales lookup
     live_db_host: str = Field(default="")

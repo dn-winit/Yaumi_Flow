@@ -87,7 +87,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
       label: "Likely range (low-high)",
       render: (r: ForecastDrawerTableRow) => {
         if (r.lower_bound == null || r.upper_bound == null) return "-";
-        return `${r.lower_bound.toFixed(1)} - ${r.upper_bound.toFixed(1)}`;
+        return `${fmtNum(r.lower_bound)} - ${fmtNum(r.upper_bound)}`;
       },
     },
   ];

@@ -15,15 +15,17 @@ export interface RecommendationItem {
   FrequencyPercent: number;
   PurchaseCount: number;
   TrendFactor?: number;
-  /** Narrative explanation for "why this item" (engine-generated). Rendered in RecommendationModal. */
+  /** Generator-lane tag from the engine: "history" | "peer" | "basket" | "reactivation" | "seed". */
+  Source?: string;
+  /** Narrative explanation for "why this item" (engine-generated). */
   WhyItem?: string;
-  /** Narrative explanation for "how we sized it" (engine-generated). Rendered in RecommendationModal. */
+  /** Narrative explanation for "how we sized it" (engine-generated). */
   WhyQuantity?: string;
-  /** [0, 1] strength of signals behind the suggestion. Rendered in RecommendationModal as a percentage badge. */
+  /** [0, 1] strength of signals -- not rendered, kept for LLM briefings. */
   Confidence?: number;
-  /** Legacy fields surfaced when WhyItem/WhyQuantity not yet populated. */
-  ReasonStatus?: string;
-  ReasonExplanation?: string;
+  /** Structured signals feeding WhyItem / WhyQuantity. Each entry shape:
+   *  { kind: string, detail: string, weight: number, evidence: object } */
+  Signals?: Array<Record<string, unknown>>;
 }
 
 export interface GenerateRequest {

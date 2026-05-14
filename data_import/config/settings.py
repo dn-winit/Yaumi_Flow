@@ -110,6 +110,7 @@ class Settings(BaseSettings):
     journey_plan_file: str = Field(default="journey_plan.csv")
     sales_recent_file: str = Field(default="sales_recent.csv")
     demand_forecast_file: str = Field(default="demand_forecast.csv")
+    sales_transactions_file: str = Field(default="sales_transactions.csv")
     # Van-stock reconciliation inputs (refreshed nightly with the rest)
     closing_stock_file: str = Field(default="closing_stock.csv")
     load_allocation_file: str = Field(default="load_allocation.csv")
@@ -121,6 +122,7 @@ class Settings(BaseSettings):
     closing_stock_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_CLOSING_STOCK]")
     load_allocation_view: str = Field(default="[YaumiLive].[dbo].[VW_GET_LOAD_ALLOCATION_DETAILS]")
     demand_forecast_table: str = Field(default="[YaumiAIML].[dbo].[yf_demand_forecast]")
+    sales_transactions_table: str = Field(default="[YaumiAIML].[dbo].[yf_sales_transactions]")
 
     # TrxType vocabulary in VW_GET_SALES_DETAILS. Returns are recorded as
     # separate rows with negative QuantityInPCs; Bad Return = damaged
@@ -164,6 +166,16 @@ class Settings(BaseSettings):
     scheduler_timezone: str = Field(default="Asia/Dubai")
     scheduler_hour: int = Field(default=3, ge=0, le=23)
     scheduler_minute: int = Field(default=0, ge=0, le=59)
+
+    # Reverse cascade: after a fresh full import lands the raw forecast
+    # mirror (yf_demand_forecast -> demand_forecast.csv), trigger the
+    # forecast service to refresh ``yf_sales_transactions`` for today
+    # so the UI's carry chain + actual_sold are aligned with the latest
+    # raw forecasts. Without this hop, today's row in
+    # ``yf_sales_transactions`` would lag by up to 24h (until the next
+    # 03:30 cron). Set DI_FORECAST_URL to enable; unset = silent skip.
+    forecast_url: str = Field(default="", description="demand_forecasting base URL for the import->refresh cascade.")
+    forecast_refresh_timeout_seconds: float = Field(default=120.0, gt=0.0, le=600.0)
 
     @field_validator("log_level")
     @classmethod

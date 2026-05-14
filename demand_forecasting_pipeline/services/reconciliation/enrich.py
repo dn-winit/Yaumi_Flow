@@ -177,6 +177,18 @@ def enrich_with_load(
     q_low_col: Optional[str] = None,
     q_high_col: Optional[str] = None,
     class_col: Optional[str] = None,
+    # Actuals override for the leftover simulation. When provided, the
+    # carry-chain walk uses this dict instead of re-parsing
+    # sales_recent.csv -- callers (e.g. reconciliation_refresh) that
+    # already hold authoritative actuals from VW_GET_SALES_DETAILS can
+    # pass them in so the engine and the persisted ``actual_sold``
+    # column read from one source. ``actuals_override`` keys are
+    # ``(route_code_str, item_code_str, pd.Timestamp)``; the value is
+    # the day's total units sold. ``actuals_latest_date`` is the max
+    # trx_date the override covers; rows past that fall back to the
+    # forecast for the simulation, same contract as the CSV path.
+    actuals_override: Optional[dict[tuple[str, str, "pd.Timestamp"], float]] = None,
+    actuals_latest_date: Optional["pd.Timestamp"] = None,
 ) -> pd.DataFrame:
     """Add the reconciled van load (and, by default, diagnostic columns).
 
@@ -217,6 +229,10 @@ def enrich_with_load(
     out = df.copy()
     if bias is None or engine is None:
         out[output_col] = out[predicted_col].clip(lower=0).astype(float)
+        # Cold-start leftover defaults to 0 -- without an engine + bias
+        # table the carry chain has no anchor, so projecting an
+        # end-of-day leftover would be a guess. Keep schema stable.
+        out["leftover_to_next_day"] = 0.0
         if with_diagnostics:
             for c in _DIAGNOSTIC_COLS:
                 out[c] = 0.0
@@ -225,6 +241,7 @@ def enrich_with_load(
             out["forecast_below_recent"] = False
             out["pattern_floor_applied"] = False
             out["pattern_ceiling_applied"] = False
+            out["forecast_dormant"] = False
             # Envelope basis: with no engine / no recent stats we
             # couldn't compute either envelope; the row's class factors
             # would be applied if envelope was reached, so report that
@@ -324,14 +341,25 @@ def enrich_with_load(
     )
 
     # Actual-sale lookup for the per-day carry simulation. The
-    # simulation step that advances ``sim_leftover`` between dates
-    # uses real sales whenever they exist, and falls back to the
-    # model's prediction only on the forecast horizon. Same mtime-keyed
-    # caching pattern as the other ``sales_recent.csv`` consumers in
-    # this module so the CSV is parsed once per revision per process.
-    actual_sold_at, latest_actual_date = _actual_sold_index(
-        Path(s.shared_data_dir) / s.sales_recent_file,
-    )
+    # simulation step that advances ``sim_leftover`` between dates uses
+    # real sales whenever they exist, falling back to the model's
+    # prediction only past ``latest_actual_date``.
+    #
+    # Source priority -- caller-provided override wins. Lets
+    # ``reconciliation_refresh`` pass its own freshly-fetched actuals
+    # (from VW_GET_SALES_DETAILS) so the engine's simulation and the
+    # persisted ``actual_sold`` column read from one source -- closes
+    # the truck-cap chain-break that happens when sales_recent.csv
+    # lags VW_GET_SALES_DETAILS by even a few rows. The CSV-backed
+    # path is the fallback for non-refresh callers (e.g. ad-hoc API
+    # enrichment).
+    if actuals_override is not None:
+        actual_sold_at = actuals_override
+        latest_actual_date = actuals_latest_date
+    else:
+        actual_sold_at, latest_actual_date = _actual_sold_index(
+            Path(s.shared_data_dir) / s.sales_recent_file,
+        )
 
     # Guard indices: mtime-cached, empty => no-op (cold install / synthetic frames).
     if getattr(s, "concentration_guard_enabled", False):
@@ -350,6 +378,20 @@ def enrich_with_load(
         concentrated_idx = {}
         journey_idx = {}
 
+    # Dormancy guard: pairs that have had zero sales across their route's
+    # last N trip days. Same data-driven, settings-driven pattern as the
+    # other guards above; mtime-cached so the CSV cost is paid once per
+    # revision per process. Disabled-by-setting collapses to an empty set
+    # (no-op for every row).
+    if getattr(s, "dormancy_enabled", False):
+        dormant_pairs = _dormant_pairs_index(
+            Path(s.shared_data_dir) / s.sales_recent_file,
+            Path(s.shared_data_dir) / s.journey_plan_file,
+            threshold_trip_days=int(s.dormancy_zero_sale_threshold_trip_days),
+        )
+    else:
+        dormant_pairs = frozenset()
+
     # Build the per-row inputs as numpy arrays in a single pass (no
     # Python loop over the engine call). This is the live-path hot
     # surface; vectorising matches the past-performance handler's
@@ -357,12 +399,14 @@ def enrich_with_load(
     n = len(out)
     if n == 0:
         out[output_col] = pd.Series([], dtype="float64")
+        out["leftover_to_next_day"] = pd.Series([], dtype="float64")
         if with_diagnostics:
             for c in _DIAGNOSTIC_COLS:
                 out[c] = pd.Series([], dtype="float64")
             out["forecast_below_recent"] = pd.Series([], dtype="bool")
             out["pattern_floor_applied"] = pd.Series([], dtype="bool")
             out["pattern_ceiling_applied"] = pd.Series([], dtype="bool")
+            out["forecast_dormant"] = pd.Series([], dtype="bool")
             out["envelope_basis"] = pd.Series([], dtype="object")
         return out
 
@@ -462,6 +506,15 @@ def enrich_with_load(
     loads      = np.zeros(n, dtype=float)
     p_corr     = np.zeros(n, dtype=float)
     openings_arr = np.zeros(n, dtype=float)
+    # End-of-day leftover per row -- the value that becomes the NEXT day's
+    # ``opening_stock`` in the carry chain. Persisted as a DB column so
+    # downstream readers can see "what's left after today" without joining
+    # to tomorrow's forecast row. Populated inside the per-date sim loop
+    # immediately after ``sim_leftover`` is computed for the (route, item)
+    # key -- both come from the same float expression so the chain is
+    # provably consistent: ``leftover_to_next_day[d] == opening_stock[d+1]``
+    # for the same (route, item) pair, by construction.
+    next_leftover_arr = np.zeros(n, dtype=float)
     # Pattern-envelope diagnostics. Populated row-by-row inside the
     # per-date sim loop so the forward simulation advances against the
     # CLIPPED expected_demand (truck weight the policy actually loads)
@@ -480,6 +533,21 @@ def enrich_with_load(
     # True => concentrated item whose whale is absent from today's journey;
     # the engine's load is overridden to zero on those rows.
     guard_mask_arr = np.zeros(n, dtype=bool)
+    # True => dormant (route, item) pair (zero sales across the trailing
+    # N route-trip days). Expected demand is zeroed inside the per-date
+    # sim loop BEFORE the leftover-subtraction step so no fresh load is
+    # added; the carry chain still flows through unchanged. Built once
+    # outside the loop so the per-row membership test is O(1).
+    if dormant_pairs:
+        dormant_mask_arr = np.fromiter(
+            (
+                (rc_arr[i], ic_arr[i]) in dormant_pairs
+                for i in range(n)
+            ),
+            dtype=bool, count=n,
+        )
+    else:
+        dormant_mask_arr = np.zeros(n, dtype=bool)
     sim_leftover: dict[tuple[str, str], float] = {}
     dates_arr = dates.to_numpy()
     # Group row indices by date in ascending order. ``out`` is already
@@ -562,6 +630,20 @@ def enrich_with_load(
                     floor_app_day[k] = True
                 elif clipped < p_corr_day[k] - 1e-9:
                     ceiling_app_day[k] = True
+        # Dormancy override: for (route, item) pairs that have had zero
+        # sales across their route's last N trip days, force
+        # ``expected_demand`` to zero so the engine stops recommending
+        # fresh load on inventory the rep isn't selling. Applied AFTER
+        # the envelope so the per-row recent_avg / floor / ceiling
+        # diagnostics on the audit row still reflect the underlying
+        # pattern, and BEFORE the leftover subtraction so the policy's
+        # carry chain stays intact (we stop ADDING fresh, not pretend
+        # the carry doesn't exist). Settings-gated above; with the flag
+        # off the mask is all-False and this loop is a no-op.
+        if dormant_mask_arr.any():
+            for k in range(day_idx.size):
+                if dormant_mask_arr[day_idx[k]]:
+                    expected_day[k] = 0.0
         # Engine input rewire: the fresh-load is now driven by
         # ``expected_demand``, not ``forecast_corrected``. Identity
         # ``recommended_load = max(0, expected_demand - opening_stock)``
@@ -601,9 +683,18 @@ def enrich_with_load(
         # to the model's forecast only for future-horizon dates where
         # actuals don't exist yet. This keeps the policy-side carry
         # ledger as actuals-grounded as the rep side (rep_van_load[d]
-        # = closing[d-1] + alloc[d] -- both measurements). Masked rows
-        # force demand=0 so prior leftover is preserved (whale absent
-        # => no sale).
+        # = closing[d-1] + alloc[d] -- both measurements).
+        #
+        # Source priority (ground truth > assumption):
+        #   1. Actuals from VW_GET_SALES_DETAILS (override or CSV) ---
+        #      reality. Always wins when present, even on whale-guarded
+        #      rows -- the guard's "whale absent => no sale" assumption
+        #      describes a planning expectation; if the rep STILL sold
+        #      units (drop-in customers, plan deviation), the chain
+        #      must reflect that or leftover stays inflated forever.
+        #   2. Guard mask --- "whale absent, no actual sale recorded" =>
+        #      demand 0 so the carry isn't drained against thin air.
+        #   3. Forecast --- forward-looking days with no actuals yet.
         d_ts = pd.Timestamp(d).normalize() if not pd.isna(d) else None
         use_actuals = (
             d_ts is not None
@@ -612,17 +703,27 @@ def enrich_with_load(
         )
         for k in range(day_idx.size):
             van_load_k = openings_day[k] + max(loads_day[k], 0.0)
-            if guard_mask_arr[day_idx[k]]:
-                demand_k = 0.0
-            elif use_actuals:
+            if use_actuals:
+                # Real invoiced sales -- ground truth, wins over guard mask.
                 demand_k = max(
                     float(actual_sold_at.get((rc_day[k], ic_day[k], d_ts), 0.0)),
                     0.0,
                 )
+            elif guard_mask_arr[day_idx[k]]:
+                # Future / no-actuals day with whale absent -- expect zero.
+                demand_k = 0.0
             else:
                 demand_k = max(forecasts_arr[day_idx[k]], 0.0)
             sold_k = min(demand_k, van_load_k)
-            sim_leftover[(rc_day[k], ic_day[k])] = max(0.0, van_load_k - sold_k)
+            next_left = max(0.0, van_load_k - sold_k)
+            # ``sim_leftover`` drives the carry chain (becomes the NEXT
+            # day's opening for the same (route, item) on the next loop
+            # iteration). ``next_leftover_arr`` persists the same value
+            # as a per-row column so it lands on the DB row for today.
+            # Same expression, two storage targets -- chain stays
+            # internally consistent regardless of which reader picks it up.
+            sim_leftover[(rc_day[k], ic_day[k])] = next_left
+            next_leftover_arr[day_idx[k]] = next_left
 
     # Sanity flag: forecast_corrected falls below class-aware fraction
     # of recent_avg_per_selling_day. Surfaces rows where today's reconciled
@@ -644,6 +745,16 @@ def enrich_with_load(
                 below_recent[i] = True
 
     out[output_col] = pd.Series(loads, index=out.index, dtype="float64")
+    # ``leftover_to_next_day`` lives outside the ``with_diagnostics`` block
+    # because the cron persists it to the DB as a first-class operational
+    # column -- not a diagnostic. Each row's value is the END-OF-DAY
+    # leftover that becomes the NEXT day's ``opening_stock`` in the carry
+    # chain for the same (route, item). By construction:
+    #     leftover_to_next_day[(route, item, d)] == opening_stock[(route, item, d+1)]
+    # for any adjacent simulated days.
+    out["leftover_to_next_day"] = pd.Series(
+        next_leftover_arr, index=out.index, dtype="float64",
+    )
     if with_diagnostics:
         out["forecast_corrected"] = pd.Series(p_corr,       index=out.index, dtype="float64")
         out["bias_pct"]           = pd.Series(bias_arr,     index=out.index, dtype="float64")
@@ -686,6 +797,12 @@ def enrich_with_load(
         # Per-row flag so consumers can render "skipped: top buyer not on
         # today's journey plan" instead of an unexplained zero.
         out["guard_skipped"]      = pd.Series(guard_mask_arr, index=out.index, dtype="bool")
+        # Per-row flag for the dormancy guard. True when the (route,
+        # item) pair had zero sales across its route's last N trip days
+        # and the engine zeroed expected_demand for it. Mirrors how
+        # ``guard_skipped`` is exposed so the explainability popup can
+        # render "skipped: pair dormant" instead of an unexplained zero.
+        out["forecast_dormant"]   = pd.Series(dormant_mask_arr, index=out.index, dtype="bool")
 
         # Reconciled VAN LOAD bounds. Identity:
         #   recommended_van_load = recommended_load + opening_stock
@@ -1052,6 +1169,156 @@ def _concentrated_buyers_index(
     with _CONC_LOCK:
         _CONC_CACHE[key] = out
     return out
+
+
+# ----------------------------------------------------------------------
+# Dormant (route, item) pairs index (mtime-keyed).
+# ----------------------------------------------------------------------
+#
+# A pair is DORMANT when, across the trailing N TRIP days of its route's
+# journey plan, NONE of those dates carried a positive sale for it. The
+# engine then zeroes ``expected_demand`` for the pair so it stops
+# recommending fresh load on inventory the rep isn't selling. Universal
+# (settings-driven threshold, no per-class gating, no hardcoded codes).
+# ``_journey_index`` (defined below) is the customer-keyed view used by
+# the concentration guard; this helper instead builds a route-keyed
+# distinct-trip-date listing from the same CSV, so a second journey
+# parse is unavoidable but cheap and mtime+threshold cached.
+# ----------------------------------------------------------------------
+
+_DORMANT_LOCK = threading.Lock()
+# (sales_path, sales_mtime, sales_size, journey_path, journey_mtime,
+#  journey_size, threshold) -> frozenset[(route, item)]
+_DORMANT_CACHE: "dict[tuple, frozenset[tuple[str, str]]]" = {}
+
+
+def _dormant_pairs_index(
+    sales_path: Path,
+    journey_path: Path,
+    *,
+    threshold_trip_days: int,
+) -> frozenset[tuple[str, str]]:
+    """Set of (route, item) pairs that are DORMANT as of the latest
+    available data: have had zero sales across their route's most recent
+    ``threshold_trip_days`` trip days.
+
+    Trip days for a route = distinct dates the route appears in
+    journey_plan.csv. A pair is dormant iff for the most recent N trip
+    dates of its route, NONE had a positive sale in sales_recent.csv.
+    Routes with fewer than N trip days in the lookback window are
+    excluded (insufficient history -> never dormant by this rule).
+
+    Mtime+threshold keyed; cost paid once per file revision per process.
+    Empty / missing CSV -> empty set (no-op, engine behaves as before).
+    """
+    if not sales_path.exists() or not journey_path.exists():
+        return frozenset()
+    s_stat = sales_path.stat()
+    j_stat = journey_path.stat()
+    key = (
+        str(sales_path), s_stat.st_mtime_ns, s_stat.st_size,
+        str(journey_path), j_stat.st_mtime_ns, j_stat.st_size,
+        int(threshold_trip_days),
+    )
+    with _DORMANT_LOCK:
+        cached = _DORMANT_CACHE.get(key)
+        if cached is not None:
+            return cached
+    try:
+        # 1. Per-route sorted-desc list of distinct trip dates from
+        #    journey_plan.csv. Accept either column name -- mirrors the
+        #    handling in ``_journey_index`` below.
+        j_df = pd.read_csv(
+            journey_path, low_memory=False,
+            usecols=lambda c: c in {"RouteCode", "JourneyDate", "TrxDate"},
+        )
+        date_col = "JourneyDate" if "JourneyDate" in j_df.columns else "TrxDate"
+        if (
+            date_col not in j_df.columns
+            or "RouteCode" not in j_df.columns
+        ):
+            empty: frozenset[tuple[str, str]] = frozenset()
+            with _DORMANT_LOCK:
+                _DORMANT_CACHE[key] = empty
+            return empty
+        j_df[date_col] = pd.to_datetime(j_df[date_col], errors="coerce").dt.normalize()
+        j_df = j_df.dropna(subset=[date_col])
+        if j_df.empty:
+            with _DORMANT_LOCK:
+                _DORMANT_CACHE[key] = frozenset()
+            return frozenset()
+        j_df["RouteCode"] = j_df.RouteCode.astype(str)
+        # Distinct (route, trip_date) pairs, then sorted desc per route so
+        # we can take the trailing N straight off the front.
+        trips_by_route: dict[str, list[pd.Timestamp]] = {}
+        for route, grp in j_df.groupby("RouteCode", sort=False):
+            uniq = sorted(set(grp[date_col].tolist()), reverse=True)
+            trips_by_route[str(route)] = uniq
+
+        # 2. Sales-day set per (route, item, date) where TotalQuantity > 0.
+        s_df = pd.read_csv(
+            sales_path, low_memory=False,
+            usecols=lambda c: c in {
+                "RouteCode", "ItemCode", "TrxDate", "TotalQuantity",
+            },
+        )
+        s_df["TrxDate"] = pd.to_datetime(s_df["TrxDate"], errors="coerce").dt.normalize()
+        s_df = s_df.dropna(subset=["TrxDate"])
+        if s_df.empty:
+            with _DORMANT_LOCK:
+                _DORMANT_CACHE[key] = frozenset()
+            return frozenset()
+        s_df["RouteCode"] = s_df.RouteCode.astype(str)
+        s_df["ItemCode"]  = s_df.ItemCode.astype(str)
+        s_df["TotalQuantity"] = pd.to_numeric(
+            s_df["TotalQuantity"], errors="coerce",
+        ).fillna(0.0)
+        positive = s_df[s_df["TotalQuantity"] > 0.0]
+        if positive.empty:
+            # No positive sales anywhere -- every (route, item) ever seen
+            # is dormant by construction, but we limit to routes that
+            # actually have enough trip-day history.
+            pass
+        positive_set: set[tuple[str, str, pd.Timestamp]] = set(
+            zip(
+                positive["RouteCode"].tolist(),
+                positive["ItemCode"].tolist(),
+                positive["TrxDate"].tolist(),
+            )
+        )
+        # Per-(route, item) "ever seen in sales_recent" catalogue. Items
+        # the rep has never sold on a route never enter the engine's
+        # frame, so we only need to flag pairs that DID appear at some
+        # point and have since gone cold.
+        items_by_route: dict[str, set[str]] = {}
+        for r, i in zip(s_df["RouteCode"].tolist(), s_df["ItemCode"].tolist()):
+            items_by_route.setdefault(str(r), set()).add(str(i))
+
+        # 3. For each route with enough trip-day history, walk its last
+        #    N trip dates; an item with zero positive sales across all
+        #    of them is dormant.
+        dormant: set[tuple[str, str]] = set()
+        n_thresh = int(threshold_trip_days)
+        for route, trips_desc in trips_by_route.items():
+            if len(trips_desc) < n_thresh:
+                continue
+            window = trips_desc[:n_thresh]
+            window_ts = [pd.Timestamp(d) for d in window]
+            seen_items = items_by_route.get(route, set())
+            for item in seen_items:
+                if all(
+                    (route, item, d) not in positive_set for d in window_ts
+                ):
+                    dormant.add((route, item))
+        result = frozenset(dormant)
+    except Exception as exc:
+        logger.warning(
+            "enrich_with_load: dormant-pairs index build failed (%s)", exc,
+        )
+        return frozenset()
+    with _DORMANT_LOCK:
+        _DORMANT_CACHE[key] = result
+    return result
 
 
 def _journey_index(

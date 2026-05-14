@@ -11,7 +11,7 @@ import {
   num,
   str,
 } from "./explain/atoms";
-import { pickDate } from "@/lib/format";
+import { fmtNum, hasRealConfidence, pickDate } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 import { useItemStats } from "@/hooks/useDataImport";
 import type { ItemStatsWindow } from "@/types/data-import";
@@ -55,11 +55,11 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
       label={label}
       value={
         <>
-          {w.avg.toFixed(1)}
+          {fmtNum(w.avg)}
           <span className="text-caption font-normal text-text-tertiary"> /selling day</span>
         </>
       }
-      hint={`${w.active_days} selling days out of ${w.days} - total ${w.total.toFixed(0)} units`}
+      hint={`${w.active_days} selling days out of ${w.days} - total ${fmtNum(w.total)} units`}
     />
   );
 }
@@ -72,37 +72,41 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
   const routeCode = str(row.RouteCode ?? row.route_code);
   const date = pickDate(row);
 
-  // ``prediction`` / ``predicted`` carry the reconciled van load
-  // (units_to_load) -- the cron's recommended_load + opening_stock for
-  // this (route, item, date). Same number the headline tile shows.
-  const recommendedLoad = num(row.prediction ?? row.predicted);
+  // Headline = total truck weight (carry + fresh). Adapter in VanLoadTable
+  // populates ``prediction`` with ``recommended_van_load`` so the headline
+  // matches the tile and the "On truck" column.
+  const recommendedLoad = num(row.prediction);
+  const freshLoad = num(row.units_to_load) ?? recommendedLoad;
   const pDemand = num(row.p_demand);
-  // Canonical column names from the DB-mirror are
-  // ``lower_bound``/``upper_bound`` and ``demand_class``. Older payloads
-  // used ``q_10``/``q_90`` and ``class``; try the canonical names first.
-  const q10 = num(row.lower_bound ?? row.q_10);
-  const q90 = num(row.upper_bound ?? row.q_90);
-  const cls = str(row.demand_class ?? row.class);
-  // Engine intermediates -- the "show your work" math.
+  const q10 = num(row.lower_bound);
+  const q90 = num(row.upper_bound);
+  const cls = str(row.demand_class);
+  // ``expectedDemand`` is the engine's final per-day target (post bias-
+  // correction + recent-pattern adjustment). It is the single business-
+  // relevant number the supervisor needs to verify "fresh = expected -
+  // carried". ``recentAvg`` is the per-selling-day baseline shown as
+  // context. Intermediate engine math (raw forecast, bias %, corrected
+  // forecast) is technical detail and intentionally not surfaced here.
   const openingStock = num(row.opening_stock);
-  const forecastCorrected = num(row.forecast_corrected);
-  const biasPct = num(row.bias_pct);
-  const predictedRaw = num(row.predicted_raw);
-  // Pattern-envelope reconciliation step. `recentAvg` is the per-selling-day
-  // baseline the envelope is measured against; `expectedDemand` is the
-  // post-envelope number the engine actually consumes. The two booleans
-  // indicate whether the envelope pulled the forecast UP (floor) or DOWN
-  // (ceiling) -- they are mutually exclusive on a given row.
-  const recentAvg = num(row.recent_avg_per_selling_day);
   const expectedDemand = num(row.expected_demand);
-  const patternFloorApplied = bool(row.pattern_floor_applied);
-  const patternCeilingApplied = bool(row.pattern_ceiling_applied);
+  const recentAvg = num(row.recent_avg_per_selling_day);
   const guardSkipped = row.guard_skipped === true;
   // Wire-driven informational flag: backend sets this when the corrected
   // forecast significantly under-shoots the item's recent activity. The
   // frontend NEVER recomputes or thresholds -- it just renders the chip
   // when the server says so. Falsy/missing -> chip hidden.
   const forecastLow = bool(row.forecast_below_recent);
+  // True when the row's class produces a real per-day probability (two-
+  // stage intermittent/lumpy models). Smooth/erratic classes emit a
+  // synthetic 0/1 fallback and the ConfidenceBadge renders a static
+  // label ("Regular"/"Frequent") -- showing "Probability at least one
+  // unit moves today" alongside that label would be a lie.
+  const hasRealProbability = hasRealConfidence(cls);
+  // ``recentAvg`` populated => the cron has the recent selling pattern
+  // available for this item. We surface it as the supervisor's anchor
+  // for the recommended quantity; absent (null) means a brand-new item
+  // with no recent history and the pattern context drops out.
+  const hasRecentAnchor = recentAvg != null && recentAvg > 0;
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
   const windows = stats.data?.windows;
@@ -148,91 +152,84 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           <div className={GRID_3}>
             <Stat
               label="Recommended van load"
-              value={recommendedLoad != null ? Math.round(recommendedLoad).toLocaleString() : "-"}
+              value={recommendedLoad != null ? fmtNum(recommendedLoad) : "-"}
               hint="Total units to put on the truck for this item (carried + fresh)"
               highlight
             />
             <Stat
               label="Chance of selling today"
               value={<ConfidenceBadge value={pDemand} demandClass={cls} />}
-              hint="Probability at least one unit moves today"
+              // Hint is honest only for two-stage classes that emit a real
+              // per-day probability. Smooth/erratic show a static label
+              // (the badge renders its own contextual tooltip in those
+              // cases), so the hint slot drops out instead of asserting
+              // a probability we don't compute.
+              hint={
+                hasRealProbability
+                  ? "Probability at least one unit moves today"
+                  : "This pattern sells too consistently for a per-day probability"
+              }
             />
             <Stat
               label="Expected range"
-              value={
-                q10 != null && q90 != null
-                  ? `${Math.round(q10).toLocaleString()} - ${Math.round(q90).toLocaleString()}`
-                  : "-"
-              }
+              value={q10 != null && q90 != null ? `${fmtNum(q10)} - ${fmtNum(q90)}` : "-"}
               hint="Lower-to-upper band today's demand is calibrated to sit inside"
             />
           </div>
         </div>
 
-        {/* Section 2: how the truck weight breaks down. Only renders
-            when at least one engine intermediate is populated, so legacy
-            rows without the diagnostics stay clean. */}
-        {(openingStock != null || forecastCorrected != null || biasPct != null || predictedRaw != null || recentAvg != null) && (
+        {/* Section 2: today's truck weight broken into its three numbers.
+            Carried + Fresh = Total -- a literal identity the supervisor
+            can verify on screen. ``Expected today`` is the per-day demand
+            target the engine sized against (post bias + recent-pattern
+            adjustment); ``Recent pattern`` is the historical anchor for
+            context. Everything is a stored column on yf_sales_transactions,
+            no client-side math. */}
+        {(openingStock != null || expectedDemand != null) && (
           <div>
             <SectionTitle>How we got the load</SectionTitle>
-            <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 lg:grid-cols-5 gap-3">
+
+            {/* Carry + Fresh = Total identity. Three tiles so the user
+                can verify the headline (recommendedLoad) is the literal
+                sum -- no manipulation, no hidden adjustment. */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Stat
-                label="Raw forecast"
-                value={
-                  predictedRaw != null
-                    ? Math.round(predictedRaw).toLocaleString()
-                    : "-"
-                }
-                hint="Model output before any adjustment"
+                label="Carried over"
+                value={openingStock != null ? fmtNum(openingStock) : "-"}
+                hint="Already on the truck from yesterday's leftover"
               />
               <Stat
-                label="Model trend"
-                value={
-                  biasPct != null
-                    ? `${biasPct > 0 ? "+" : ""}${(biasPct * 100).toFixed(1)}%`
-                    : "-"
-                }
-                hint="How much we adjust: positive trims down, negative boosts up"
+                label="Fresh from depot"
+                value={freshLoad != null ? fmtNum(freshLoad) : "-"}
+                hint="What the depot issues today on top of the carry"
               />
               <Stat
-                label="Adjusted forecast"
-                value={
-                  forecastCorrected != null
-                    ? Math.round(forecastCorrected).toLocaleString()
-                    : "-"
-                }
-                hint="Raw forecast x (1 - trend) = adjusted"
-              />
-              <Stat
-                label="Recent average"
-                value={
-                  recentAvg != null
-                    ? Math.round(recentAvg).toLocaleString()
-                    : "-"
-                }
-                hint="Item's typical units per selling day (last 28 working days)"
-              />
-              <Stat
-                label="Already on truck"
-                value={
-                  openingStock != null
-                    ? Math.round(openingStock).toLocaleString()
-                    : "-"
-                }
-                hint="Carried from yesterday - no fresh load needed for these units"
+                label="Total truck weight"
+                value={recommendedLoad != null ? fmtNum(recommendedLoad) : "-"}
+                hint="Carried + Fresh = today's van load"
+                highlight
               />
             </div>
-            {patternFloorApplied && expectedDemand != null && (
-              <p className="mt-2 text-caption text-info-700">
-                Pattern floor applied: expected demand boosted to {Math.round(expectedDemand).toLocaleString()} to stay within the
-                item&apos;s recent pattern.
-              </p>
-            )}
-            {patternCeilingApplied && !patternFloorApplied && expectedDemand != null && (
-              <p className="mt-2 text-caption text-info-700">
-                Pattern ceiling applied: expected demand capped at {Math.round(expectedDemand).toLocaleString()} based on the
-                item&apos;s recent pattern.
-              </p>
+
+            {/* Expected demand + recent pattern: the "why this size" pair.
+                Falls back gracefully when no recent history (new item). */}
+            {(expectedDemand != null || hasRecentAnchor) && (
+              <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <Stat
+                  label="Expected today"
+                  value={expectedDemand != null ? fmtNum(expectedDemand) : "-"}
+                  hint="How many units we expect to sell on this route today"
+                />
+                <Stat
+                  label="Recent pattern"
+                  value={hasRecentAnchor ? `${fmtNum(recentAvg!)} /selling day` : "-"}
+                  hint={
+                    hasRecentAnchor
+                      ? "Average units sold on the days this item moved"
+                      : "No recent selling history for this item yet"
+                  }
+                />
+              </div>
             )}
           </div>
         )}

@@ -392,32 +392,64 @@ export default function PipelinePage() {
       <KpiRow columns={3}>
         <MetricCard
           label="Baseline accuracy"
-          value={fmtPct(accuracy)}
-          trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
-          subtitle={`Set at training - ${trainedAgo.replace(/^Trained /, "").replace(/^Not yet trained$/, "not yet trained")}`}
+          value={accuracy != null ? fmtPct(accuracy) : "—"}
+          trend={
+            accuracy != null
+              ? accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down"
+              : undefined
+          }
+          subtitle={
+            accuracy != null
+              ? testStart && testEnd
+                ? `Scored on test data ${testStart} – ${testEnd}`
+                : "Scored on the held-out test data"
+              : "No test predictions found — run the pipeline to score the model"
+          }
           loading={summaryLoading}
           info={
             <InfoBubble
-              title="How forecast accuracy is calculated"
+              title="How baseline accuracy is calculated"
               body={<ForecastAccuracyExplanation />}
             />
           }
         />
         <MetricCard
           label="Last trained"
-          value={trainedAt ? fmtTimestamp(trainedAt) : "--"}
-          subtitle={testStart && testEnd ? `Tested on ${testStart} - ${testEnd}` : undefined}
+          value={trainedAt ? fmtTimestamp(trainedAt) : "—"}
+          subtitle={trainedAt ? trainedAgo : "Model has not been trained yet"}
           loading={summaryLoading}
+          info={
+            <InfoBubble
+              title="When did the model last train?"
+              body={
+                <div className="space-y-2 text-body text-text-secondary leading-relaxed">
+                  <p>The timestamp the last training run completed. Training refreshes the model with the latest sales history so forecasts stay current.</p>
+                  <p>Shown in your browser's local time. The daily training cron runs on the Asia/Dubai schedule.</p>
+                </div>
+              }
+            />
+          }
         />
         <MetricCard
-          label="Forecast coverage"
-          value={
+          label="Forecast horizon"
+          value={lastForecastDate ? `Through ${lastForecastDate}` : "—"}
+          subtitle={
             testRoutes != null && testItems != null
-              ? `${testRoutes} routes - ${testItems} items`
-              : "--"
+              ? `Last training tested ${testRoutes} routes · ${testItems} items`
+              : "No forecast generated yet"
           }
-          subtitle={lastForecastDate ? `Predicting through ${lastForecastDate}` : undefined}
           loading={summaryLoading}
+          info={
+            <InfoBubble
+              title="What is the forecast horizon?"
+              body={
+                <div className="space-y-2 text-body text-text-secondary leading-relaxed">
+                  <p>The latest date the model has predictions for. The inference cron writes new predictions daily, extending the horizon forward.</p>
+                  <p>The subtitle reports the size of the held-out test slice scored at the last training (a measure of how broadly the model was evaluated, not the forward horizon itself).</p>
+                </div>
+              }
+            />
+          }
         />
       </KpiRow>
 

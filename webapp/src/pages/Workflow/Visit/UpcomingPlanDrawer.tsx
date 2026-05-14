@@ -38,7 +38,7 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
     {
       key: "predicted_qty",
       label: "Predicted units",
-      render: (r: Record<string, unknown>) => fmtNum(r.predicted_qty as number, 1),
+      render: (r: Record<string, unknown>) => fmtNum(r.predicted_qty as number),
     },
     {
       key: "est_revenue",

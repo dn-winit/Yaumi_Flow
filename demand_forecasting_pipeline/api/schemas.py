@@ -221,63 +221,87 @@ class PastPerformanceItem(BaseModel):
     with the aggregate ``totals`` block within the rounding tolerance
     (``reconciliation_items_drift_threshold``):
 
-        sum(items[*].rep_van_load)         == totals.rep_van_load_total
-        sum(items[*].actual_sold)          == totals.actual_sold_total
-        sum(items[*].recommended_van_load) == totals.recommended_van_load_total
+        sum(items[*].rep_van_load)          == totals.rep_van_load_total
+        sum(items[*].recommended_van_load)  == totals.recommended_van_load_total
+        sum(items[*].actual_sold)           == totals.actual_sold_total
+        sum(items[*].actual_leftover)       == totals.rep_leftover_units
+        sum(items[*].recommended_leftover)  == totals.our_leftover_units
 
-    ``leftover_to_next_day`` is the carry produced BY this row's day
-    (what carries into day + 1). The aggregate
-    ``totals.leftover_to_next_day_total`` is the sum of this field over
-    items on the LAST active day in the window -- the canonical figure
-    the next day's page-view ``carried_qty`` reads.
-
-    ``recommended_carried`` and ``recommended_fresh`` together make up
-    ``recommended_van_load`` for the row (carry into the day + fresh
-    load this day). ``past_leftover`` and ``today_allocation`` are the
-    rep's actual carry + fresh, summing to ``rep_van_load`` for the
-    row.
-
-    Envelope / sanity-flag fields (recent_avg_per_selling_day,
-    expected_demand, pattern_floor_applied, pattern_ceiling_applied,
-    forecast_below_recent, envelope_basis) are NOT carried here. The
-    BreakdownPopover that consumes items[] only renders the eight
-    numeric carry/fresh/sold/leftover fields above. The same envelope
-    diagnostics flow per (route, item, date) via ``table_rows[*].explain``
-    on the page-view endpoints, which is the single consumer surface --
-    no duplicate wire payload.
+    Leftovers are the naive "what's still on the truck at end of day"
+    figure -- ``max(load - sold, 0)`` -- one per policy. Items that ran
+    short (sold > load) are stock-outs, not leftovers, so the field is
+    bounded at 0.
     """
     model_config = ConfigDict(extra="forbid")
     itemCode: str
     itemName: str = ""
+    categoryName: str = ""
     date: str
     rep_van_load: float
-    past_leftover: float
-    today_allocation: float
     recommended_van_load: float
-    recommended_carried: float
-    recommended_fresh: float
     actual_sold: float
-    leftover_to_next_day: float
+    # Leftovers under each policy -- naive max(load - sold, 0).
+    # Identity: sum across items_payload equals the matching totals.
+    actual_leftover: float
+    recommended_leftover: float
 
 
 # Page-view's van-load endpoint emits the same per-(item, date) shape
-# scoped to a single date (today). Aliasing keeps the wire contract in
-# one place so frontend renderers can share the row component.
-VanLoadPageViewItem = PastPerformanceItem
+# scoped to a single date (today), extended with the rep's actual
+# loading numbers sourced from yf_sales_transactions.yaumi_*. These
+# come from VW_GET_CLOSING_STOCK + VW_GET_LOAD_ALLOCATION_DETAILS via
+# reconciliation_refresh, and let the frontend show the rep's process
+# alongside ours per item without a second fetch.
+#
+# Optional because past dates predating the yaumi_* backfill, or future
+# dates with no rep activity, surface NULL on the DB row. The frontend
+# treats None as "no rep data" and renders an em-dash.
+class VanLoadPageViewItem(PastPerformanceItem):
+    yaumi_opening_stock: Optional[float] = None
+    yaumi_fresh_load: Optional[float] = None
+    yaumi_total_van_load: Optional[float] = None
+    yaumi_leftover: Optional[float] = None
+    # Dormancy guard flag from yf_sales_transactions.forecast_dormant.
+    # True when the (route, item) pair had zero sales across its route's
+    # last N trip days and the engine zeroed expected_demand for it.
+    # Backwards-compatible: pre-existing DB rows surface NULL.
+    forecast_dormant: Optional[bool] = None
+
+
+class PastPerformanceCategoryRow(BaseModel):
+    """Per-category rollup across the whole past-performance window.
+
+    One row per ``categoryName`` aggregated from ``items_payload`` --
+    identity-preserving by construction (``sum(categories[*].field)``
+    equals ``sum(items[*].field)`` for every numeric field below).
+
+    ``skus`` is the count of distinct itemCodes inside the category
+    that had ANY activity (load, recommendation, or sale) across the
+    window. Categories with all-zero rows are filtered server-side.
+    """
+    model_config = ConfigDict(extra="forbid")
+    categoryName: str
+    skus: int
+    rep_van_load: float
+    recommended_van_load: float
+    actual_sold: float
+    actual_leftover: float
+    recommended_leftover: float
 
 
 class PastPerformanceResponse(_AvailableEnvelope):
     """Single canonical source for the AccuracyDrawer.
 
-    Carries the three views the drawer needs over one window:
-      * ``daily``   -- per-day rows for the 3-line chart
-      * ``totals``  -- window aggregates for the KPI tiles (units +
-                       holding-cost AED)
-      * ``metrics`` -- derived percentages (forecast accuracy, waste %,
-                       returns) for the KPI tiles
-      * ``items``   -- per-item breakdown over the same window, sorted
-                       by ``leftover_to_next_day`` desc so the items
-                       responsible for the carry surface first.
+    The drawer shows three hero numbers + a one-line insight banner +
+    a daily comparison chart + a category rollup + a per-item table.
+    Everything is server-pre-computed; the client renders verbatim.
+
+      * ``daily``          -- per-day rows for the chart
+      * ``totals``         -- window aggregates for the hero tiles
+      * ``categories``     -- per-category rollup for the (collapsible)
+                              category breakdown table
+      * ``items``          -- per-(item, date) breakdown for the
+                              (collapsible) item-by-item table
     """
     route_code: Optional[str] = None
     start_date: Optional[str] = None
@@ -286,7 +310,7 @@ class PastPerformanceResponse(_AvailableEnvelope):
     active_days: Optional[int] = None
     daily: list[dict[str, Any]] = Field(default_factory=list)
     totals: dict[str, Any] = Field(default_factory=dict)
-    metrics: dict[str, Any] = Field(default_factory=dict)
+    categories: list[PastPerformanceCategoryRow] = Field(default_factory=list)
     items: list[PastPerformanceItem] = Field(default_factory=list)
 
 # ------------------------------------------------------------------
@@ -329,12 +353,27 @@ class VanLoadChartItem(BaseModel):
     predicted: float
 
 class VanLoadTableRow(BaseModel):
-    """One row in the 'Van load items' table, pre-sorted desc by load.
+    """One row in the 'Van load items' table, pre-sorted desc by total
+    truck weight. Carry-aware: rows with ``opening_stock > 0`` and zero
+    fresh load survive (the leftover is real physical inventory).
 
     Single canonical field per concept. Backend has already substituted
     ``recommended_load`` -> ``units_to_load`` and the canonical bound
     column names -> ``lower_bound`` / ``upper_bound``. The client never
     falls back across names.
+
+    Two distinct quantity fields:
+
+      * ``units_to_load``         = fresh allocation the engine recommends
+                                    the depot ISSUE today (post-V5_b).
+                                    Ceil to integer (pack reality).
+      * ``recommended_van_load``  = TOTAL truck weight for the item =
+                                    ``ceil(opening_stock) + units_to_load``.
+                                    The headline number the modal shows.
+
+    Both are needed so the modal can show the math chain transparently:
+    today's fresh load (engine) + yesterday's leftover (carry) = total
+    truck weight.
 
     ``has_real_confidence`` is the server's verdict on whether p_demand
     is a real probability (intermittent/lumpy two-stage classes) vs a
@@ -347,6 +386,7 @@ class VanLoadTableRow(BaseModel):
     item_code: str
     item_name: str
     units_to_load: float
+    recommended_van_load: float
     p_demand: Optional[float] = None
     demand_class: Optional[str] = None
     lower_bound: Optional[float] = None

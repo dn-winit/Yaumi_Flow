@@ -52,27 +52,6 @@ CREATE TABLE [dbo].[yf_demand_forecast] (
     nonzero_ratio   FLOAT,
     mean_qty        FLOAT,
     avg_gap_days    FLOAT,
-    -- Reconciliation columns: persisted by DbPusher AFTER the V5_b
-    -- engine corrects the raw model prediction with bias + opening
-    -- stock. Match the migration script so a fresh deployment created
-    -- from this DDL does NOT need to run the migration.
-    --   * recommended_load   = V5_b reconciled fresh-issuance for the day
-    --   * forecast_corrected = bias-corrected raw forecast
-    --   * bias_pct           = engine-applied bias factor
-    --   * opening_stock      = leftover + today's depot allocation
-    --   * load_lower_bound   = ceil(max(0, q_low/(1+bias) - opening))
-    --   * load_upper_bound   = ceil(max(0, q_high/(1+bias) - opening))
-    -- The two ``load_*_bound`` columns are the bias-corrected, leftover-
-    -- aware quantile band (= the "Likely range" the UI shows alongside
-    -- ``recommended_load``). All six are refreshed daily by the
-    -- reconciliation cron at 03:30 Asia/Dubai, so a fresh deploy starts
-    -- with zeros and self-heals on the next cron tick.
-    recommended_load    FLOAT NOT NULL DEFAULT 0,
-    forecast_corrected  FLOAT NOT NULL DEFAULT 0,
-    bias_pct            FLOAT NOT NULL DEFAULT 0,
-    opening_stock       FLOAT NOT NULL DEFAULT 0,
-    load_lower_bound    FLOAT NOT NULL DEFAULT 0,
-    load_upper_bound    FLOAT NOT NULL DEFAULT 0,
     created_at      DATETIME DEFAULT GETDATE(),
 
     INDEX ix_yf_df_date         (trx_date),
@@ -80,6 +59,63 @@ CREATE TABLE [dbo].[yf_demand_forecast] (
     INDEX ix_yf_df_item         (item_code),
     INDEX ix_yf_df_split        (data_split),
     INDEX ix_yf_df_route_date   (route_code, trx_date)
+);
+GO
+
+-- ==============================================================
+-- yf_sales_transactions: carry chain + actual_sold (past + today)
+-- Owned by reconciliation_refresh cron at 03:30 Asia/Dubai.
+-- One row per (trx_date, route_code, item_code) -- split-agnostic.
+-- ==============================================================
+IF NOT EXISTS (SELECT 1 FROM sys.tables WHERE name='yf_sales_transactions' AND schema_id = SCHEMA_ID('dbo'))
+CREATE TABLE [dbo].[yf_sales_transactions] (
+    id                          BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+    trx_date                    DATE             NOT NULL,
+    route_code                  NVARCHAR(50)     NOT NULL,
+    item_code                   NVARCHAR(50)     NOT NULL,
+
+    -- Our carry chain (policy-driven, carry-aware fresh clamp)
+    opening_stock               FLOAT            NULL,
+    fresh_load                  FLOAT            NULL,
+    total_van_load              FLOAT            NULL,
+    leftover_to_next_day        FLOAT            NULL,
+
+    -- Rep (Yaumi) carry chain (observed: depot allocation + physical closing stock).
+    -- Tracked SEPARATELY from the policy chain above -- the depot's allocation is
+    -- NOT carry-aware, so yaumi_total_van_load can over-load on items the rep
+    -- still has stock of -- diagnostic data only, no derived metric yet.
+    yaumi_opening_stock         FLOAT            NULL,
+    yaumi_fresh_load            FLOAT            NULL,
+    yaumi_total_van_load        FLOAT            NULL,
+    yaumi_leftover              FLOAT            NULL,
+
+    -- Reality
+    actual_sold                 FLOAT            NULL,
+
+    -- Engine math
+    bias_pct                    FLOAT            NULL,
+    forecast_corrected          FLOAT            NULL,
+    expected_demand             FLOAT            NULL,
+    van_load_lower_bound        FLOAT            NULL,
+    van_load_upper_bound        FLOAT            NULL,
+
+    -- Envelope diagnostics
+    recent_daily_avg            FLOAT            NULL,
+    pattern_floor_applied       BIT              NULL,
+    pattern_ceiling_applied     BIT              NULL,
+    forecast_below_recent       BIT              NULL,
+    -- Dormancy guard: True when the (route, item) pair had zero sales
+    -- across its route's last N trip days and the engine zeroed
+    -- expected_demand for it. NULL on pre-backfill rows.
+    forecast_dormant            BIT              NULL,
+
+    -- Audit
+    created_at                  DATETIME         NOT NULL DEFAULT GETDATE(),
+    updated_at                  DATETIME         NULL,
+
+    CONSTRAINT UX_yf_sales_transactions_natural UNIQUE (trx_date, route_code, item_code),
+    INDEX ix_yf_st_route_date (route_code, trx_date),
+    INDEX ix_yf_st_date (trx_date)
 );
 GO
 
@@ -505,54 +541,40 @@ BEGIN
 END
 GO
 
--- yf_demand_forecast: reconciliation columns -----------------------------
--- Each ALTER is guarded so the script is idempotent on existing
--- deployments. Fresh deployments hit the CREATE TABLE branch above and
--- skip these entirely.
+-- Reconciliation columns are NO LONGER on yf_demand_forecast.
+-- They moved to yf_sales_transactions (see CREATE TABLE above) and are
+-- written by reconciliation_refresh at 03:30 Asia/Dubai. Migrations
+-- 0001-0002 are kept in the migrations folder for audit; this fresh-
+-- deploy script no longer re-applies them.
+
+-- yf_sales_transactions: idempotent add of the rep (Yaumi) carry chain
+-- columns. Tracked alongside the policy chain so rep-side analytics
+-- read from a single row.
 IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'recommended_load')
+               WHERE object_id = OBJECT_ID('[dbo].[yf_sales_transactions]')
+                 AND name = 'yaumi_opening_stock')
 BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD recommended_load FLOAT NOT NULL DEFAULT 0;
+    ALTER TABLE [dbo].[yf_sales_transactions] ADD
+        yaumi_opening_stock  FLOAT NULL,
+        yaumi_fresh_load     FLOAT NULL,
+        yaumi_total_van_load FLOAT NULL,
+        yaumi_leftover       FLOAT NULL;
 END
 GO
 
+-- yf_sales_transactions: idempotent add of the dormancy-guard diagnostic.
+-- ``forecast_dormant`` is set True by the daily reconciliation cron when
+-- a (route, item) pair has had zero sales across its route's trailing N
+-- trip days; the engine zeroes expected_demand for it so no fresh load
+-- is recommended (the carry chain still flows through). N is settings-
+-- driven (``DF_DORMANCY_ZERO_SALE_THRESHOLD_TRIP_DAYS``). NULL on rows
+-- written before the column existed; the API serializer treats NULL as
+-- "not yet evaluated" so legacy rows remain consumable.
 IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'forecast_corrected')
+               WHERE object_id = OBJECT_ID('[dbo].[yf_sales_transactions]')
+                 AND name = 'forecast_dormant')
 BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD forecast_corrected FLOAT NOT NULL DEFAULT 0;
-END
-GO
-
-IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'bias_pct')
-BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD bias_pct FLOAT NOT NULL DEFAULT 0;
-END
-GO
-
-IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'opening_stock')
-BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD opening_stock FLOAT NOT NULL DEFAULT 0;
-END
-GO
-
-IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'load_lower_bound')
-BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD load_lower_bound FLOAT NOT NULL DEFAULT 0;
-END
-GO
-
-IF NOT EXISTS (SELECT 1 FROM sys.columns
-               WHERE object_id = OBJECT_ID('[dbo].[yf_demand_forecast]')
-                 AND name = 'load_upper_bound')
-BEGIN
-    ALTER TABLE [dbo].[yf_demand_forecast] ADD load_upper_bound FLOAT NOT NULL DEFAULT 0;
+    ALTER TABLE [dbo].[yf_sales_transactions] ADD
+        forecast_dormant BIT NULL;
 END
 GO

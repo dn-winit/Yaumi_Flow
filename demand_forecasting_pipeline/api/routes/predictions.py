@@ -235,10 +235,11 @@ def get_future_forecast(
     reconciled V5_b value, and drop the helper column.
 
     Lazy fallback: when the DB column is zero (cron skipped, brand-new
-    date, or pre-migration row), we run ``enrich_with_load`` inline so
-    the page never shows an unreconciled number. The result is the same
-    function ``db_pusher`` and the cron use, so the inline value will
-    be byte-identical to what the next cron run will write back.
+    date, or pre-migration row), the ArtifactService's
+    ``van_load_view_enriched`` runs the canonical engine once per
+    mtime window and caches the result -- so the value served here is
+    byte-identical to what the next cron run will write back, with no
+    per-request engine cycles.
 
     Engine intermediates (``forecast_corrected``, ``bias_pct``,
     ``opening_stock``, bounds, demand class, etc.) stay on the row for
@@ -251,17 +252,6 @@ def get_future_forecast(
             success=True, source="future_forecast", total=total,
             data=df.to_dict("records") if not df.empty else [],
         )
-
-    # If the DB-mirror already carries reconciled values, prefer them --
-    # zero CPU cost on the hot path. Detect "stored value present" via
-    # the column existing AND not being uniformly zero (the migration
-    # default for un-pushed rows).
-    have_stored = (
-        "recommended_load" in df.columns
-        and pd.to_numeric(df["recommended_load"], errors="coerce").fillna(0.0).abs().sum() > 0
-    )
-    if not have_stored:
-        df = enrich_with_load(df, predicted_col=pred_col)
 
     # Reconciled-only contract on the wire:
     #   * ``prediction``  carries V5_b reconciled load (was raw model output)

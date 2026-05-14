@@ -116,12 +116,12 @@ class QueryBuilder:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
 
-        # The four reconciliation columns (recommended_load, forecast_corrected,
-        # bias_pct, opening_stock) are guarded with ISNULL so this query keeps
-        # working against an older table shape that hasn't had the migration
-        # applied yet -- the values fall through to 0 and the API path will
-        # recompute them on read. Once the migration lands the real values come
-        # straight from the DB and no recomputation is needed.
+        # ``yf_demand_forecast`` is now purely the model output. The 7
+        # reconciliation columns (recommended_load, forecast_corrected,
+        # bias_pct, opening_stock, load_lower_bound, load_upper_bound,
+        # leftover_to_next_day) live in ``yf_sales_transactions`` -- a
+        # separate table fed by the daily reconciliation cron and the
+        # historical backfill script. See ``sales_transactions()`` below.
         sql = f"""
             SELECT
                 trx_date        AS TrxDate,
@@ -141,13 +141,7 @@ class QueryBuilder:
                 cv2             AS Cv2,
                 nonzero_ratio   AS NonzeroRatio,
                 mean_qty        AS MeanQty,
-                avg_gap_days    AS AvgGapDays,
-                ISNULL(recommended_load,   0) AS RecommendedLoad,
-                ISNULL(forecast_corrected, 0) AS ForecastCorrected,
-                ISNULL(bias_pct,           0) AS BiasPct,
-                ISNULL(opening_stock,      0) AS OpeningStock,
-                ISNULL(load_lower_bound,   0) AS LoadLowerBound,
-                ISNULL(load_upper_bound,   0) AS LoadUpperBound
+                avg_gap_days    AS AvgGapDays
             FROM {self._s.demand_forecast_table} WITH (NOLOCK)
             WHERE route_code IN ({ph})
         """
@@ -161,6 +155,58 @@ class QueryBuilder:
             sql += "  AND trx_date >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
 
+        return sql, params
+
+    # ------------------------------------------------------------------
+    # Sales transactions (carry chain + diagnostics + actual_sold). One
+    # row per (route, item, date) for past + today. Source of truth for
+    # the reconciliation surface; the cron writes here daily and the
+    # explainability modal reads from here.
+    # ------------------------------------------------------------------
+
+    def sales_transactions(
+        self,
+        routes: Optional[List[str]] = None,
+        since_date: Optional[str] = None,
+        lookback_days: Optional[int] = None,
+    ) -> tuple[str, list]:
+        routes = routes or self._s.route_codes
+        ph = self._route_ph(routes)
+        sql = f"""
+            SELECT
+                trx_date                    AS TrxDate,
+                route_code                  AS RouteCode,
+                item_code                   AS ItemCode,
+                opening_stock               AS OpeningStock,
+                fresh_load                  AS FreshLoad,
+                total_van_load              AS TotalVanLoad,
+                leftover_to_next_day        AS LeftoverToNextDay,
+                actual_sold                 AS ActualSold,
+                bias_pct                    AS BiasPct,
+                forecast_corrected          AS ForecastCorrected,
+                expected_demand             AS ExpectedDemand,
+                van_load_lower_bound        AS VanLoadLowerBound,
+                van_load_upper_bound        AS VanLoadUpperBound,
+                recent_daily_avg            AS RecentDailyAvg,
+                CAST(pattern_floor_applied   AS INT) AS PatternFloorApplied,
+                CAST(pattern_ceiling_applied AS INT) AS PatternCeilingApplied,
+                CAST(forecast_below_recent   AS INT) AS ForecastBelowRecent,
+                CAST(forecast_dormant        AS INT) AS ForecastDormant,
+                yaumi_opening_stock        AS YaumiOpeningStock,
+                yaumi_fresh_load           AS YaumiFreshLoad,
+                yaumi_total_van_load       AS YaumiTotalVanLoad,
+                yaumi_leftover             AS YaumiLeftover
+            FROM {self._s.sales_transactions_table} WITH (NOLOCK)
+            WHERE route_code IN ({ph})
+        """
+        params: list = list(routes)
+        if since_date:
+            sql += "  AND trx_date > ?\n"
+            params.append(since_date)
+        else:
+            days = lookback_days or self._s.sales_recent_lookback_days
+            sql += "  AND trx_date >= DATEADD(day, -?, GETDATE())\n"
+            params.append(days)
         return sql, params
 
     # ------------------------------------------------------------------

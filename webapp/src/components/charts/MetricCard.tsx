@@ -6,12 +6,10 @@ type Trend = "up" | "down" | "neutral";
 interface MetricCardProps {
   label: string;
   /** Either a pre-formatted string (animated on change) or an arbitrary
-   *  ReactNode -- e.g. a clickable BreakdownPopover trigger embedded
-   *  alongside text. ReactNode values skip the count-up animation. */
+   *  ReactNode (rendered verbatim, no count-up animation). */
   value: string | number | ReactNode;
   trend?: Trend;
-  /** Same string/ReactNode contract as ``value`` so subtitles can host
-   *  clickable popover triggers without losing the muted typography. */
+  /** Same string/ReactNode contract as ``value``. */
   subtitle?: string | ReactNode;
   className?: string;
   loading?: boolean;

@@ -19,13 +19,39 @@ import math
 import threading
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import pandas as pd
 
 from recommended_order.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
+
+
+# Wire-column names on ``sales_transactions.csv`` (the DB mirror of
+# ``yf_sales_transactions``) used by the van-load fast path. Derived
+# from the canonical wire-schema map in
+# ``demand_forecasting_pipeline.services.storage.file_storage.
+# SALES_TRANSACTIONS_RENAME`` so a column rename on the producer side
+# propagates here automatically (failing loudly via KeyError rather
+# than silently turning into NaN). We expose only the five fields the
+# loader actually touches; the PascalCase form is what the rest of
+# recommended_order already uses for the demand frame.
+from demand_forecasting_pipeline.services.storage.file_storage import (
+    SALES_TRANSACTIONS_RENAME as _DF_RENAME,
+)
+
+_SX_WIRE: Dict[str, str] = {v: k for k, v in _DF_RENAME.items()}  # snake -> Pascal
+
+_SX_COL_TRX_DATE      = _SX_WIRE["trx_date"]
+_SX_COL_ROUTE_CODE    = _SX_WIRE["route_code"]
+_SX_COL_ITEM_CODE     = _SX_WIRE["item_code"]
+_SX_COL_OPENING_STOCK = _SX_WIRE["opening_stock"]
+_SX_COL_FRESH_LOAD    = _SX_WIRE["fresh_load"]
+_SX_REQUIRED_COLS = frozenset({
+    _SX_COL_TRX_DATE, _SX_COL_ROUTE_CODE, _SX_COL_ITEM_CODE,
+    _SX_COL_OPENING_STOCK, _SX_COL_FRESH_LOAD,
+})
 
 
 class DataManager:
@@ -196,20 +222,38 @@ class DataManager:
 
         ``van_load_quantity`` is the rep's **complete physical capacity
         for the day** = ``opening_stock`` (yesterday's closing + today's
-        depot allocation) + ``recommended_load`` (the V5_b fresh-issuance
-        the engine adds on top). Both numbers come from the same
-        canonical reconciliation engine ``enrich_with_load`` so the
-        recommendation engine and the van-load tile see the same total
-        no matter which path computed it.
+        depot allocation) + ``fresh_load`` (the V5_b fresh-issuance the
+        engine adds on top). Without ``opening_stock`` in the sum, an
+        item already covered by leftover stock (``fresh_load == 0``)
+        would be invisible to the recommendation engine -- the rep has
+        physical units to sell but nothing would get recommended.
 
-        Without ``opening_stock`` in the sum, an item already covered by
-        leftover stock (``recommended_load == 0``) would be invisible to
-        the recommendation engine -- the rep has physical units to sell
-        but nothing would get recommended.
+        Two-tier source resolution:
 
-        The forecast frame unions the Forecast and Test splits and takes
-        the per-item max so pairs covered by both never double-count.
-        The helper handles engine fallback internally.
+          1. **Past + today** -- read directly from ``sales_transactions.csv``
+             which mirrors ``yf_sales_transactions`` (carry chain +
+             reconciliation outputs written by the daily refresh cron).
+             ``opening_stock`` there reflects the policy's accumulated
+             leftover walked across the multi-day horizon, NOT a fresh
+             day-1-zero recompute. Re-running ``enrich_with_load`` on a
+             single-day slice here would reset the simulation to day 1
+             and silently produce opening = 0 for every row, which would
+             understate van capacity. The sales-transactions CSV stops
+             at ``today`` by design (no actuals for the future).
+
+          2. **Future horizon** -- ``sales_transactions.csv`` has no
+             row for tomorrow+. Fall through to an inline enrich on the
+             day's forecast slice. Day-1 of the slice starts at
+             opening = 0 (the engine has no historical anchor in that
+             single-day frame), so the resulting van quantity is
+             effectively ``fresh_load`` only. This is the intended
+             contract: no carry chain exists for future dates.
+
+        The forecast frame is the single SOT for which (route, item)
+        pairs exist on a given day -- the lookup keys the
+        sales-transactions join. Forecast and Test splits are unioned
+        upstream in ``van_load_view``; here we just take the demand
+        slice for the requested date.
         """
         demand = self.get_demand_data(route_code)
         if demand.empty:
@@ -220,43 +264,42 @@ class DataManager:
         if same_day.empty:
             return {}
 
-        # Prefer the DB-mirrored counterfactual values straight from the
-        # CSV. ``RecommendedLoad`` and ``OpeningStock`` are written by
-        # the reconciliation refresh cron after a full forward
-        # simulation per (route, item) -- ``OpeningStock`` reflects our
-        # policy's accumulated leftover walked across the multi-day
-        # horizon, NOT a fresh day-1-zero recompute. Re-running
-        # ``enrich_with_load`` here on a single-day slice would reset
-        # the simulation to day 1 and silently produce opening = 0 for
-        # every row, which would understate van capacity.
-        #
-        # Fallback (cold install, or refresh hasn't run yet): inline
-        # enrich on the day's slice. Degraded -- opening will be 0 --
-        # but no worse than the column-absent path that already lived
-        # here.
-        has_recload  = "RecommendedLoad" in same_day.columns
-        has_opening  = "OpeningStock"    in same_day.columns
-        if has_recload and has_opening:
-            per_item = (
-                same_day.groupby("ItemCode", as_index=False)
-                .agg({"RecommendedLoad": "max", "OpeningStock": "max"})
-            )
+        # ---- Tier 1: past + today -- sales_transactions.csv is canonical ----
+        sx_idx = self._sales_transactions_index()
+        if sx_idx:
+            key_date = pd.Timestamp(target_dt)
+            # Restrict to items that the forecast actually surfaces for
+            # this (route, date). Items present in sales_transactions but
+            # absent from today's forecast are stale leftovers -- the
+            # rep may still have them on the van, but they shouldn't be
+            # recommended for sale today.
+            items_today = same_day["ItemCode"].astype(str).unique()
+            route_key = str(route_code)
             out: Dict[str, int] = {}
-            for r in per_item.itertuples(index=False):
-                fresh   = float(getattr(r, "RecommendedLoad") or 0.0)
-                opening = float(getattr(r, "OpeningStock")    or 0.0)
-                total = max(0.0, fresh + opening)
+            hits = 0
+            for item in items_today:
+                row = sx_idx.get((route_key, str(item), key_date))
+                if row is None:
+                    continue
+                hits += 1
+                fresh, opening = row
+                total = max(0.0, float(fresh) + float(opening))
                 if total > 0:
                     # Ceil so a 35.28-unit truck capacity reads as 36,
                     # not 35. Matches the DB-canonical contract that
                     # quantity columns round to the next whole unit and
-                    # the load_lower_bound / load_upper_bound rounding
-                    # in the engine, so forecast (FLOAT) and rec (INT)
-                    # surfaces align byte-for-byte.
-                    out[str(r.ItemCode)] = int(math.ceil(total))
-            return out
+                    # the van_load_lower_bound / van_load_upper_bound
+                    # rounding in the engine, so forecast (FLOAT) and
+                    # rec (INT) surfaces align byte-for-byte.
+                    out[str(item)] = int(math.ceil(total))
+            if hits > 0:
+                return out
+            # Index loaded but had no rows for this (route, date) =>
+            # the request is on the forecast horizon (future). Fall
+            # through to the inline-enrich path which handles future
+            # dates with opening = 0 by construction.
 
-        # ---- Degraded fallback: inline enrich (refresh hasn't run) ----
+        # ---- Tier 2: future horizon -- inline enrich (no carry chain) ----
         agg_map = {"Predicted": "max"}
         for col in ("LowerBound", "UpperBound"):
             if col in same_day.columns:
@@ -269,7 +312,12 @@ class DataManager:
             .assign(RouteCode=str(route_code), TrxDate=target_dt)
         )
         enriched = self.reconcile_demand_frame(per_item)
-        load_col = "RecommendedLoad" if "RecommendedLoad" in enriched.columns else "Predicted"
+        # ``enrich_with_load`` populates ``recommended_load`` (snake_case)
+        # as the output column and ``opening_stock`` as a diagnostic. The
+        # diagnostic is 0 for future dates by design (no historical
+        # anchor in a single-day slice). Use ``Predicted`` if the engine
+        # was unavailable and the helper degraded to the no-op path.
+        load_col = "recommended_load" if "recommended_load" in enriched.columns else "Predicted"
         has_opening_col = "opening_stock" in enriched.columns
         out: Dict[str, int] = {}
         for r in enriched.itertuples(index=False):
@@ -281,6 +329,107 @@ class DataManager:
         return out
 
     # ------------------------------------------------------------------
+    # Sales-transactions index (mtime-cached)
+    # ------------------------------------------------------------------
+    #
+    # The carry chain + reconciliation outputs moved from
+    # ``yf_demand_forecast`` into ``yf_sales_transactions``. We mirror
+    # the latter to ``data/imports/sales_transactions.csv`` via
+    # data_import. This index is parsed once per file revision per
+    # process so every ``get_van_items`` call is O(1) lookups.
+    # ------------------------------------------------------------------
+
+    _SX_LOCK = threading.Lock()
+    _SX_INDEX: Optional[Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]]] = None
+    _SX_MTIME: Optional[float] = None
+    _SX_SIZE: Optional[int] = None
+
+    def _sales_transactions_index(
+        self,
+    ) -> Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]]:
+        """Per-(route, item, date) -> (fresh_load, opening_stock) lookup.
+
+        Returns an empty dict if the mirror CSV is missing / empty /
+        unparseable -- callers must treat that as "fall through to the
+        inline enrich path", not as "no van today".
+        """
+        filename = getattr(self._settings, "sales_transactions_file", "sales_transactions.csv")
+        path = Path(self._settings.shared_data_dir) / filename
+        if not path.exists():
+            return {}
+        stat = path.stat()
+        with self._SX_LOCK:
+            if (
+                self._SX_INDEX is not None
+                and self._SX_MTIME == stat.st_mtime
+                and self._SX_SIZE == stat.st_size
+            ):
+                return self._SX_INDEX
+        try:
+            df = pd.read_csv(
+                path, low_memory=False,
+                usecols=lambda c: c in _SX_REQUIRED_COLS,
+            )
+        except Exception as exc:
+            logger.warning(
+                "sales_transactions index build failed (%s); falling back to inline enrich",
+                exc,
+            )
+            return {}
+        # Schema guard: any required column missing means the mirror is
+        # malformed or the canonical schema drifted -- log loudly and
+        # degrade to inline enrich rather than silently mis-aligning.
+        missing = _SX_REQUIRED_COLS - set(df.columns)
+        if missing:
+            logger.warning(
+                "sales_transactions mirror missing columns %s; falling back to inline enrich",
+                sorted(missing),
+            )
+            return {}
+        if df.empty:
+            empty: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]] = {}
+            with self._SX_LOCK:
+                DataManager._SX_INDEX = empty
+                DataManager._SX_MTIME = stat.st_mtime
+                DataManager._SX_SIZE = stat.st_size
+            return empty
+        # Normalise join keys identical to the way ``_normalize`` treats
+        # the demand frame so the (route, item, date) tuple lookup hits.
+        df[_SX_COL_ROUTE_CODE] = df[_SX_COL_ROUTE_CODE].astype(str).str.strip()
+        df[_SX_COL_ITEM_CODE]  = df[_SX_COL_ITEM_CODE].astype(str).str.strip()
+        df[_SX_COL_TRX_DATE]   = pd.to_datetime(df[_SX_COL_TRX_DATE], errors="coerce").dt.normalize()
+        df = df.dropna(subset=[_SX_COL_TRX_DATE])
+        df[_SX_COL_FRESH_LOAD]    = pd.to_numeric(df[_SX_COL_FRESH_LOAD],    errors="coerce").fillna(0.0)
+        df[_SX_COL_OPENING_STOCK] = pd.to_numeric(df[_SX_COL_OPENING_STOCK], errors="coerce").fillna(0.0)
+        # Defensive dedup: the upstream cron emits one row per
+        # (route, item, date); if a backfill ever produces dupes, we
+        # take the max so a partial overwrite never loses the larger
+        # van quantity. Matches the ``"max"`` agg the legacy fast path
+        # used on the forecast frame.
+        agg = (
+            df.groupby(
+                [_SX_COL_ROUTE_CODE, _SX_COL_ITEM_CODE, _SX_COL_TRX_DATE],
+                sort=False,
+            )
+            .agg({_SX_COL_FRESH_LOAD: "max", _SX_COL_OPENING_STOCK: "max"})
+        )
+        idx: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]] = {
+            (str(r), str(i), pd.Timestamp(d)): (float(f), float(o))
+            for (r, i, d), (f, o) in zip(
+                agg.index,
+                zip(
+                    agg[_SX_COL_FRESH_LOAD].to_numpy(),
+                    agg[_SX_COL_OPENING_STOCK].to_numpy(),
+                ),
+            )
+        }
+        with self._SX_LOCK:
+            DataManager._SX_INDEX = idx
+            DataManager._SX_MTIME = stat.st_mtime
+            DataManager._SX_SIZE = stat.st_size
+        return idx
+
+    # ------------------------------------------------------------------
     # Bulk reconciliation -- thin wrapper around the single canonical
     # helper. Engine fallback, closing-stock caching, and the V5_b
     # formula all live there. This module just hands off the frame.
@@ -288,17 +437,20 @@ class DataManager:
 
     @staticmethod
     def reconcile_demand_frame(df: pd.DataFrame) -> pd.DataFrame:
-        """Return a copy of ``df`` with a ``RecommendedLoad`` column.
+        """Return a copy of ``df`` with a ``recommended_load`` column.
 
         ``df`` must carry ``RouteCode``, ``ItemCode``, ``TrxDate`` and
-        ``Predicted``. The helper fills ``RecommendedLoad`` with the
+        ``Predicted``. The helper fills ``recommended_load`` with the
         clipped raw forecast if the engine can't load, so callers never
-        need a separate fallback path.
+        need a separate fallback path. Output column name matches the
+        snake_case convention ``enrich_with_load`` uses by default, which
+        in turn matches the alias the artifact_service's van_load_view
+        emits -- one shared name across the whole stack.
         """
         if df is None or df.empty:
             return df
         from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
-        return enrich_with_load(df, output_col="RecommendedLoad")
+        return enrich_with_load(df, output_col="recommended_load")
 
     def get_item_names(self, route_code: Optional[str] = None) -> Dict[str, str]:
         """Return {ItemCode: ItemName} lookup.

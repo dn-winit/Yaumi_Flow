@@ -78,7 +78,3 @@ class RecommendedOrderClient:
         if not payload.get("success"):
             return []
         return payload.get("data") or []
-
-    def invalidate(self) -> None:
-        with self._lock:
-            self._cache.clear()

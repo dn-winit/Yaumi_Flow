@@ -11,8 +11,18 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
-import pyodbc
 
+# Cross-service import: the AIML connection pool lives in
+# demand_forecasting_pipeline because it was the first writer; every
+# other AIML writer (this module, sales_supervision/db_saver) now
+# routes through the same factory so a single semaphore bounds
+# concurrent connections across services. The shared infra import
+# is already established (recommended_order/data/manager.py imports
+# the reconciliation engine from demand_forecasting_pipeline).
+from demand_forecasting_pipeline.services.db_pool import (
+    FATAL_DB_ERRORS as _POOL_FATAL_ERRORS,
+    get_pool,
+)
 from recommended_order.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -92,13 +102,21 @@ class DbPusher:
     def available(self) -> bool:
         return bool(self._db.host and self._db.username and self._s.recommendation_table)
 
-    def _connect(self) -> pyodbc.Connection:
-        """Open a transaction-mode connection with the configured query
-        timeout already applied. Centralised so every caller gets the
-        same shape -- no per-call ``conn.timeout =`` reminders."""
-        conn = pyodbc.connect(self._db.aiml_connection_string, autocommit=False)
-        conn.timeout = self._db.query_timeout
-        return conn
+    def _pool(self):
+        """Resolve (and lazily create) the shared AIML pool for this
+        pusher's connection string. Sized to ``retry_attempts + 1`` so a
+        retry storm never starves a concurrent writer, with a floor of 4
+        to keep room for the reconciliation cron and the page-view
+        readers running on the same DSN. Pool sizing only takes effect
+        on the first ``get_pool`` call for a given (conn_str, autocommit)
+        key; later callers return the existing pool unchanged."""
+        return get_pool(
+            self._db.aiml_connection_string,
+            max_connections=max(int(self._db.retry_attempts) + 1, 4),
+            connect_timeout=int(self._db.connection_timeout),
+            query_timeout=int(self._db.query_timeout),
+            autocommit=False,
+        )
 
     def push_dataframe(self, df: pd.DataFrame, date: str, route_code: str) -> Dict[str, Any]:
         """Push a DataFrame directly (called after generation)."""
@@ -142,32 +160,43 @@ class DbPusher:
         records = _dataframe_to_records(db_df, _DB_COLUMNS)
         chunk = self._db.executemany_chunk_size
 
+        pool = self._pool()
         last_error: Optional[str] = None
         for attempt in range(1, self._db.retry_attempts + 1):
-            conn: Optional[pyodbc.Connection] = None
             try:
-                conn = self._connect()
-                cursor = conn.cursor()
-                cursor.fast_executemany = True
-                cursor.execute(delete_sql, delete_params)
-                for i in range(0, len(records), chunk):
-                    cursor.executemany(insert_sql, records[i : i + chunk])
-                conn.commit()
+                # ``pool.acquire()`` is a context manager: the underlying
+                # connection is always closed on exit (returning the
+                # ODBC socket to the driver-level cache for the next
+                # acquire), and the bounding semaphore is released even
+                # if the body raises -- no leak on exception.
+                with pool.acquire() as conn:
+                    cursor = conn.cursor()
+                    cursor.fast_executemany = True
+                    try:
+                        cursor.execute(delete_sql, delete_params)
+                        for i in range(0, len(records), chunk):
+                            cursor.executemany(insert_sql, records[i : i + chunk])
+                        conn.commit()
+                    except Exception:
+                        # Roll back BEFORE the connection closes so the
+                        # DELETE in this transaction never persists when
+                        # the INSERT half fails. Pool exit then closes
+                        # the (now-clean) connection.
+                        try:
+                            conn.rollback()
+                        except Exception:
+                            pass
+                        raise
 
                 duration = round(time.time() - t0, 2)
                 logger.info("Pushed %d recs to %s for %s in %.1fs", len(records), table, date, duration)
                 return {"success": True, "table": table, "rows": len(records), "duration_seconds": duration}
-            except (pyodbc.ProgrammingError, pyodbc.DataError, pyodbc.IntegrityError) as exc:
+            except _POOL_FATAL_ERRORS as exc:
                 # Bad SQL / bad data -- retrying is futile and the upstream
                 # caller deserves a fast, accurate failure response.
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.error("Push fatal error for %s/%s (no retry): %s",
                              date, route_code or "ALL", exc)
-                if conn is not None:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
                 break
             except Exception as exc:
                 last_error = str(exc)
@@ -175,19 +204,8 @@ class DbPusher:
                     "Push attempt %d/%d failed for %s/%s (transient): %s",
                     attempt, self._db.retry_attempts, date, route_code or "ALL", exc,
                 )
-                if conn is not None:
-                    try:
-                        conn.rollback()
-                    except Exception:
-                        pass
                 if attempt < self._db.retry_attempts:
                     time.sleep(self._db.retry_delay * attempt)
-            finally:
-                if conn is not None:
-                    try:
-                        conn.close()
-                    except Exception as close_exc:
-                        logger.warning("conn.close() failed: %s", close_exc)
 
         return {"success": False, "error": last_error or "All push attempts failed"}
 

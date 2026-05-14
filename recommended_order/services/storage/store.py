@@ -41,11 +41,14 @@ class RecommendationStore:
     # ------------------------------------------------------------------
 
     def save(self, df: pd.DataFrame, date: str, route_code: str) -> Dict[str, Any]:
-        """Persist a route's recommendations for a date to CSV."""
+        """Atomic write: tmp + os.replace so concurrent readers never see a partial file."""
         if df.empty:
             return {"success": False, "records_saved": 0}
+        import os
         path = self._path(date, route_code)
-        df.to_csv(path, index=False)
+        tmp_path = path.with_suffix(path.suffix + ".tmp")
+        df.to_csv(tmp_path, index=False)
+        os.replace(tmp_path, path)
         logger.info("Saved %d recs to %s", len(df), path)
         return {"success": True, "records_saved": len(df), "path": str(path)}
 

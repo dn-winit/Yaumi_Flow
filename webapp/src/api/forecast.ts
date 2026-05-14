@@ -69,26 +69,33 @@ export interface VanLoadChartItem {
 }
 
 /**
- * One row in the 'Van load items' table. Pre-sorted desc by load.
- * Single canonical field per concept -- the server has substituted
- * recommended_load -> units_to_load and the bound names so the client
- * never falls back across columns. ``has_real_confidence`` is the
- * server's verdict on whether the badge should render (real probability
- * vs synthetic 0/1).
+ * One row in the 'Van load items' table. Pre-sorted desc by total
+ * truck weight. Carry-aware: pure-carry rows (no fresh load but
+ * yesterday's leftover is on the truck) surface here so the table
+ * sum matches the tile.
+ *
+ * Two distinct quantity fields:
+ *   - ``units_to_load``        = fresh allocation the depot issues today
+ *                                (engine recommendation, ceil to integer)
+ *   - ``recommended_van_load`` = TOTAL truck weight for the item
+ *                                = ceil(opening_stock) + units_to_load.
+ *                                The modal headline shows this.
+ *
+ * ``has_real_confidence`` is the server's verdict on whether the
+ * badge should render (real probability vs synthetic 0/1).
  */
 export interface VanLoadTableRow {
   item_code: string;
   item_name: string;
   units_to_load: number;
+  recommended_van_load: number;
   p_demand: number | null;
   demand_class: string | null;
   lower_bound: number | null;
   upper_bound: number | null;
   has_real_confidence: boolean;
-  /** Engine intermediates for the explainability modal:
-   *  opening_stock, predicted_raw, forecast_corrected, bias_pct,
-   *  recent_avg_per_selling_day, expected_demand,
-   *  pattern_floor_applied, pattern_ceiling_applied,
+  /** Business-facing fields for the explainability modal:
+   *  opening_stock, recent_avg_per_selling_day, expected_demand,
    *  forecast_below_recent, guard_skipped. The table itself never
    *  reads these -- they're spread onto the legacy Row passed to
    *  ExplainabilityModal. */

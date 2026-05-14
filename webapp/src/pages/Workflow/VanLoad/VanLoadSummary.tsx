@@ -1,51 +1,22 @@
 import MetricCard from "@/components/charts/MetricCard";
 import KpiRow from "@/components/ui/KpiRow";
 import InfoBubble from "@/components/ui/InfoBubble";
-import BreakdownPopover, {
-  type BreakdownValueField,
-} from "@/components/ui/BreakdownPopover";
 
 import { fmtNum, fmtCurrency, fmtBps, AT_RISK_CONFIDENCE } from "@/lib/format";
 import type { VanLoadSummaryView } from "@/api/forecast";
-import type { PastPerformanceItem } from "@/types/forecast";
 
 interface Props {
   /** Pre-computed summary from the backend page-view endpoint. The
    *  server has already enforced van_load_qty == carried_qty +
    *  issued_qty, so the tile and the chart on this page cannot disagree. */
   summary: VanLoadSummaryView;
-  /** Per-(item, date) rows for the click-to-explain popovers on this
-   *  tile. Scoped to a single date (the page's date) -- one row per
-   *  item. Comes straight off the page-view wire; the tile does not
-   *  filter or sort. */
-  items: PastPerformanceItem[];
-  /** ISO date string the tile is scoped to. Rendered in each popover
-   *  sub-header so the user always sees which day the rows are for. */
-  date: string;
 }
 
-export default function VanLoadSummary({ summary, items, date }: Props) {
-  // Single-line sub-header used on every popover for this tile. Date
-  // comes straight off the page-view wire; the tile does not format
-  // beyond prefixing "Window:" for parity with the past-performance
-  // surface (single-day window).
-  const popoverWindow = `Window: ${date}`;
-
-  // Helper to wrap a single quantity in a popover trigger. The "across
-  // Y items" caption stays plain text -- only the quantity is clickable.
-  const numClick = (
-    value: number,
-    title: string,
-    field: BreakdownValueField,
-  ) => (
-    <BreakdownPopover
-      trigger={<span className="tabular-nums">{fmtNum(value)}</span>}
-      title={title}
-      windowLabel={popoverWindow}
-      items={items}
-      valueField={field}
-      totalValue={value}
-    />
+export default function VanLoadSummary({ summary }: Props) {
+  // Plain-number render -- the per-(item, date) breakdown popover was
+  // removed by request, so every KPI is just the wire total formatted.
+  const num = (value: number) => (
+    <span className="tabular-nums">{fmtNum(value)}</span>
   );
 
   return (
@@ -54,11 +25,7 @@ export default function VanLoadSummary({ summary, items, date }: Props) {
         label="Recommended van load"
         value={
           <span className="inline-flex items-baseline gap-1.5">
-            {numClick(
-              summary.van_load_qty,
-              "Recommended van load breakdown",
-              "recommended_van_load",
-            )}
+            {num(summary.van_load_qty)}
             <span className="text-body font-normal text-text-tertiary">
               across {fmtNum(summary.van_load_items)} item
               {summary.van_load_items === 1 ? "" : "s"}
@@ -68,17 +35,9 @@ export default function VanLoadSummary({ summary, items, date }: Props) {
         subtitle={
           <span>
             {"Carried from yesterday: "}
-            {numClick(
-              summary.carried_qty,
-              "Carried from yesterday breakdown",
-              "recommended_carried",
-            )}
+            {num(summary.carried_qty)}
             {` across ${fmtNum(summary.carried_items)} item${summary.carried_items === 1 ? "" : "s"} - Fresh from depot: `}
-            {numClick(
-              summary.issued_qty,
-              "Fresh from depot breakdown",
-              "recommended_fresh",
-            )}
+            {num(summary.issued_qty)}
             {` across ${fmtNum(summary.issued_items)} item${summary.issued_items === 1 ? "" : "s"}`}
           </span>
         }
@@ -87,11 +46,9 @@ export default function VanLoadSummary({ summary, items, date }: Props) {
             title="What is the recommended van load?"
             body={
               <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                <p>The total stock the engine recommends be on the truck for this route+date: yesterday&apos;s leftover already on the van plus the fresh allocation depot should issue today.</p>
+                <p>The total stock we recommend on the truck for this route + date: yesterday&apos;s leftover already on the van plus the fresh stock the depot should issue today.</p>
                 <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                  recommended_van_load  =  carried_from_yesterday  +  fresh_from_depot<br />
-                  fresh_from_depot       =  max(0, P_corrected - leftover)<br />
-                  P_corrected            =  Predicted / (1 + bias_pct)
+                  total van load  =  carried over  +  fresh from depot
                 </p>
                 <p>Same number rendered on the Past-performance drawer&apos;s headline tile and used as the input to the Recommendation-match accuracy metric there - one recommendation, one definition.</p>
               </div>
@@ -135,21 +92,18 @@ export default function VanLoadSummary({ summary, items, date }: Props) {
         }
       />
       <MetricCard
-        label="Risky items"
+        label="Items unlikely to sell"
         value={fmtNum(summary.at_risk)}
-        subtitle={`Below ${fmtBps(AT_RISK_CONFIDENCE)} chance of selling`}
+        subtitle={`Less than ${fmtBps(AT_RISK_CONFIDENCE)} chance of selling today`}
         trend={summary.at_risk === 0 ? "up" : "down"}
         info={
           <InfoBubble
-            title="What makes an item risky?"
+            title="What does 'unlikely to sell' mean?"
             body={
               <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                <p>An item on the load whose model probability of selling on this date falls below {fmtBps(AT_RISK_CONFIDENCE)}.</p>
-                <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                  risky_items  =  count{`{ p_demand < ${AT_RISK_CONFIDENCE} }`}
-                </p>
-                <p><code>p_demand</code> is a real probability only for two-stage classes (intermittent, lumpy). Smooth and erratic items emit a synthetic 0/1 signal - those are excluded from the risky count so the metric isn&apos;t skewed by binary fallbacks.</p>
-                <p>Use the count as a watchlist: a high number means the supervisor should review whether those items are worth loading.</p>
+                <p>Items loaded on the truck today that our forecast estimates have less than a {fmtBps(AT_RISK_CONFIDENCE)} chance of selling.</p>
+                <p>Use this as a quick watchlist — if the number is high, the supervisor may want to review whether those items are worth taking on the route, or are likely to come back at end of day.</p>
+                <p>Only items the model can score with a real probability are counted (consistently slow or sporadic sellers). Steadily-selling items are excluded since their probability is essentially &quot;always sells&quot;.</p>
               </div>
             }
           />

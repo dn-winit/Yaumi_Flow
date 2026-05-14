@@ -37,6 +37,10 @@ _DATASETS = {
     "journey_plan":    ("journey_plan_file",    "JourneyDate", "journey_plan",    "live", ("RouteCode", "CustomerCode", "JourneyDate")),
     "sales_recent":    ("sales_recent_file",    "TrxDate",     "sales_recent",    "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate")),
     "demand_forecast": ("demand_forecast_file", "TrxDate",     "demand_forecast", "aiml", ("RouteCode", "ItemCode", "TrxDate", "DataSplit")),
+    # Sales-transactions mirror: carry chain + diagnostics + actual_sold
+    # for past + today (yf_sales_transactions). One row per (route, item,
+    # date) -- split-agnostic.
+    "sales_transactions": ("sales_transactions_file", "TrxDate", "sales_transactions", "aiml", ("RouteCode", "ItemCode", "TrxDate")),
     # Van-stock reconciliation inputs
     "closing_stock":   ("closing_stock_file",   "TrxDate",     "closing_stock",   "live", ("RouteCode", "ItemCode", "TrxDate")),
     "load_allocation": ("load_allocation_file", "TrxDate",     "load_allocation", "live", ("RouteCode", "ItemCode", "TrxDate")),

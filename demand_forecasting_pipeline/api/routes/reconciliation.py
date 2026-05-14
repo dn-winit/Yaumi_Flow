@@ -10,9 +10,8 @@ Four GET/POST endpoints, all dynamic and parameterised:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
-import numpy as np
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
 
@@ -23,6 +22,7 @@ from demand_forecasting_pipeline.api.dependencies import (
     get_van_load_service,
 )
 from demand_forecasting_pipeline.api.schemas import (
+    PastPerformanceCategoryRow,
     PastPerformanceItem,
     PastPerformanceResponse,
     ReconciliationResponse,
@@ -32,7 +32,6 @@ from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
 from demand_forecasting_pipeline.services.reconciliation.bias_service import BiasService
 from demand_forecasting_pipeline.services.reconciliation.engine import ReconciliationEngine
-from demand_forecasting_pipeline.services.reconciliation.enrich import forward_fill_closing
 from demand_forecasting_pipeline.services.reconciliation.van_load_service import VanLoadService
 from demand_forecasting_pipeline.services.reconciliation_refresh import refresh_reconciliation
 
@@ -48,26 +47,20 @@ _DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
 @router.post("/refresh")
 def manual_refresh(
-    horizon_days_ahead: Optional[int] = Query(
-        None, ge=1, le=365,
-        description="Days forward from today (defaults to "
-                    "reconciliation_refresh_horizon_days)",
+    horizon_days_behind: int = Query(
+        0, ge=0, le=365,
+        description="Days back from today. 0 = today only; daily cron "
+                    "default is 1 (today + yesterday). Wider values "
+                    "back-fill past dates.",
     ),
-    horizon_days_behind: int = Query(0, ge=0, le=365),
 ) -> Dict[str, Any]:
     """Manually run the reconciliation refresh -- same code path the
-    daily cron uses. Useful for backfills, post-import top-ups, or ad-hoc
-    refreshes after a closing-stock correction.
+    daily cron uses. Writes to yf_sales_transactions for past + today.
+    Future dates are out of scope by design (no transactions yet).
     """
-    s = get_settings()
     return refresh_reconciliation(
-        horizon_days_ahead=int(
-            horizon_days_ahead
-            if horizon_days_ahead is not None
-            else s.reconciliation_refresh_horizon_days
-        ),
         horizon_days_behind=int(horizon_days_behind),
-        settings=s,
+        settings=get_settings(),
     )
 
 @router.get("/van-load", response_model=VanLoadResponse)
@@ -154,7 +147,6 @@ def recommend(
 
     out_items = []
     rec_total = 0.0
-    forecast_total = 0.0
     # Recommended-side breakdown (mirrors actual side: carried + fresh).
     # Counts and quantities come out of one pass so the totals can never
     # drift from the items list.
@@ -221,7 +213,6 @@ def recommend(
 
         out_items.append(merged)
         rec_total += rec.recommended_load
-        forecast_total += rec.forecast_raw
 
         if rec.opening_stock > 0:
             rec_carried_qty += rec.opening_stock
@@ -240,10 +231,9 @@ def recommend(
                    reverse=True)
 
     totals = dict(composition.get("totals", {}))
-    # ``forecast_total`` (raw model sum) is intentionally NOT exposed --
-    # the wire contract is reconciled-only. ``rec_total`` carries the
-    # V5_b-reconciled per-route sum, ``recommended_van_load_total``
-    # below carries reconciled + leftover.
+    # Reconciled-only wire contract: only the V5_b-reconciled total
+    # leaves the backend. ``rec_total`` is the per-route sum;
+    # ``recommended_van_load_total`` below carries reconciled + leftover.
     totals["recommended_load_total"] = round(rec_total, 2)
     # Recommended-side totals -- shape mirrors the actual van composition
     # so the UI can render the two cards from one shared component.
@@ -395,22 +385,44 @@ def past_performance(
         "Predicted"  if "Predicted"  in fc_df.columns else
         None
     )
-    # ``fc_df_full`` is the route-scoped frame BEFORE the window filter,
-    # kept so the per-item leftover lookup at items[] payload time can
-    # read ``opening_stock`` on ``last_day_in_window + 1`` (which sits
-    # outside the window). Same row enrich_with_load writes the canonical
-    # actuals-grounded next-day opening into.
+    # ``fc_df_full`` retains rows for the day immediately AFTER the window
+    # so the per-(item, date) carry-out lookup below can read
+    # ``opening_stock[d+1]`` -- the SAME persisted column the Van Load tile
+    # renders as "Carried from yesterday" on day+1. Reading this here
+    # (instead of the in-row ``leftover_to_next_day[d]``) eliminates the
+    # cross-pass drift: ``opening_stock[d+1]`` is written by the day+1
+    # reconciliation with fresher inputs, so it's the canonical answer
+    # to "what carries from d into d+1". One source per concept.
     fc_df_full = fc_df
     if not fc_df.empty and pred_col is not None:
         fc_df = fc_df.copy()
         fc_df["TrxDate"] = pd.to_datetime(fc_df["TrxDate"], errors="coerce").dt.normalize()
-        fc_df = fc_df[fc_df[pred_col] > 0]
+        # Carry-aware scope: keep rows with ANY truck contribution -- fresh
+        # load (engine recommendation > 0) OR opening stock (yesterday's
+        # leftover already on the truck). Pure-carry items (Predicted == 0
+        # but opening > 0) are real physical inventory the rep manages
+        # today; dropping them silently under-reports rep_van_load and
+        # our_van_load by the carry sum. Same filter ``van_load_view``
+        # applies upstream -- this line reasserts it after the artifact
+        # layer's optional filtering. The earlier ``Predicted > 0`` rule
+        # was the same bug ``van_load_view`` had been carrying around in
+        # 2026-Q1 (route 9209 lost ~7.8k units of hidden carry that way).
+        rec_load = pd.to_numeric(
+            fc_df.get("recommended_load", 0), errors="coerce",
+        ).fillna(0.0)
+        opening = pd.to_numeric(
+            fc_df.get("opening_stock", 0), errors="coerce",
+        ).fillna(0.0)
+        fc_df = fc_df[(rec_load + opening) > 0]
         fc_df["RouteCode"] = fc_df["RouteCode"].astype(str)
         fc_df["ItemCode"]  = fc_df["ItemCode"].astype(str)
+        # fc_df_full keeps a route-scoped, carry-aware view for cross-day
+        # lookups (next-day opening_stock); fc_df itself stays window-only.
         fc_df_full = fc_df.copy()
         fc_df = fc_df[fc_df.TrxDate.isin(window_dates)]
         if item_whitelist is not None:
             fc_df = fc_df[fc_df.ItemCode.isin(item_whitelist)]
+            fc_df_full = fc_df_full[fc_df_full.ItemCode.isin(item_whitelist)]
 
     # ---- Per-item closing index (direct, single-day lookup) ----------
     # Rule, validated empirically against 21,073 (item, day) cells:
@@ -434,53 +446,6 @@ def past_performance(
     # back-test's recommendation. The CSV pull covers (lookback + 1)
     # extra days before window start so the first day in the window has
     # ffill source available.
-    ffill_days = int(settings.opening_stock_lookback_days)
-    closing_full = van._load_csv(van._s.closing_stock_file)
-    closing_pivot: pd.DataFrame | None = None
-    if not closing_full.empty and "ClosingQty" in closing_full.columns:
-        cl = closing_full.copy()
-        cl["RouteCode"] = cl.RouteCode.astype(str)
-        cl["ItemCode"]  = cl.ItemCode.astype(str)
-        cl = cl[(cl.RouteCode == rcode)
-                & (cl.TrxDate >= start_dt - pd.Timedelta(days=ffill_days + 1))
-                & (cl.TrxDate <= end_dt)]
-        if not cl.empty:
-            cl_filled = forward_fill_closing(
-                cl[["RouteCode", "ItemCode", "TrxDate", "ClosingQty"]],
-                ffill_days,
-            )
-            closing_pivot = cl_filled.pivot_table(
-                index="TrxDate", columns="ItemCode",
-                values="ClosingQty", aggfunc="sum",
-            )
-
-    def opening_for(d: pd.Timestamp, item: str) -> float:
-        """ClosingQty for (route, item) on day d-1, else 0."""
-        if closing_pivot is None:
-            return 0.0
-        prev = d - pd.Timedelta(days=1)
-        if prev not in closing_pivot.index or item not in closing_pivot.columns:
-            return 0.0
-        v = closing_pivot.at[prev, item]
-        return float(v) if pd.notna(v) else 0.0
-
-    def opening_total_for(
-        d: pd.Timestamp, item_set: set[str] | None = None,
-    ) -> float:
-        """Sum of opening_for across items on day ``d``."""
-        if closing_pivot is None:
-            return 0.0
-        prev = d - pd.Timedelta(days=1)
-        if prev not in closing_pivot.index:
-            return 0.0
-        row_prev = closing_pivot.loc[prev]
-        if item_set is not None:
-            cols = [c for c in row_prev.index if c in item_set]
-            if not cols:
-                return 0.0
-            return float(row_prev[cols].fillna(0.0).sum())
-        return float(row_prev.fillna(0.0).sum())
-
     # ---- Anchor item set -----------------------------------------------
     # ``anchor_items`` -- the (route, item) pairs with Predicted > 0 in
     # the window -- is the ONLY scope this endpoint compares. Items the
@@ -511,10 +476,10 @@ def past_performance(
             active_days=0,
         )
 
-    # ---- Per-(route, item) aggregates over the window, scoped to the
-    #      anchor set. Single helper, single semantic -- the rep numbers
-    #      and our numbers come out of identical filters.
-    alloc_df = van._load_csv(van._s.load_allocation_file)
+    # ---- Sales CSV for price + coverage lookups (item catalog source).
+    # Rep van load, today's allocation, and actual sold all flow through
+    # ``fc_df`` (= yf_sales_transactions via the sales_transactions.csv
+    # mirror) -- single source, identical to what the cron persists.
     sales_df = van._load_csv(van._s.sales_recent_file)
 
     def _scoped(df: pd.DataFrame, qty_col: str) -> pd.DataFrame:
@@ -523,55 +488,6 @@ def past_performance(
         return df[(df.RouteCode.astype(str) == rcode)
                   & (df.TrxDate.isin(window_dates))
                   & (df.ItemCode.astype(str).isin(anchor_items))]
-
-    def _by_item(df: pd.DataFrame, qty_col: str) -> dict[str, float]:
-        sub = _scoped(df, qty_col)
-        if sub.empty:
-            return {}
-        return sub.groupby(sub.ItemCode.astype(str))[qty_col].sum().astype(float).to_dict()
-
-    def _by_day(df: pd.DataFrame, qty_col: str) -> dict[pd.Timestamp, float]:
-        sub = _scoped(df, qty_col)
-        if sub.empty:
-            return {}
-        return sub.groupby("TrxDate")[qty_col].sum().astype(float).to_dict()
-
-    today_alloc_per_item = _by_item(alloc_df, "AllocatedPC")
-    sold_per_item        = _by_item(sales_df, "TotalQuantity")
-
-    alloc_daily = _by_day(alloc_df, "AllocatedPC")
-    sales_daily = _by_day(sales_df, "TotalQuantity")
-
-    def _by_item_day(df: pd.DataFrame, qty_col: str) -> dict[tuple[str, str], float]:
-        """Per-(ItemCode, date_str) sum of ``qty_col`` over the scoped slice."""
-        sub = _scoped(df, qty_col)
-        if sub.empty:
-            return {}
-        sub = sub.assign(
-            _ic=sub.ItemCode.astype(str),
-            _d=pd.to_datetime(sub.TrxDate).dt.strftime("%Y-%m-%d"),
-        )
-        grouped = sub.groupby(["_ic", "_d"])[qty_col].sum().astype(float)
-        return {(str(ic), str(d)): float(v) for (ic, d), v in grouped.items()}
-
-    alloc_by_item_day = _by_item_day(alloc_df, "AllocatedPC")
-    sold_by_item_day  = _by_item_day(sales_df, "TotalQuantity")
-
-    # Per-item opening (logged ClosingQty[d-1] or 0) summed across the
-    # active days. Surfaced as ``past_leftover`` context -- it is REP's
-    # prior reality, not part of either policy's recommendation today.
-    opening_per_item: dict[str, float] = {}
-    if closing_pivot is not None:
-        cols_in_anchor = [c for c in closing_pivot.columns if c in anchor_items]
-        for d in window_dates:
-            prev = d - pd.Timedelta(days=1)
-            if prev not in closing_pivot.index:
-                continue
-            row_prev = closing_pivot.loc[prev]
-            for ic in cols_in_anchor:
-                v = row_prev[ic]
-                if pd.notna(v) and v != 0:
-                    opening_per_item[ic] = opening_per_item.get(ic, 0.0) + float(v)
 
     # ---- Counterfactual forward simulation ---------------------------
     # Two independent worlds, plotted side by side:
@@ -598,7 +514,6 @@ def past_performance(
     recommended_fresh_per_day: dict[str, float] = {}
     recommended_carried_per_day: dict[str, float] = {}
     recommended_van_load_per_day: dict[str, float] = {}
-    our_van_load_per_item: dict[str, float] = {}
     # Per-(item, day) canonical reconciled values from fc_df. Keyed by
     # (item_code, date_str) so the per-(item, date) emission below reads
     # the same cell the per-day totals aggregate (single source of
@@ -619,37 +534,80 @@ def past_performance(
         (c for c in ("opening_stock", "OpeningStock") if c in fc_df.columns),
         None,
     )
+    # Rep-side persisted columns (single source of truth: yaumi_*).
+    # Reading from fc_df (= yf_sales_transactions via _merge_sales_transactions)
+    # eliminates the parallel CSV path that previously recomputed
+    # past_leftover from closing_stock.csv and today_allocation from
+    # load_allocation.csv. Same data, but one path -- the persisted
+    # cron output -- so the AccuracyDrawer numbers byte-match
+    # yf_sales_transactions.yaumi_total_van_load.
+    rep_open_by_item_day:    dict[tuple[str, str], float] = {}
+    rep_fresh_by_item_day:   dict[tuple[str, str], float] = {}
+    rep_leftover_by_item_day: dict[tuple[str, str], float] = {}
+    rep_van_by_item_day:     dict[tuple[str, str], float] = {}
+    sold_by_item_day_fc:     dict[tuple[str, str], float] = {}
+    rep_past_leftover_per_day: dict[str, float] = {}
+    rep_today_alloc_per_day:   dict[str, float] = {}
+    rep_van_load_per_day:      dict[str, float] = {}
+    sold_per_day_fc:           dict[str, float] = {}
+
     if not fc_df.empty and pred_col is not None and rload_col is not None and opening_col is not None:
         canon = fc_df.assign(
             _ic   = fc_df.ItemCode.astype(str),
             _load = pd.to_numeric(fc_df[rload_col],  errors="coerce").fillna(0.0).clip(lower=0.0),
             _open = pd.to_numeric(fc_df[opening_col], errors="coerce").fillna(0.0).clip(lower=0.0),
+            # Rep-side persisted columns. ``yaumi_*`` are written by
+            # reconciliation_refresh from VW_GET_CLOSING_STOCK and
+            # VW_GET_LOAD_ALLOCATION_DETAILS; clipping at 0 mirrors the
+            # ingestion-side guard.
+            _ryopen  = pd.to_numeric(
+                fc_df.get("yaumi_opening_stock", 0), errors="coerce",
+            ).fillna(0.0).clip(lower=0.0),
+            _ryfresh = pd.to_numeric(
+                fc_df.get("yaumi_fresh_load", 0), errors="coerce",
+            ).fillna(0.0).clip(lower=0.0),
+            _ryleft  = pd.to_numeric(
+                fc_df.get("yaumi_leftover", 0), errors="coerce",
+            ).fillna(0.0).clip(lower=0.0),
+            _sold    = pd.to_numeric(
+                fc_df.get("actual_sold", 0), errors="coerce",
+            ).fillna(0.0).clip(lower=0.0),
         )
-        canon["_van"] = canon["_open"] + canon["_load"]
+        canon["_van"]   = canon["_open"] + canon["_load"]
+        canon["_ryvan"] = canon["_ryopen"] + canon["_ryfresh"]
 
         per_day = canon.groupby("TrxDate").agg(
             carried=("_open", "sum"),
             fresh=("_load", "sum"),
             van=("_van", "sum"),
+            r_carried=("_ryopen", "sum"),
+            r_fresh=("_ryfresh", "sum"),
+            r_van=("_ryvan", "sum"),
+            sold=("_sold", "sum"),
         )
         for d_ts, row in per_day.iterrows():
             d_str = pd.Timestamp(d_ts).strftime("%Y-%m-%d")
             recommended_carried_per_day[d_str]  = round(float(row["carried"]), 2)
             recommended_fresh_per_day[d_str]    = round(float(row["fresh"]), 2)
             recommended_van_load_per_day[d_str] = round(float(row["van"]), 2)
-
-        our_van_load_per_item.update(
-            canon.groupby("_ic")["_van"].sum().astype(float).to_dict()
-        )
+            rep_past_leftover_per_day[d_str]    = round(float(row["r_carried"]), 2)
+            rep_today_alloc_per_day[d_str]      = round(float(row["r_fresh"]), 2)
+            rep_van_load_per_day[d_str]         = round(float(row["r_van"]), 2)
+            sold_per_day_fc[d_str]              = round(float(row["sold"]), 2)
 
         # Per-(item, day) breakdown -- one row per (item, date) the
         # per-(item, date) emission consumes verbatim.
         for _, r in canon.iterrows():
             d_str = pd.Timestamp(r["TrxDate"]).strftime("%Y-%m-%d")
             key = (str(r["_ic"]), d_str)
-            rec_carried_by_item_day[key] = float(r["_open"])
-            rec_fresh_by_item_day[key]   = float(r["_load"])
-            rec_van_by_item_day[key]     = float(r["_van"])
+            rec_carried_by_item_day[key]      = float(r["_open"])
+            rec_fresh_by_item_day[key]        = float(r["_load"])
+            rec_van_by_item_day[key]          = float(r["_van"])
+            rep_open_by_item_day[key]         = float(r["_ryopen"])
+            rep_fresh_by_item_day[key]        = float(r["_ryfresh"])
+            rep_leftover_by_item_day[key]     = float(r["_ryleft"])
+            rep_van_by_item_day[key]          = float(r["_ryvan"])
+            sold_by_item_day_fc[key]          = float(r["_sold"])
 
     # ---- Daily rebuild over anchor scope -----------------------------
     # Three chart lines:
@@ -662,86 +620,34 @@ def past_performance(
     # meaning (the rep's truth). ``recommended_carried`` and
     # ``recommended_fresh`` are now both OUR simulation -- no shared
     # leftover with the rep.
+    # daily_rows + totals get FINAL values after the widening pass below
+    # (so unforecasted-but-active items flow into both). Seed with the
+    # anchor-only aggregates here to keep the structure populated for any
+    # early-exit path; the recompute downstream overwrites with the wider
+    # numbers once items_payload is complete.
     for row in daily_rows:
-        d = pd.Timestamp(row["date"]).normalize()
-        leftover_rep = opening_total_for(d, anchor_items)
-        today_alloc = float(alloc_daily.get(d, 0.0))
         d_key = row["date"]
-        row["past_leftover"]        = round(leftover_rep, 2)
-        row["today_allocation"]     = round(today_alloc, 2)
-        row["rep_van_load"]         = round(leftover_rep + today_alloc, 2)
-        row["recommended_carried"]  = recommended_carried_per_day.get(d_key, 0.0)
-        row["recommended_fresh"]    = recommended_fresh_per_day.get(d_key, 0.0)
+        row["rep_van_load"]         = rep_van_load_per_day.get(d_key, 0.0)
         row["recommended_van_load"] = recommended_van_load_per_day.get(d_key, 0.0)
-        row["actual_sold"]          = round(float(sales_daily.get(d, 0.0)), 2)
+        row["actual_sold"]          = sold_per_day_fc.get(d_key, 0.0)
 
-    def _sum(field: str) -> float:
-        return float(sum((r.get(field) or 0.0) for r in daily_rows))
-
-    sold_total                 = _sum("actual_sold")
-    rep_van_load_total         = _sum("rep_van_load")
-    past_leftover_total        = _sum("past_leftover")
-    today_alloc_total          = _sum("today_allocation")
-    # Counterfactual totals -- pure sums of the per-day simulated values,
-    # not aliased to any rep field. ``recommended_carried_total`` is the
-    # sum of OUR per-day carried leftover (which is 0 on day 1 and grows
-    # only when our policy over-loaded the prior day).
-    recommended_carried_total  = _sum("recommended_carried")
-    recommended_fresh_total    = _sum("recommended_fresh")
-    recommended_van_load_total = _sum("recommended_van_load")
-
-    # ---- Per-item average unit price, scoped to anchor items ---------
-    # Quantity-weighted mean of AvgUnitPrice over the same (route, anchor,
-    # window) slice the rep / our totals use, so holding cost AED values
-    # reconcile with the unit numbers on the same surface (no out-of-scope
-    # prices leaking in).
-    unit_price: dict[str, float] = {}
-    px_df = _scoped(sales_df, "AvgUnitPrice")
-    if not px_df.empty and "AvgUnitPrice" in px_df.columns:
-        px_df = px_df.assign(_ic=px_df.ItemCode.astype(str))
-        num = (px_df.AvgUnitPrice.astype(float) * px_df.TotalQuantity.astype(float))
-        unit_price = (
-            num.groupby(px_df["_ic"]).sum()
-            / px_df.groupby("_ic").TotalQuantity.sum().astype(float).clip(lower=1.0)
-        ).to_dict()
-
-    # ---- Overnight stock: each policy graded against the SAME demand,
-    # using its OWN truck weight. Apples to apples.
-    #   rep_excess_units = max(rep_van_load_total - sold_total, 0)
-    #     rep_van_load = past_leftover (real) + today_allocation (real)
-    #   our_excess_units = max(recommended_van_load_total - sold_total, 0)
-    #     recommended_van_load = our_leftover (simulated, day-1 zero) + our_fresh
-    # max(.,0) clamps to zero on days where sold > load (lost sales,
-    # not overnight stock).
-    #
-    # Per-item holding cost mirrors the same separation: rep uses rep's
-    # truck (real leftover + real allocation), we use ours (simulated
-    # van_load summed across days).
-    #
-    # We also assemble the per-item breakdown rows in the same single
-    # pass so totals and per-item sums come out of identical inputs (no
-    # parallel iteration, no risk of drift).
-    rep_holding_value = 0.0
-    our_holding_value = 0.0
-    # Build ancillary per-item lookups for the items[] payload:
-    #   * item-name (from the forecast frame's name column if present)
-    #   * per-item leftover that becomes the NEXT day's opening.
-    #
-    # Canonical "carry to next day" per item == fc_df_full's
-    # ``opening_stock`` on the FIRST forecast day strictly after
-    # ``last_day_in_window``. ``enrich_with_load`` writes this cell
-    # under the actuals-grounded simulation, so the same value the
-    # van-load page-view ``carried_qty`` reads on that next active day.
-    last_day_in_window = max(window_dates)
+    # Per-item lookups for the items[] payload:
+    #   * item-name (from forecast frame's name column, sales fallback)
+    #   * per-item leftover that becomes the NEXT day's opening (read
+    #     from ``fc_df_full.opening_stock`` on the first forecast date
+    #     strictly after ``last_day_in_window``; same cell the cron's
+    #     actuals-grounded simulation wrote).
     item_name_lookup: dict[str, str] = {}
-    leftover_per_item: dict[str, float] = {}
+    item_category_lookup: dict[str, str] = {}
 
-    def _ingest_names(df: pd.DataFrame, name_col: str) -> None:
-        if df.empty or name_col not in df.columns:
+    def _ingest_lookup(
+        df: pd.DataFrame, col: str, target: dict[str, str]
+    ) -> None:
+        if df.empty or col not in df.columns:
             return
         pairs = (
             df.assign(_ic=df.ItemCode.astype(str))
-            .groupby("_ic")[name_col]
+            .groupby("_ic")[col]
             .agg(lambda s: next(
                 (str(v).strip() for v in s if pd.notna(v) and str(v).strip()),
                 "",
@@ -749,8 +655,8 @@ def past_performance(
             .to_dict()
         )
         for k, v in pairs.items():
-            if k not in item_name_lookup and v:
-                item_name_lookup[k] = str(v)
+            if k not in target and v:
+                target[k] = str(v)
 
     # Forecast frame first (canonical name on the dashboard), then sales
     # frame as a fallback for windows where the artifact's ItemName is
@@ -758,283 +664,383 @@ def past_performance(
     if not fc_df.empty and pred_col is not None:
         for nc in ("ItemName", "item_name"):
             if nc in fc_df.columns:
-                _ingest_names(fc_df, nc)
+                _ingest_lookup(fc_df, nc, item_name_lookup)
                 break
     if not sales_df.empty:
+        # Route-scoped (NOT anchor-scoped) so unforecasted items the rep
+        # actually loaded/sold also get a categoryName + itemName on the
+        # disjoint-set widening pass below. Same catalog the filter
+        # dropdown reads -- by construction, the drawer's scope and the
+        # filter's universe align.
         sales_scope = sales_df[
-            (sales_df.RouteCode.astype(str) == rcode)
-            & (sales_df.ItemCode.astype(str).isin(anchor_items))
+            sales_df.RouteCode.astype(str) == rcode
         ]
         for nc in ("ItemName", "item_name"):
             if nc in sales_scope.columns:
-                _ingest_names(sales_scope, nc)
+                _ingest_lookup(sales_scope, nc, item_name_lookup)
                 break
-    if (
-        not fc_df_full.empty
-        and pred_col is not None
-        and opening_col is not None
-    ):
-        future = fc_df_full[fc_df_full.TrxDate > last_day_in_window]
-        if not future.empty:
-            next_day = future.TrxDate.min()
-            nxt = future[future.TrxDate == next_day]
-            if not nxt.empty:
-                grp = (
-                    nxt.assign(_ic=nxt.ItemCode.astype(str))
-                    .groupby("_ic")[opening_col]
-                    .sum()
-                )
-                for ic, v in grp.items():
-                    val = float(v) if pd.notna(v) else 0.0
-                    if val > 0:
-                        leftover_per_item[ic] = val
-
-    # Holding cost: single pass over anchor items using window-aggregate
-    # values. This is independent of the per-(item, date) emission below.
-    for ic in anchor_items:
-        sold_v       = float(sold_per_item.get(ic, 0.0))
-        rep_load_i   = (
-            float(opening_per_item.get(ic, 0.0))
-            + float(today_alloc_per_item.get(ic, 0.0))
-        )
-        our_load_i   = float(our_van_load_per_item.get(ic, 0.0))
-        rep_excess_i = max(rep_load_i - sold_v, 0.0)
-        our_excess_i = max(our_load_i - sold_v, 0.0)
-        price = float(unit_price.get(ic, 0.0))
-        if price > 0:
-            rep_holding_value += rep_excess_i * price
-            our_holding_value += our_excess_i * price
-    holding_savings = rep_holding_value - our_holding_value
-
+        for cc in ("CategoryName", "category_name"):
+            if cc in sales_scope.columns:
+                _ingest_lookup(sales_scope, cc, item_category_lookup)
+                break
     # ---- Per-(item, date) row emission --------------------------------
-    # One row per (anchor_item, active_day) in the window. Each row is
-    # self-describing: rep_van_load = past_leftover + today_allocation,
-    # recommended_van_load = recommended_carried + recommended_fresh,
-    # plus actual_sold and leftover_to_next_day for THIS row's day.
-    #
-    # leftover_to_next_day per (item, date):
-    #   - For the LAST active day in the window, prefer the canonical
-    #     fc_df_full.opening_stock on the NEXT forecast day (what the
-    #     daily cron already wrote -- same cell the page-view's
-    #     ``carried_qty`` reads on day+1). Falls back to
-    #     max(0, recommended_van_load - actual_sold) when the next
-    #     forecast day is missing (cron has not yet projected).
-    #   - For non-last days, the rep's actual closing log gives the
-    #     ground truth that becomes opening on the next active day:
-    #     read closing_pivot at THIS row's day for (item).
+    # One row per (anchor_item, active_day) in the window with:
+    #   * rep_van_load          -- the rep's physical truck total
+    #   * recommended_van_load  -- engine's recommended truck total
+    #   * actual_sold           -- invoiced demand for the day
+    #   * actual_leftover       -- max(rep_van_load - actual_sold, 0)
+    #   * recommended_leftover  -- max(recommended_van_load - actual_sold, 0)
+    # Identity by construction: sum across rows equals the matching
+    # totals fields (rep_van_load_total, recommended_van_load_total,
+    # actual_sold_total, rep_leftover_units, our_leftover_units).
     sorted_active_days = sorted(window_dates)
-    last_active_day = sorted_active_days[-1]
-    last_active_str = last_active_day.strftime("%Y-%m-%d")
 
-    # ``next_day_opening_per_item`` -- canonical carry into day+1 for
-    # the LAST active day in the window, read from fc_df_full on the
-    # first forecast date strictly after last_active_day. Same source
-    # already computed above as ``leftover_per_item``; alias for clarity.
-    next_day_opening_per_item = leftover_per_item
+    # Canonical-source leftover lookups -- read from yf_sales_transactions
+    # so Past Performance and Van Load show identical numbers.
+    rec_leftover_by_item_day: dict[tuple[str, str], float] = {}
+    next_day_opening_by_item_date: dict[tuple[str, str], float] = {}
+    if not fc_df_full.empty:
+        op_col = next((c for c in ("opening_stock", "OpeningStock") if c in fc_df_full.columns), None)
+        lo_col = next((c for c in ("leftover_to_next_day", "LeftoverToNextDay") if c in fc_df_full.columns), None)
+        if op_col is not None or lo_col is not None:
+            ic_arr = fc_df_full.ItemCode.astype(str).tolist()
+            d_arr  = [d.strftime("%Y-%m-%d") for d in fc_df_full.TrxDate]
+            op_arr = (
+                pd.to_numeric(fc_df_full[op_col], errors="coerce").fillna(0.0).clip(lower=0.0).tolist()
+                if op_col is not None else [None] * len(ic_arr)
+            )
+            lo_arr = (
+                pd.to_numeric(fc_df_full[lo_col], errors="coerce").fillna(0.0).clip(lower=0.0).tolist()
+                if lo_col is not None else [None] * len(ic_arr)
+            )
+            for ic, d_str2, op, lo in zip(ic_arr, d_arr, op_arr, lo_arr):
+                if op is not None:
+                    next_day_opening_by_item_date[(ic, d_str2)] = float(op)
+                if lo is not None:
+                    rec_leftover_by_item_day[(ic, d_str2)] = float(lo)
 
-    def _closing_for(d: pd.Timestamp, item: str) -> float:
-        """ClosingQty for (route, item) on day d -- what carries to d+1.
-
-        Returns 0.0 when no closing was logged (the system never logs
-        ClosingQty == 0; missing row == empty truck convention).
-        """
-        if closing_pivot is None:
-            return 0.0
-        if d not in closing_pivot.index or item not in closing_pivot.columns:
-            return 0.0
-        v = closing_pivot.at[d, item]
-        return float(v) if pd.notna(v) else 0.0
+    def _recommended_leftover(ic_str: str, d_str: str, rec_van: float, sold_i: float) -> float:
+        """opening_stock[d+1] -> leftover_to_next_day[d] -> naive fallback."""
+        d_next = (pd.Timestamp(d_str) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+        v = next_day_opening_by_item_date.get((ic_str, d_next))
+        if v is not None:
+            return v
+        v = rec_leftover_by_item_day.get((ic_str, d_str))
+        if v is not None:
+            return v
+        return max(0.0, rec_van - sold_i)
 
     items_payload: list[PastPerformanceItem] = []
-    leftover_total_last_day = 0.0
     for d_ts in sorted_active_days:
         d_str = d_ts.strftime("%Y-%m-%d")
-        is_last = d_ts == last_active_day
         for ic in anchor_items:
             ic_str = str(ic)
             key = (ic_str, d_str)
-            past_left  = opening_for(d_ts, ic_str)
-            today_alloc_i = float(alloc_by_item_day.get(key, 0.0))
-            rep_van_i  = past_left + today_alloc_i
-            rec_carry  = float(rec_carried_by_item_day.get(key, 0.0))
-            rec_fresh  = float(rec_fresh_by_item_day.get(key, 0.0))
-            rec_van    = float(rec_van_by_item_day.get(key, rec_carry + rec_fresh))
-            sold_i     = float(sold_by_item_day.get(key, 0.0))
-            if is_last:
-                # Canonical: opening_stock on the next forecast day for
-                # this (route, item). Falls back to truck-minus-sold
-                # when the cron hasn't yet projected day+1.
-                if ic_str in next_day_opening_per_item:
-                    leftover_i = float(next_day_opening_per_item[ic_str])
-                else:
-                    leftover_i = max(0.0, rec_van - sold_i)
-                leftover_total_last_day += leftover_i
-            else:
-                # Mid-window: rep's actual closing on this day IS the
-                # carry into the next active day (one ground truth).
-                leftover_i = _closing_for(d_ts, ic_str)
+            # Rep + sold sides: read persisted ``yaumi_*`` and
+            # ``actual_sold`` from fc_df (single source -- same data
+            # the cron wrote to yf_sales_transactions).
+            past_left     = rep_open_by_item_day.get(key, 0.0)
+            today_alloc_i = rep_fresh_by_item_day.get(key, 0.0)
+            rep_van_i     = rep_van_by_item_day.get(key, past_left + today_alloc_i)
+            rec_carry     = float(rec_carried_by_item_day.get(key, 0.0))
+            rec_fresh     = float(rec_fresh_by_item_day.get(key, 0.0))
+            rec_van       = float(rec_van_by_item_day.get(key, rec_carry + rec_fresh))
+            sold_i        = sold_by_item_day_fc.get(key, 0.0)
+            # actual_leftover: rep's measured closing on day d (yaumi_leftover).
+            # rec_leftover  : opening_stock on day d+1 (canonical carry-out
+            #                 -- same column the Van Load tile reads).
+            actual_lo     = rep_leftover_by_item_day.get(key, max(0.0, rep_van_i - sold_i))
+            rec_lo        = _recommended_leftover(ic_str, d_str, rec_van, sold_i)
 
             # Skip rows that are completely empty across every field --
-            # no rep activity, no recommendation, no sale, no carry. An
-            # anchor item with Predicted>0 in the window is rarely empty
-            # on every active day, but the filter keeps the response
-            # tight when sparse.
+            # no rep activity, no recommendation, no sale, no leftover.
             if (
                 rep_van_i == 0.0
                 and rec_van == 0.0
                 and sold_i == 0.0
-                and leftover_i == 0.0
+                and actual_lo == 0.0
+                and rec_lo == 0.0
             ):
                 continue
             items_payload.append(
                 PastPerformanceItem(
                     itemCode=ic_str,
                     itemName=item_name_lookup.get(ic_str, ""),
+                    categoryName=item_category_lookup.get(ic_str, ""),
                     date=d_str,
                     rep_van_load=round(rep_van_i, 2),
-                    past_leftover=round(past_left, 2),
-                    today_allocation=round(today_alloc_i, 2),
                     recommended_van_load=round(rec_van, 2),
-                    recommended_carried=round(rec_carry, 2),
-                    recommended_fresh=round(rec_fresh, 2),
                     actual_sold=round(sold_i, 2),
-                    leftover_to_next_day=round(leftover_i, 2),
+                    actual_leftover=round(actual_lo, 2),
+                    recommended_leftover=round(rec_lo, 2),
                 )
             )
 
-    # Sort: date asc, then leftover desc (carry drivers surface first
-    # for the last day), then recommended van load desc, then itemCode
-    # asc for determinism.
+    # ---- Disjoint-set widening: unforecasted-but-active items ---------
+    # The drawer scope above is "items the engine forecasted in the
+    # window" (anchor_items). Items the rep loaded or sold for this
+    # route that we did NOT forecast would otherwise be invisible, which
+    # creates a transparency hole AND makes SKU coverage circular.
+    #
+    # Widen scope to the filter dropdown's universe (sales_recent.csv
+    # per route) so the drawer counts match the filter counts by
+    # construction. For these unforecasted items:
+    #   * rep_van           <- closing_stock.csv[d-1] + load_allocation.csv[d]
+    #   * actual_sold       <- sales_recent.csv groupby (route, item, date)
+    #   * recommended_van   = 0 (we made no call)
+    # The two item sets (anchor / non-anchor) are disjoint, so each
+    # row has exactly ONE source.
+    non_anchor_items: set[str] = set()
+    if not sales_scope.empty and "ItemCode" in sales_scope.columns:
+        all_route_items = set(sales_scope.ItemCode.astype(str).unique())
+        non_anchor_items = all_route_items - anchor_items
+        if item_whitelist is not None:
+            non_anchor_items &= item_whitelist
+
+    if non_anchor_items:
+        closing_csv = van._load_csv(van._s.closing_stock_file)
+        alloc_csv   = van._load_csv(van._s.load_allocation_file)
+
+        # Build per-(item, date) lookups for the non-anchor scope from
+        # the upstream CSVs (route-scoped). We need prior-day closing
+        # for the opening component of rep_van, so the closing read
+        # covers the window MINUS one day at the start.
+        sorted_active = sorted(window_dates)
+        first_active  = sorted_active[0]
+        last_active   = sorted_active[-1]
+        closing_start = first_active - pd.Timedelta(days=1)
+
+        def _route_window(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+            if df.empty or "TrxDate" not in df.columns:
+                return df.iloc[0:0]
+            return df[(df.RouteCode.astype(str) == rcode)
+                      & (df.TrxDate >= start) & (df.TrxDate <= end)
+                      & df.ItemCode.astype(str).isin(non_anchor_items)]
+
+        # ClosingQty[d] -- end-of-day stock for each (item, date).
+        # ClosingQty[d-1] is THIS day's opening (carry) per the chain.
+        closing_window = _route_window(closing_csv, closing_start, last_active)
+        prior_close: dict[tuple[str, str], float] = {}
+        same_day_close: dict[tuple[str, str], float] = {}
+        if not closing_window.empty and "ClosingQty" in closing_window.columns:
+            tmp = closing_window.assign(
+                _ic = closing_window.ItemCode.astype(str),
+                _qty = pd.to_numeric(closing_window.ClosingQty, errors="coerce").fillna(0.0).clip(lower=0.0),
+            )
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+                same_day_close[(ic, d.strftime("%Y-%m-%d"))] = float(qty)
+            # Map each row's date forward by one day -- ClosingQty[d-1]
+            # is the opening (carry) on date d. Saves a join on the hot path.
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+                nxt = (d + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+                prior_close[(ic, nxt)] = float(qty)
+
+        # AllocatedPC[d] -- today's depot-issued fresh load.
+        alloc_window = _route_window(alloc_csv, first_active, last_active)
+        alloc_lookup: dict[tuple[str, str], float] = {}
+        if not alloc_window.empty and "AllocatedPC" in alloc_window.columns:
+            tmp = alloc_window.assign(
+                _ic = alloc_window.ItemCode.astype(str),
+                _qty = pd.to_numeric(alloc_window.AllocatedPC, errors="coerce").fillna(0.0).clip(lower=0.0),
+            )
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+                alloc_lookup[(ic, d.strftime("%Y-%m-%d"))] = float(qty)
+
+        # TotalQuantity from sales_recent.csv (route-scoped, window-scoped).
+        sales_window = sales_scope[
+            sales_scope.TrxDate.isin(window_dates)
+            & sales_scope.ItemCode.astype(str).isin(non_anchor_items)
+        ] if "TrxDate" in sales_scope.columns else sales_scope.iloc[0:0]
+        sold_lookup: dict[tuple[str, str], float] = {}
+        if not sales_window.empty and "TotalQuantity" in sales_window.columns:
+            tmp = sales_window.assign(
+                _ic = sales_window.ItemCode.astype(str),
+                _qty = pd.to_numeric(sales_window.TotalQuantity, errors="coerce").fillna(0.0).clip(lower=0.0),
+            )
+            grp = tmp.groupby(["_ic", "TrxDate"])._qty.sum()
+            for (ic, d), qty in grp.items():
+                sold_lookup[(ic, d.strftime("%Y-%m-%d"))] = float(qty)
+
+        for d_ts in sorted_active:
+            d_str = d_ts.strftime("%Y-%m-%d")
+            for ic_str in non_anchor_items:
+                key = (ic_str, d_str)
+                past_left     = prior_close.get(key, 0.0)
+                today_alloc_i = alloc_lookup.get(key, 0.0)
+                rep_van_i     = past_left + today_alloc_i
+                sold_i        = sold_lookup.get(key, 0.0)
+                actual_lo     = max(0.0, rep_van_i - sold_i)
+                # Skip rows with zero activity (avoids 13 catalog ghosts
+                # × 22 days = 286 empty rows for a typical route).
+                if rep_van_i == 0.0 and sold_i == 0.0 and actual_lo == 0.0:
+                    continue
+                items_payload.append(
+                    PastPerformanceItem(
+                        itemCode=ic_str,
+                        itemName=item_name_lookup.get(ic_str, ""),
+                        categoryName=item_category_lookup.get(ic_str, ""),
+                        date=d_str,
+                        rep_van_load=round(rep_van_i, 2),
+                        recommended_van_load=0.0,
+                        actual_sold=round(sold_i, 2),
+                        actual_leftover=round(actual_lo, 2),
+                        recommended_leftover=0.0,
+                    )
+                )
+
+    # Sort: date asc, then recommended_leftover desc (items still left
+    # over under our policy surface first), then recommended_van_load
+    # desc, itemCode asc for determinism.
     items_payload.sort(
         key=lambda it: (
             it.date,
-            -it.leftover_to_next_day,
+            -it.recommended_leftover,
             -it.recommended_van_load,
             it.itemCode,
         )
     )
-    rep_excess_units = max(rep_van_load_total - sold_total, 0.0)
-    our_excess_units = max(recommended_van_load_total - sold_total, 0.0)
-    excess_units_savings = rep_excess_units - our_excess_units
 
-    # ---- Recommendation match: bounded symmetric ratio of the
-    # recommended van load (leftover + fresh, the headline-tile number)
-    # against actually-sold units.
-    #   match = min(rec, sold) / max(rec, sold) x 100
-    # Bounded [0, 100] by construction, symmetric (a 2x over-allocation
-    # and a 0.5x under-allocation both read as 50%), and free of the
-    # WAPE cliff that pinned the metric to 0% whenever recommended >
-    # 2x sold. WAPE was unusable here because heavy-leftover days
-    # routinely push recommended past 2x demand even when the depot's
-    # FRESH contribution is reasonable -- the 0% floor hid every
-    # signal in the metric. Industry-standard fill-ratio accuracy.
-    forecast_accuracy_pct = (
-        min(recommended_van_load_total, sold_total)
-        / max(recommended_van_load_total, sold_total) * 100.0
-        if (recommended_van_load_total > 0 and sold_total > 0) else 0.0
-    )
+    # ---- Recompute daily aggregates + totals from items_payload --------
+    # Now that items_payload includes the disjoint-set widening (forecasted
+    # AND unforecasted activity), re-derive the per-day chart series and
+    # the headline totals from this single source. Identity by construction:
+    #   sum(daily[*].field)  == sum(items[*].field)  for every field below.
+    # Five per-day series so the chart's toggle (Van load / Leftovers)
+    # can switch between them without a re-fetch.
+    rep_per_day:    dict[str, float] = {}
+    rec_per_day:    dict[str, float] = {}
+    sold_per_day:   dict[str, float] = {}
+    rep_lo_per_day: dict[str, float] = {}
+    rec_lo_per_day: dict[str, float] = {}
+    for it in items_payload:
+        rep_per_day[it.date]    = rep_per_day.get(it.date, 0.0)    + float(it.rep_van_load)
+        rec_per_day[it.date]    = rec_per_day.get(it.date, 0.0)    + float(it.recommended_van_load)
+        sold_per_day[it.date]   = sold_per_day.get(it.date, 0.0)   + float(it.actual_sold)
+        rep_lo_per_day[it.date] = rep_lo_per_day.get(it.date, 0.0) + float(it.actual_leftover)
+        rec_lo_per_day[it.date] = rec_lo_per_day.get(it.date, 0.0) + float(it.recommended_leftover)
+    for row in daily_rows:
+        d_key = row["date"]
+        row["rep_van_load"]         = round(rep_per_day.get(d_key, 0.0),    2)
+        row["recommended_van_load"] = round(rec_per_day.get(d_key, 0.0),    2)
+        row["actual_sold"]          = round(sold_per_day.get(d_key, 0.0),   2)
+        row["actual_leftover"]      = round(rep_lo_per_day.get(d_key, 0.0), 2)
+        row["recommended_leftover"] = round(rec_lo_per_day.get(d_key, 0.0), 2)
+    rep_van_load_total         = sum(it.rep_van_load          for it in items_payload)
+    recommended_van_load_total = sum(it.recommended_van_load  for it in items_payload)
+    sold_total                 = sum(it.actual_sold           for it in items_payload)
 
-    # ---- Forecast coverage: of items the rep actually sold for this
-    # route on each day in the window, what fraction were on our forecast
-    # for that day? Mean across days. Mirrors the dashboard's coverage
-    # math (data_import.eda_service._compute_business_kpis) so the two
-    # surfaces stay aligned. Uses the FULL sold-item set (not anchor-
-    # scoped) -- coverage by construction looks at items the model may
-    # have missed, so anchor-scoping it would always return 100%.
-    sales_for_coverage = sales_df[
-        (sales_df.RouteCode.astype(str) == rcode)
-        & (sales_df.TrxDate.isin(window_dates))
+    # ---- Category rollup ----------------------------------------------
+    # Aggregate items_payload by categoryName -- one row per category
+    # across the whole window. Same source as the per-(item, date)
+    # rows, so totals reconcile by construction. Items without a
+    # categoryName fall under "Uncategorised" so the rollup is
+    # exhaustive (sum of category rows == items_payload aggregate).
+    _UNCATEGORISED = "Uncategorised"
+    cat_accum: dict[str, dict[str, Any]] = {}
+    for it in items_payload:
+        cat = (it.categoryName or "").strip() or _UNCATEGORISED
+        bucket = cat_accum.setdefault(cat, {
+            "categoryName": cat,
+            "skus": set(),
+            "rep_van_load": 0.0,
+            "recommended_van_load": 0.0,
+            "actual_sold": 0.0,
+            "actual_leftover": 0.0,
+            "recommended_leftover": 0.0,
+        })
+        bucket["skus"].add(it.itemCode)
+        bucket["rep_van_load"]         += float(it.rep_van_load)
+        bucket["recommended_van_load"] += float(it.recommended_van_load)
+        bucket["actual_sold"]          += float(it.actual_sold)
+        bucket["actual_leftover"]      += float(it.actual_leftover)
+        bucket["recommended_leftover"] += float(it.recommended_leftover)
+    categories_payload: list[PastPerformanceCategoryRow] = [
+        PastPerformanceCategoryRow(
+            categoryName=b["categoryName"],
+            skus=len(b["skus"]),
+            rep_van_load=round(b["rep_van_load"], 2),
+            recommended_van_load=round(b["recommended_van_load"], 2),
+            actual_sold=round(b["actual_sold"], 2),
+            actual_leftover=round(b["actual_leftover"], 2),
+            recommended_leftover=round(b["recommended_leftover"], 2),
+        )
+        for b in cat_accum.values()
     ]
-    if item_whitelist is not None and not sales_for_coverage.empty:
-        sales_for_coverage = sales_for_coverage[
-            sales_for_coverage.ItemCode.astype(str).isin(item_whitelist)
-        ]
-    fc_for_coverage = fc_df.copy() if (not fc_df.empty and pred_col is not None) else fc_df
-    if not fc_for_coverage.empty and pred_col is not None:
-        fc_for_coverage = fc_for_coverage[fc_for_coverage[pred_col] > 0]
-    coverage_ratios: list[float] = []
-    if not sales_for_coverage.empty:
-        sold_by_day = (
-            sales_for_coverage.groupby("TrxDate").ItemCode
-            .apply(lambda s: set(s.astype(str)))
-        )
-        fc_by_day = (
-            (fc_for_coverage.groupby("TrxDate").ItemCode
-                .apply(lambda s: set(s.astype(str))))
-            if not fc_for_coverage.empty else {}
-        )
-        for d, sold_items in sold_by_day.items():
-            if not sold_items:
-                continue
-            predicted_items = fc_by_day.get(d, set())
-            if not predicted_items:
-                coverage_ratios.append(0.0)
-                continue
-            coverage_ratios.append(len(sold_items & predicted_items) / len(sold_items))
-    forecast_coverage_pct = (
-        round(sum(coverage_ratios) / len(coverage_ratios) * 100.0, 2)
-        if coverage_ratios else 0.0
+    # Sort: recommended_van_load desc (biggest category first), then
+    # categoryName asc for determinism on ties.
+    categories_payload.sort(
+        key=lambda c: (-c.recommended_van_load, c.categoryName)
     )
 
-    # Every key here is consumed by exactly one tile (or one subtitle)
-    # on the AccuracyDrawer. The invariants that hold by construction:
-    #   rep_van_load_total          = past_leftover_total + today_allocation_total
-    #   recommended_van_load_total  = recommended_carried_total + recommended_fresh_total
-    #   recommended_carried_total   = past_leftover_total            (same truck)
-    #   rep_excess_units            = max(rep_van_load_total          - actual_sold_total, 0)
-    #   our_excess_units            = max(recommended_van_load_total  - actual_sold_total, 0)
-    #   excess_units_savings        = rep_excess_units - our_excess_units
-    #   holding_savings             = rep_holding_value - our_holding_value
-    # All identities reconcile by simple subtraction so a reader can
-    # mental-arithmetic any tile's headline against its subtitle.
+    # Served-units estimate under our load: what we'd have served if our
+    # truck had rolled out, per item capped at the truck's capacity.
+    #   served_i = min(actual_sold_i, recommended_van_load_i)
+    # Aggregate gives the demand we'd have served under our right-sized
+    # load -- the honest counter to "but lighter loads miss sales".
+    served_units = round(sum(
+        min(float(it.actual_sold or 0.0), float(it.recommended_van_load or 0.0))
+        for it in items_payload
+    ), 2)
+
+    # Leftovers comparison -- sum the per-row fields directly so the
+    # aggregate is byte-identical to what the breakdown table renders.
+    rep_leftover_units = round(sum(it.actual_leftover       for it in items_payload), 2)
+    our_leftover_units = round(sum(it.recommended_leftover  for it in items_payload), 2)
+    leftover_units_saved = round(rep_leftover_units - our_leftover_units, 2)
+    leftover_pct_saved = (
+        round(leftover_units_saved / rep_leftover_units * 100.0)
+        if rep_leftover_units > 0 else 0
+    )
+
+    # SKU coverage -- of the SKUs the rep actually sold across the
+    # window, how many did our recommendation also cover? Roll up to the
+    # SKU level first so a one-day blip on a slow SKU does not double-count.
+    sold_skus: set[str] = set()
+    covered_skus: set[str] = set()
+    rec_skus_by_item: dict[str, float] = {}
+    sold_skus_by_item: dict[str, float] = {}
+    for it in items_payload:
+        sold_skus_by_item[it.itemCode] = sold_skus_by_item.get(it.itemCode, 0.0) + float(it.actual_sold or 0.0)
+        rec_skus_by_item[it.itemCode]  = rec_skus_by_item.get(it.itemCode, 0.0)  + float(it.recommended_van_load or 0.0)
+    for ic, sold_q in sold_skus_by_item.items():
+        if sold_q > 0:
+            sold_skus.add(ic)
+            if rec_skus_by_item.get(ic, 0.0) > 0:
+                covered_skus.add(ic)
+    skus_sold_count    = len(sold_skus)
+    skus_covered_count = len(covered_skus)
+    skus_coverage_pct  = (
+        round(skus_covered_count / skus_sold_count * 100.0)
+        if skus_sold_count > 0 else 0
+    )
+
     totals = {
         "rep_van_load_total":         round(rep_van_load_total, 2),
-        "recommended_carried_total":  round(recommended_carried_total, 2),
-        "recommended_fresh_total":    round(recommended_fresh_total, 2),
         "recommended_van_load_total": round(recommended_van_load_total, 2),
         "actual_sold_total":          round(sold_total, 2),
-        "past_leftover_total":        round(past_leftover_total, 2),
-        "today_allocation_total":     round(today_alloc_total, 2),
-        "rep_holding_value":          round(rep_holding_value, 2),
-        "our_holding_value":          round(our_holding_value, 2),
-        "holding_savings":            round(holding_savings, 2),
-        # Unit-level overnight stock (aggregate). Reconciles with the
-        # headline tiles by simple subtraction. Positive
-        # ``excess_units_savings`` => our policy leaves fewer units on
-        # the truck overnight than the rep's actual loading did.
-        "rep_excess_units":           round(rep_excess_units, 2),
-        "our_excess_units":           round(our_excess_units, 2),
-        "excess_units_savings":       round(excess_units_savings, 2),
-        "active_days":               len(daily_rows),
-        # Canonical carry-into-day+1 for the LAST active day. Per-item
-        # rows for that day sum here. NOT a sum across all days in the
-        # window -- that would double-count carries that already became
-        # mid-window openings. Frontend reads this field directly; it
-        # does NOT sum items[*].leftover_to_next_day itself.
-        "leftover_to_next_day_total": round(leftover_total_last_day, 2),
-    }
-    # Two metrics, two questions. Each maps 1:1 to a tile on the drawer
-    # so every wire field has a visible UI consumer (no dead payload):
-    #   forecast_accuracy_pct -> "Recommendation match" tile
-    #   forecast_coverage_pct -> "Forecast coverage" tile
-    metrics = {
-        "forecast_accuracy_pct": round(forecast_accuracy_pct, 2),
-        "forecast_coverage_pct": forecast_coverage_pct,
+        "served_units":               served_units,
+        "active_days":                len(daily_rows),
+        # Leftovers comparison (rep vs our policy). Same items_payload
+        # source as the headline totals -- per-(item, date) max(load - sold, 0)
+        # summed, so the math is auditable from the rendered breakdown table.
+        "rep_leftover_units":         rep_leftover_units,
+        "our_leftover_units":         our_leftover_units,
+        "leftover_units_saved":       leftover_units_saved,
+        "leftover_pct_saved":         leftover_pct_saved,
+        # SKU coverage -- of the items the rep actually sold across the
+        # window, how many did our recommendation also cover (recommended_van_load > 0)?
+        "skus_sold":                  skus_sold_count,
+        "skus_covered":               skus_covered_count,
+        "skus_coverage_pct":          skus_coverage_pct,
     }
 
     # Identity checks: per-(item, date) sums must reconcile with the
-    # aggregate totals block (the contract the supervisor relies on).
-    # Threshold lifted from settings -- rounding tolerance, not a real
-    # business gap. Drift beyond the threshold is logged as a warning
-    # but never blocks the emission; the frontend renders what it gets.
+    # aggregate totals block. Threshold lifted from settings -- rounding
+    # tolerance only. Drift logs a warning; emission is unaffected.
     drift_threshold = float(settings.reconciliation_items_drift_threshold)
     items_rep_sum      = round(sum(it.rep_van_load          for it in items_payload), 2)
     items_van_load_sum = round(sum(it.recommended_van_load  for it in items_payload), 2)
     items_sold_sum     = round(sum(it.actual_sold           for it in items_payload), 2)
-    items_leftover_last_day_sum = round(
-        sum(it.leftover_to_next_day for it in items_payload if it.date == last_active_str),
-        2,
-    )
 
     def _drift(label: str, lhs: float, rhs: float) -> None:
         if abs(lhs - rhs) > drift_threshold:
@@ -1044,11 +1050,27 @@ def past_performance(
                 label, lhs, rhs, lhs - rhs, rcode, start_date, end_date, span_days,
             )
 
-    _drift("rep_van_load",         items_rep_sum,              totals["rep_van_load_total"])
-    _drift("recommended_van_load", items_van_load_sum,         totals["recommended_van_load_total"])
-    _drift("actual_sold",          items_sold_sum,             totals["actual_sold_total"])
-    _drift("leftover_to_next_day_last_day",
-           items_leftover_last_day_sum, totals["leftover_to_next_day_total"])
+    _drift("rep_van_load",         items_rep_sum,      totals["rep_van_load_total"])
+    _drift("recommended_van_load", items_van_load_sum, totals["recommended_van_load_total"])
+    _drift("actual_sold",          items_sold_sum,     totals["actual_sold_total"])
+
+    # Disjoint-set integrity check: every itemCode appears in
+    # items_payload exactly once per date. A duplicate would indicate
+    # an anchor item leaking into the widening pass, double-counting
+    # rep_van and actual_sold in the headline tiles.
+    seen_keys: set[tuple[str, str]] = set()
+    dup_count = 0
+    for it in items_payload:
+        k = (it.itemCode, it.date)
+        if k in seen_keys:
+            dup_count += 1
+        seen_keys.add(k)
+    if dup_count > 0:
+        logger.warning(
+            "past_performance disjoint-set violation: %d duplicate "
+            "(itemCode, date) rows in items_payload for route=%s window=%s..%s",
+            dup_count, rcode, start_date, end_date,
+        )
 
     return PastPerformanceResponse(
         available=True,
@@ -1059,6 +1081,6 @@ def past_performance(
         active_days=len(daily_rows),
         daily=daily_rows,
         totals=totals,
-        metrics=metrics,
+        categories=categories_payload,
         items=items_payload,
     )

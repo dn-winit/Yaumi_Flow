@@ -187,12 +187,12 @@ export default function AutoRetrainSection() {
                 }`}
               >
                 {drift.delta >= 0 ? "\u0394 +" : "\u0394 "}
-                {drift.delta.toFixed(1)}
+                {drift.delta.toFixed(1)} pp
               </span>
             )}
             {drift?.rows_compared != null && (
               <div className="text-caption text-text-tertiary mt-0.5">
-                {drift.rows_compared.toLocaleString()} cells scored
+                {drift.rows_compared.toLocaleString()} item-day rows scored
               </div>
             )}
           </div>

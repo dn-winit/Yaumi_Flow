@@ -116,11 +116,7 @@ export default function VanLoadTab() {
         </Card>
       ) : (
         <div className="space-y-6 animate-fade-in">
-          <VanLoadSummary
-            summary={view.summary}
-            items={view.items}
-            date={view.date}
-          />
+          <VanLoadSummary summary={view.summary} />
 
           <Card
             title={`Top ${view.chart_top_n.length} items by van load`}
@@ -132,12 +128,8 @@ export default function VanLoadTab() {
               <EmptyState title="No items to chart" icon="chart" />
             ) : (
               <BarChart
-                data={view.chart_top_n.map((b) => ({
-                  ...b,
-                  item: b.item_code,
-                  predicted: b.predicted,
-                }))}
-                xKey="item"
+                data={view.chart_top_n as unknown as Record<string, unknown>[]}
+                xKey="item_code"
                 yKey="predicted"
                 height={300}
                 onBarClick={(p) => {
@@ -153,7 +145,12 @@ export default function VanLoadTab() {
                     ItemName: row.item_name,
                     RouteCode: routeCode,
                     TrxDate: date,
-                    prediction: row.units_to_load,
+                    // Headline = total truck weight (carry + fresh) so
+                    // the modal headline matches the table's "On truck"
+                    // column. Fresh part is forwarded separately so
+                    // the math chain can break it down.
+                    prediction: row.recommended_van_load,
+                    units_to_load: row.units_to_load,
                     p_demand: row.p_demand,
                     demand_class: row.demand_class,
                     class: row.demand_class,
@@ -174,7 +171,12 @@ export default function VanLoadTab() {
               </span>
             }
           >
-            <VanLoadTable rows={view.table_rows} routeCode={routeCode} date={date} />
+            <VanLoadTable
+              rows={view.table_rows}
+              items={view.items}
+              routeCode={routeCode}
+              date={date}
+            />
           </Card>
 
           <div className="flex justify-end">

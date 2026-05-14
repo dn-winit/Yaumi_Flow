@@ -56,16 +56,11 @@ _DB_COLUMNS = [
     "predicted", "p_demand", "qty_if_demand", "actual_qty",
     "lower_bound", "upper_bound",
     "adi", "cv2", "nonzero_ratio", "mean_qty", "avg_gap_days",
-    "recommended_load", "forecast_corrected", "bias_pct", "opening_stock",
-    "load_lower_bound", "load_upper_bound",
 ]
-
-# Columns added by reconciliation migrations. Surfaced separately so the
-# schema guard can name them in its remediation message.
-_RECONCILIATION_COLUMNS = (
-    "recommended_load", "forecast_corrected", "bias_pct", "opening_stock",
-    "load_lower_bound", "load_upper_bound",
-)
+# Reconciliation columns moved to ``yf_sales_transactions``. The
+# carry chain + actual_sold are written by
+# ``reconciliation_refresh.refresh_reconciliation`` (daily cron),
+# not by this pusher.
 
 # Natural-key columns used by MERGE to decide MATCH vs INSERT.
 _MERGE_KEYS = ("trx_date", "route_code", "item_code", "data_split")
@@ -99,10 +94,6 @@ def _dataframe_to_records(df: pd.DataFrame, cols: list[str]) -> list[tuple]:
         tuple(None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row)
         for row in df[cols].values.tolist()
     ]
-
-class SchemaMismatchError(RuntimeError):
-    """Raised when ``yf_demand_forecast`` is missing columns added by a
-    migration the running code expects to be present."""
 
 class DbPusher:
     """Pushes prediction CSVs to yf_demand_forecast."""
@@ -257,45 +248,11 @@ class DbPusher:
             logger.error(msg)
             return {"success": False, "error": msg, "missing": sorted(missing_required)}
 
-        # Compute reconciled columns BEFORE the push so the DB matches what
-        # the API serves. Failures here degrade to zero-fills so a missing
-        # bias table can't block the push entirely.
-        try:
-            from demand_forecasting_pipeline.services.reconciliation.enrich import (
-                enrich_with_load,
-            )
-            raw = enrich_with_load(
-                raw,
-                route_col=self._src_route_col,
-                item_col=self._src_item_col,
-                date_col=self._src_date_col,
-                predicted_col="prediction",
-                output_col="recommended_load",
-                with_diagnostics=True,
-                settings=self._s,
-            )
-        except Exception as exc:
-            logger.warning(
-                "db_push: reconciliation enrichment unavailable (%s); writing zero-filled cols",
-                exc,
-            )
-
-        # Verify the four reconciliation columns are present after enrich
-        # (or after the zero-fill fallback). If any are missing, the row
-        # mapper would silently default to 0.0 and the DB would carry
-        # unaudited zeros for the affected push -- this guard surfaces
-        # the gap so ops can investigate.
-        missing_recon = [
-            c for c in _RECONCILIATION_COLUMNS if c not in raw.columns
-        ]
-        if missing_recon:
-            logger.warning(
-                "db_push: reconciliation columns absent after enrich %s; "
-                "they will be written as 0.0 (matches migration DEFAULT). "
-                "Investigate the upstream enrich path if this persists.",
-                missing_recon,
-            )
-
+        # Reconciliation moved to yf_sales_transactions (written by the
+        # 03:30 cron). db_pusher's job is to push the raw model output
+        # only -- predicted, bounds, demand_class, etc. The recon
+        # enrichment is not run here; that's the reconciliation_refresh
+        # cron's responsibility on the production CSV mirror.
         df = self._map_columns(raw, datasplit)
         return self._upsert(df, datasplit)
 
@@ -343,14 +300,6 @@ class DbPusher:
             ("actual_qty", self._src_target_col),
             ("lower_bound", "q_10"),
             ("upper_bound", "q_90"),
-            # Reconciliation columns (added by migrations). Default to
-            # 0.0 to match each migration's NOT NULL DEFAULT 0.
-            ("recommended_load", "recommended_load"),
-            ("forecast_corrected", "forecast_corrected"),
-            ("bias_pct", "bias_pct"),
-            ("opening_stock", "opening_stock"),
-            ("load_lower_bound", "load_lower_bound"),
-            ("load_upper_bound", "load_upper_bound"),
         ]:
             # When ``src`` isn't a column on ``raw`` (e.g. ``actual_qty``
             # for the forecast split, which has no actuals yet), ``.get``

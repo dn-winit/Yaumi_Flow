@@ -87,7 +87,7 @@ class PlanningService:
         demand = self._dm.reconcile_demand_frame(
             self._dm.get_demand_data(route_code=route_code)
         )
-        load_col = "RecommendedLoad" if "RecommendedLoad" in demand.columns else "Predicted"
+        load_col = "recommended_load" if "recommended_load" in demand.columns else "Predicted"
         prices = self._dm.get_item_prices()
 
         daily: List[Dict[str, Any]] = []

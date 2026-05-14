@@ -42,11 +42,20 @@ export default function DashboardPage() {
     !sales.loading &&
     (salesData?.totals?.working_days ?? 0) === 0;
   const singleDay = period.start_date === period.end_date;
+  const hasActiveFilters =
+    filters.warehouse_codes.length +
+      filters.route_codes.length +
+      filters.category_codes.length +
+      filters.item_codes.length >
+    0;
 
-  const handleRefresh = () => {
-    sales.refetch();
-    kpis.refetch();
-    toast("Data refreshed", "success");
+  const handleRefresh = async () => {
+    try {
+      await Promise.all([sales.refetch(), kpis.refetch()]);
+      toast("Data refreshed", "success");
+    } catch {
+      toast("Refresh failed -- check connection", "danger");
+    }
   };
 
   // Top routes / categories arrive already sorted by revenue desc from
@@ -114,11 +123,13 @@ export default function DashboardPage() {
                 : `No sales activity from ${fmtDate(period.start_date)} to ${fmtDate(period.end_date)}`}
             </div>
             <div className="text-body text-text-secondary">
-              {singleDay
+              {hasActiveFilters
+                ? "Your current filter selection has no sales in this window. Try widening the filters or the period."
+                : singleDay
                 ? "This date is most likely a weekend, holiday, or other closure. The dashboard has no rows to summarise for it."
                 : "Every day in the chosen range has zero rows in scope. The dashboard has nothing to summarise."}
             </div>
-            {lastActiveDate && lastActiveDate !== period.end_date && (
+            {!hasActiveFilters && lastActiveDate && lastActiveDate !== period.end_date && (
               <div className="text-caption text-text-tertiary pt-2">
                 The most recent date with activity is{" "}
                 <span className="font-semibold text-text-secondary">

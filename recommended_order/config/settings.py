@@ -140,9 +140,21 @@ class Settings(BaseSettings):
     customer_data_file: str = Field(default="customer_data.csv")
     journey_plan_file: str = Field(default="journey_plan.csv")
     demand_forecast_file: str = Field(default="demand_forecast.csv")
+    # Carry-chain + reconciliation outputs (opening_stock, fresh_load,
+    # total_van_load, leftover_to_next_day, ...) moved out of
+    # ``yf_demand_forecast`` into ``yf_sales_transactions``. The mirror CSV
+    # is written by data_import alongside ``demand_forecast.csv``. Carries
+    # past + today only -- future-horizon rows fall through to the inline
+    # enrichment path in DataManager.
+    sales_transactions_file: str = Field(default="sales_transactions.csv")
 
     # DB replication target (DbPusher writes to this table; reads come from file).
     recommendation_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_recommended_orders]")
+
+    # demand_forecasting URL for the pre-generation carry-chain guard.
+    # Empty disables the auto-heal (but missing row still raises).
+    demand_forecasting_url: str = Field(default="", description="e.g. http://localhost:8002")
+    reconciliation_preflight_timeout_seconds: float = Field(default=420.0, ge=10.0)
 
     # Route codes (configurable, not hardcoded)
     route_codes: list[str] = Field(

@@ -16,7 +16,6 @@ from fastapi import APIRouter, Depends, Query
 
 from recommended_order.api.dependencies import (
     get_adoption_service,
-    get_data_manager,
     get_db_pusher,
     get_engine,
     get_fresh_data_manager,
@@ -42,7 +41,6 @@ from recommended_order.api.schemas import (
 from recommended_order.config.constants import SafetyClamps
 from recommended_order.config.settings import get_settings
 from recommended_order.core.calibration import (
-    RouteCalibration,
     calibrate,
     cache_size as calibration_cache_size,
 )
@@ -299,13 +297,6 @@ def _diagnose_empty_route(
         )
 
     cust_df = dm.get_customer_data(rc)
-    if cust_df.empty:
-        return EmptyRouteDiagnosis(
-            reason="all_new_customers",
-            headline="First-visit customers detected",
-            detail=f"{len(journey_custs)} planned customer(s) with no buying history yet -- the salesperson should ask what they want.",
-        )
-
     cust_names = dm.get_customer_names(rc)
     item_names = dm.get_item_names(rc)
     van_set = {str(c) for c in van_items.keys()}
@@ -384,6 +375,59 @@ def _diagnose_empty_route(
     )
 
 
+def _sales_transactions_has(s, target_date: str) -> bool:
+    """True if sales_transactions.csv has any row for ``target_date``."""
+    path = Path(s.shared_data_dir) / s.sales_transactions_file
+    if not path.exists():
+        return False
+    df = pd.read_csv(path, usecols=["TrxDate"], low_memory=False)
+    return df["TrxDate"].astype(str).str.startswith(target_date).any()
+
+
+def _trigger_reconciliation_refresh(s, horizon_days_behind: int) -> dict:
+    """POST demand_forecasting's /reconciliation/refresh."""
+    import httpx
+    url = f"{s.demand_forecasting_url.rstrip('/')}/api/v1/forecast/reconciliation/refresh"
+    logger.warning("carry_chain_auto_heal: POST %s?horizon_days_behind=%d", url, horizon_days_behind)
+    with httpx.Client(timeout=s.reconciliation_preflight_timeout_seconds) as client:
+        resp = client.post(url, params={"horizon_days_behind": horizon_days_behind})
+        resp.raise_for_status()
+        body = resp.json()
+    if not body.get("success"):
+        raise RuntimeError(f"reconciliation_refresh returned success=False: {body}")
+    return body
+
+
+def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
+    """Auto-heal yf_sales_transactions for non-future dates by triggering
+    reconciliation_refresh with the minimal horizon covering target_date."""
+    s = get_settings()
+    from datetime import date as _date
+    today_d = _date.today()
+    if target_date > today_d.strftime("%Y-%m-%d"):
+        return
+    if _sales_transactions_has(s, target_date):
+        return
+    if not s.demand_forecasting_url:
+        raise RuntimeError(
+            f"yf_sales_transactions missing for {target_date} and "
+            f"RO_DEMAND_FORECASTING_URL is unset -- cannot auto-heal."
+        )
+    horizon = max(0, (today_d - _date.fromisoformat(target_date)).days)
+    body = _trigger_reconciliation_refresh(s, horizon)
+    dm.refresh()
+    if _sales_transactions_has(s, target_date):
+        logger.info(
+            "carry_chain_healed: %s (refresh wrote %s rows, horizon=%d)",
+            target_date, body.get("rows_updated"), horizon,
+        )
+        return
+    raise RuntimeError(
+        f"reconciliation_refresh succeeded but yf_sales_transactions still "
+        f"has no row for {target_date} -- generation aborted."
+    )
+
+
 def _generate_routes(
     target_date: str,
     route_codes: List[str],
@@ -413,6 +457,18 @@ def _generate_routes(
             "total_records": 0,
             "duration_seconds": round(time.time() - t0, 2),
             "details": [{"status": "stale_data", "error": str(exc)}],
+        }
+
+    try:
+        _ensure_carry_chain_present(target_date, dm)
+    except RuntimeError as exc:
+        logger.error("carry_chain_guard_failed: %s", exc)
+        return {
+            "routes_requested": 0,
+            "routes_generated": 0,
+            "total_records": 0,
+            "duration_seconds": round(time.time() - t0, 2),
+            "details": [{"status": "carry_chain_missing", "error": str(exc)}],
         }
 
     if skip_existing:

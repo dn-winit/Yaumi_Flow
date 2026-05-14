@@ -3,23 +3,37 @@ import Drawer from "@/components/ui/Drawer";
 import EmptyState from "@/components/ui/EmptyState";
 import KpiRow from "@/components/ui/KpiRow";
 import MetricCard from "@/components/charts/MetricCard";
-import LineChart from "@/components/charts/LineChart";
+import BarChart from "@/components/charts/BarChart";
 import { Skeleton } from "@/components/ui/Skeleton";
 import InfoBubble from "@/components/ui/InfoBubble";
-import SectionLabel from "@/components/ui/SectionLabel";
-import BreakdownPopover, {
-  type BreakdownValueField,
-} from "@/components/ui/BreakdownPopover";
+import ToggleGroup, { type ToggleOption } from "@/components/ui/ToggleGroup";
 import { CHART_COLOR } from "@/components/charts/theme";
 import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 
 import { useReconciliationPastPerformance } from "@/hooks/useForecast";
 import { useLastActiveDate } from "@/hooks/useDataImport";
-import { fmtNum, fmtCurrency, fmtPct } from "@/lib/format";
+import { fmtNum } from "@/lib/format";
 import { addDays, fmtDate, fmtDateRange, todayIso } from "@/lib/date";
-import type { PastPerformanceItem } from "@/types/forecast";
 import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
+
+type ChartView = "van_load" | "leftovers";
+
+const CHART_TOGGLE_OPTIONS: ToggleOption<ChartView>[] = [
+  { value: "van_load",  label: "Van load" },
+  { value: "leftovers", label: "Leftovers" },
+];
+
+const CHART_SERIES_VAN_LOAD = [
+  { key: "rep_van_load",         label: "Actual van load",       color: CHART_COLOR.warning },
+  { key: "recommended_van_load", label: "Recommended van load",  color: CHART_COLOR.brandPrimary },
+  { key: "actual_sold",          label: "Actually sold",         color: CHART_COLOR.success },
+];
+
+const CHART_SERIES_LEFTOVERS = [
+  { key: "actual_leftover",      label: "Actual leftover",       color: CHART_COLOR.warning },
+  { key: "recommended_leftover", label: "Recommended leftover",  color: CHART_COLOR.brandPrimary },
+];
 
 interface Props {
   open: boolean;
@@ -146,7 +160,9 @@ export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endD
                 }
               />
             ) : (
-              <DrawerContent data={data} />
+              <>
+                <DrawerContent data={data} />
+              </>
             )}
           </>
         )}
@@ -177,18 +193,13 @@ interface ContentProps {
   data: NonNullable<ReturnType<typeof useReconciliationPastPerformance>["data"]>;
 }
 
-// Pure render: server pre-computes total, percentages, ordering, and
-// labels (single source of truth in the backend). UI only maps tone to
-// a colour token. ``floor_protected`` is dropped server-side because
-// the back-test path runs with ``use_carry_floor=False``.
+// Pure render: server pre-computes every number plus the one-line
+// insight banner. Client only formats and maps colour tokens; no
+// aggregation, no derived percentages, no client-side string mixing.
 function DrawerContent({ data }: ContentProps) {
   const t = data.totals;
-  const m = data.metrics;
 
-  // Surface the actual window the metrics cover: a single day or a
-  // range, depending on what the user picked. Pulls straight from the
-  // server response so the dates always match the tiles below -- no
-  // client-side date math drift.
+  // Period label: single date or date range, mirroring the server's window.
   const windowLabel = (() => {
     const start = data.start_date ?? "";
     const end = data.end_date ?? "";
@@ -197,105 +208,58 @@ function DrawerContent({ data }: ContentProps) {
     return fmtDateRange(start, end);
   })();
 
-  // Single-line window string used as every popover sub-header. Falls
-  // back to the per-tile windowLabel when only one endpoint is set;
-  // empty string is fine -- the popover just renders nothing.
-  const popoverWindow = (() => {
-    const start = data.start_date ?? "";
-    const end = data.end_date ?? "";
-    if (start && end && start !== end) return `Window: ${start} to ${end}`;
-    if (end || start) return `Window: ${end || start}`;
-    return "";
-  })();
-
-  const items: PastPerformanceItem[] = data.items ?? [];
-
-  // Helper to keep the JSX terse: each click target needs the same
-  // trigger button + popover wiring, only the field/total/title vary.
-  const numClick = (
-    value: number,
-    title: string,
-    field: BreakdownValueField,
-    total: number,
-  ) => (
-    <BreakdownPopover
-      trigger={<span className="tabular-nums">{fmtNum(value)}</span>}
-      title={title}
-      windowLabel={popoverWindow}
-      items={items}
-      valueField={field}
-      totalValue={total}
-    />
+  const num = (value: number) => (
+    <span className="tabular-nums">{fmtNum(value)}</span>
   );
+
+  const items = data.items ?? [];
+  const categories = data.categories ?? [];
+
+  const [chartView, setChartView] = useState<ChartView>("van_load");
+  const chartSeries = useMemo(
+    () => (chartView === "van_load" ? CHART_SERIES_VAN_LOAD : CHART_SERIES_LEFTOVERS),
+    [chartView],
+  );
+  const chartSubtitle =
+    chartView === "van_load"
+      ? "Actual van load (yellow), recommended van load (red), actually sold (green)"
+      : "Actual leftover (yellow) vs recommended leftover (red) per day";
 
   return (
     <>
-      {/* Plain-language explainer banner so a non-tech reader knows
-          what they're looking at without needing to parse the tiles. */}
-      <div className="rounded-lg border border-brand-100 bg-brand-50/50 p-4 text-body text-text-secondary">
-        We compare the <strong>actual van load</strong> (what the rep took) against the{" "}
-        <strong>recommended van load</strong> (what our forecast suggests) - with{" "}
-        <strong>actually sold</strong> as the ground truth. Scoped to items we forecast on this route.
-        Items whose dominant buyer isn't on the day's journey plan are intentionally zeroed out, so a
-        flat recommendation on those days is by design, not a model miss.
-        {windowLabel && (
-          <>
-            {" "}
-            <span className="text-text-tertiary">Period: <strong>{windowLabel}</strong>.</span>
-          </>
-        )}
-      </div>
+      {windowLabel && (
+        <div className="rounded-lg border border-default bg-surface-sunken px-4 py-2.5">
+          <p className="text-body text-text-secondary">
+            Showing results for <strong className="text-text-primary">{windowLabel}</strong>
+          </p>
+        </div>
+      )}
 
-      {/* Three story tiles -- plain English on the face, full math + source
-          views one click away in the "i" bubble. */}
-      <SectionLabel>Actual van load - recommended van load - actually sold</SectionLabel>
+      {/* Row 1 -- three hero tiles, plain numbers, canonical webapp
+          terms: "Actual van load" / "Recommended van load" /
+          "Actually sold". Border colour = the same hue used by the
+          matching bar in the chart below, so the eye maps tile -> bar
+          without a legend lookup. */}
       <KpiRow>
         <MetricCard
           label="Actual van load"
           value={
             <span className="inline-flex items-baseline gap-1.5">
-              {numClick(
-                t.rep_van_load_total,
-                "Actual van load breakdown",
-                "rep_van_load",
-                t.rep_van_load_total,
-              )}
+              {num(t.rep_van_load_total)}
               <span className="text-body font-normal text-text-tertiary">units</span>
-            </span>
-          }
-          subtitle={
-            <span>
-              {numClick(
-                t.past_leftover_total,
-                "Carried from yesterday breakdown",
-                "past_leftover",
-                t.past_leftover_total,
-              )}
-              {" carried from yesterday + "}
-              {numClick(
-                t.today_allocation_total,
-                "Fresh from depot breakdown",
-                "today_allocation",
-                t.today_allocation_total,
-              )}
-              {" fresh from depot"}
             </span>
           }
           info={
             <InfoBubble
-              title="How is actual van load calculated?"
+              title="What is actual van load?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p><strong>Actual van load</strong> is what the rep physically had on the truck - the stock carried from yesterday plus what depot issued fresh today.</p>
+                  <p>The total stock the rep physically loaded onto the truck across every working day in this window.</p>
+                  <p>For each item on each day, this is what was carried from yesterday plus what the depot issued today:</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    rep_van_load[d] = ClosingQty[d-1]  +  AllocatedPC[d]
+                    actual van load = yesterday&apos;s leftover + today&apos;s depot allocation
                   </p>
-                  <p>Both numbers come straight from SQL Server views, looked up directly per (route, item, day):</p>
-                  <ul className="list-disc pl-5 space-y-1">
-                    <li><strong>VW_GET_CLOSING_STOCK</strong> gives yesterday's <code>ClosingQty</code> (leftover)</li>
-                    <li><strong>VW_GET_LOAD_ALLOCATION_DETAILS</strong> gives today's <code>AllocatedPC</code> (fresh allocation)</li>
-                  </ul>
-                  <p>If a row is missing for a given (item, day), we treat that value as 0. The schema never logs <code>ClosingQty=0</code> - empirically validated against 21,073 cells across 12 routes.</p>
+                  <p>Both numbers come from the SQL Server views that record the rep&apos;s real truck activity (closing stock for the carry, depot allocation for the fresh issue).</p>
                 </div>
               }
             />
@@ -306,54 +270,25 @@ function DrawerContent({ data }: ContentProps) {
           label="Recommended van load"
           value={
             <span className="inline-flex items-baseline gap-1.5">
-              {numClick(
-                t.recommended_van_load_total,
-                "Recommended van load breakdown",
-                "recommended_van_load",
-                t.recommended_van_load_total,
-              )}
+              {num(t.recommended_van_load_total)}
               <span className="text-body font-normal text-text-tertiary">units</span>
             </span>
           }
-          subtitle={
-            t.recommended_carried_total != null && t.recommended_fresh_total != null ? (
-              <span>
-                {numClick(
-                  t.recommended_carried_total,
-                  "Carried from yesterday (recommended) breakdown",
-                  "recommended_carried",
-                  t.recommended_carried_total,
-                )}
-                {" carried from yesterday + "}
-                {numClick(
-                  t.recommended_fresh_total,
-                  "Fresh from depot (recommended) breakdown",
-                  "recommended_fresh",
-                  t.recommended_fresh_total,
-                )}
-                {" fresh from depot (leftover minimised)"}
-              </span>
-            ) : (
-              "Yesterday's leftover plus what depot should issue today"
-            )
-          }
           info={
             <InfoBubble
-              title="How is our recommendation calculated?"
+              title="What is recommended van load?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p><strong>Recommended van load</strong> reads the same cells the daily cron writes to the forecast table - so the number you see here matches the headline tile on the Van Load page byte-for-byte for the same (route, date).</p>
+                  <p>What our engine thinks the rep should have loaded onto the truck across the same window.</p>
+                  <p>For each item on each day, this is the carry from yesterday plus the fresh stock our forecast says the depot should issue:</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    recommended_van_load[d] = opening_stock[d]  +  recommended_load[d]
+                    recommended van load = carry + fresh from depot
                   </p>
-                  <p>Per (item, day), the cron subtracts the simulated leftover from the bias-corrected forecast and rounds to whole units:</p>
+                  <p>The fresh part is sized so the truck just covers expected demand without over-stocking:</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    P_corrected = Predicted / (1 + bias_pct)<br />
-                    recommended_load = max(0, P_corrected - opening_stock)
+                    fresh from depot = max(0, expected demand &minus; carry)
                   </p>
-                  <p><strong>Leftover minimisation:</strong> if the truck already has 100 of an item and demand is 80, the engine recommends zero fresh - less stock left on the van overnight.</p>
-                  <p><strong>Journey-aware mask:</strong> for items where one or two customers account for nearly all sales, recommended_load is forced to 0 on dates those customers aren't on the day's journey plan. Loading 900 units of a wholesale-only item on a day the wholesaler isn't being visited is the kind of phantom load this guard prevents.</p>
-                  <p><strong>bias_pct</strong> is the recency-weighted ratio of past actuals to past predictions over the last 30 days for that route+item, capped at +/-50%.</p>
+                  <p>Same number rendered on the Van Load page&apos;s headline tile -- one recommendation, one definition.</p>
                 </div>
               }
             />
@@ -364,28 +299,21 @@ function DrawerContent({ data }: ContentProps) {
           label="Actually sold"
           value={
             <span className="inline-flex items-baseline gap-1.5">
-              {numClick(
-                t.actual_sold_total,
-                "Actually sold breakdown",
-                "actual_sold",
-                t.actual_sold_total,
-              )}
+              {num(t.actual_sold_total)}
               <span className="text-body font-normal text-text-tertiary">units</span>
             </span>
           }
-          subtitle="What customers actually bought - the ground truth"
           info={
             <InfoBubble
-              title="What 'actually sold' means"
+              title="What does 'actually sold' mean?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p><strong>Actually sold</strong> is the invoiced sales total for the same items in the same window.</p>
+                  <p>The total units the rep invoiced to customers across this window -- the ground truth we&apos;re scoring both policies against.</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    SUM(TotalQuantity) from VW_GET_SALES_DETAILS<br />
-                    WHERE TrxType = &apos;SalesInvoice&apos;<br />
-                    AND ItemType = &apos;OrderItem&apos;
+                    sum(TotalQuantity) where TrxType = &apos;SalesInvoice&apos;<br />
+                    and ItemType = &apos;OrderItem&apos;
                   </p>
-                  <p>Returns (bad/good) are tracked separately under <code>TrxType = &apos;Bad Return&apos;</code> / <code>&apos;Good Return&apos;</code> and are <strong>not</strong> counted as sales.</p>
+                  <p>Returns (good or bad) are tracked separately and are <strong>not</strong> counted as sales here. Same source the dashboard uses, so the two surfaces always agree.</p>
                 </div>
               }
             />
@@ -394,150 +322,207 @@ function DrawerContent({ data }: ContentProps) {
         />
       </KpiRow>
 
-      {/* Three forecast-performance tiles -- each answers a UNIQUE
-          question. No number on this row appears twice. Section symmetry
-          with the row above (3 + 3) keeps the drawer scannable.
-            * Accuracy  -- how close our forecast came to actual demand (%)
-            * Coverage  -- how many items we predicted that the rep sold (%)
-            * Saved     -- AED savings under our recommendation (with the
-                           rep AED -> ours AED breakdown in the subtitle) */}
-      <SectionLabel>Forecast performance</SectionLabel>
+      {/* Row 2 -- two comparison tiles answering the questions a
+          dispatcher actually asks:
+          (1) of the SKUs that sold, how many did we cover? (forecast scope)
+          (2) under our load, how much less overnight stock?      (load shape) */}
       <KpiRow>
         <MetricCard
-          label="Recommendation match"
-          value={fmtPct(m.forecast_accuracy_pct)}
-          subtitle={`Recommended ${fmtNum(t.recommended_van_load_total)} vs actually sold ${fmtNum(t.actual_sold_total)}`}
-          trend={m.forecast_accuracy_pct >= 80 ? "up" : "down"}
-          info={
-            <InfoBubble
-              title="What is recommendation match?"
-              body={
-                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>How close the <strong>recommended van load</strong> shown on the headline tile came to what was <strong>actually sold</strong> on this route. Bounded fill-ratio accuracy - symmetric, [0%, 100%], no cliff when over-allocation runs heavy.</p>
-                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    recommended_van_load  =  yesterday_leftover  +  fresh_recommended<br />
-                    match  =  min(recommended_van_load, actually_sold)  /  max(recommended_van_load, actually_sold)  * 100
-                  </p>
-                  <p>For this view: recommended <strong>{fmtNum(t.recommended_van_load_total)}</strong> ({fmtNum(t.recommended_carried_total)} carried + {fmtNum(t.recommended_fresh_total)} fresh) vs actually sold <strong>{fmtNum(t.actual_sold_total)}</strong> = <strong>{fmtPct(m.forecast_accuracy_pct)}</strong>.</p>
-                  <p>Symmetric: a 2x over-allocation and a 0.5x under-allocation both read as 50%. 100% = exact match. The number is naturally bounded by min/max, so heavy leftover days that would clamp a WAPE-style metric to 0% still show a meaningful signal here.</p>
-                  <p className="text-text-tertiary"><em>Different from <strong>Baseline accuracy</strong> on the Pipeline page, which is the model&apos;s overall test-set score across all routes. This tile is route + window specific.</em></p>
-                </div>
-              }
-            />
-          }
-          className="!border-l-brand-600"
-        />
-        <MetricCard
-          label="Forecast coverage"
-          value={fmtPct(m.forecast_coverage_pct, 0)}
-          subtitle="Share of sold items that were on our forecast"
-          trend={m.forecast_coverage_pct >= 80 ? "up" : "down"}
-          info={
-            <InfoBubble
-              title="How is forecast coverage calculated?"
-              body={
-                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>Of the items the rep actually sold on each working day in the window, what fraction were on our forecast for that day?</p>
-                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    coverage = mean over each working day of:<br />
-                    &nbsp;&nbsp;|sold_items AND forecasted_items|  /  |sold_items|
-                  </p>
-                  <p>100% means every item the rep sold was something we&apos;d predicted demand for. Lower numbers mean some sales came from items the model never saw - those are blind spots to investigate.</p>
-                </div>
-              }
-            />
-          }
-          className="!border-l-brand-600"
-        />
-        <MetricCard
-          label={
-            (t.excess_units_savings ?? 0) >= 0
-              ? "Overnight stock prevented"
-              : "Extra overnight stock"
-          }
-          // Signed value so the sign communicates direction ("+808" reads
-          // as "808 more units left overnight than the rep" while "-808"
-          // reads as "808 units saved"). The label and border colour
-          // already reinforce the polarity; the signed number removes
-          // any chance the reader misinterprets the magnitude.
+          label="SKU coverage"
           value={
-            t.excess_units_savings != null
-              ? `${t.excess_units_savings >= 0 ? "-" : "+"}${fmtNum(Math.abs(t.excess_units_savings))} units`
-              : fmtCurrency(t.holding_savings)
+            t.skus_sold > 0 ? (
+              <span className="inline-flex items-baseline gap-1.5">
+                <span className="tabular-nums">
+                  {t.skus_covered}
+                  <span className="text-text-tertiary"> / {t.skus_sold}</span>
+                </span>
+                <span className="text-body font-normal text-text-tertiary">
+                  ({t.skus_coverage_pct}%)
+                </span>
+              </span>
+            ) : (
+              <span className="text-text-tertiary">-</span>
+            )
+          }
+          subtitle="SKUs covered by our recommendation, out of SKUs the rep actually sold"
+          info={
+            <InfoBubble
+              title="What is SKU coverage?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p>Of the distinct items the rep actually sold in this window, how many did our engine also forecast?</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    SKU coverage = items we forecasted that sold &divide; items the rep sold
+                  </p>
+                  <p>100% means we predicted demand for every item the rep moved. A lower number reveals <strong>blind spots</strong> -- items the rep needed that we didn&apos;t anticipate.</p>
+                  <p>Both sides are <strong>distinct item counts</strong>, not unit totals -- so a one-off sale of a slow item weighs the same as a high-volume item. That keeps the metric about <em>breadth of forecast scope</em>, not size of any one item.</p>
+                </div>
+              }
+            />
+          }
+          className="!border-l-brand-600"
+        />
+        <MetricCard
+          label="Leftovers saved"
+          value={
+            t.rep_leftover_units > 0 ? (
+              <span className="inline-flex items-baseline gap-1.5">
+                {num(t.leftover_units_saved)}
+                <span className="text-body font-normal text-text-tertiary">
+                  units ({t.leftover_pct_saved}%)
+                </span>
+              </span>
+            ) : (
+              <span className="text-text-tertiary">0 units</span>
+            )
           }
           subtitle={
-            t.rep_excess_units != null && t.our_excess_units != null
-              ? `Actual ${fmtNum(t.rep_excess_units)} to recommended ${fmtNum(t.our_excess_units)} units left on the truck overnight`
-              : `Actual ${fmtCurrency(t.rep_holding_value)} to recommended ${fmtCurrency(t.our_holding_value)} (overnight excess stock)`
+            <span>
+              Rep had {fmtNum(t.rep_leftover_units)} leftover; we'd have{" "}
+              {fmtNum(t.our_leftover_units)}
+            </span>
           }
-          // Up = our policy reduced overnight stock (good).
-          // Down = our policy left more overnight (bad).
+          info={
+            <InfoBubble
+              title="What does 'leftovers saved' mean?"
+              body={
+                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                  <p>The difference between what the rep had to carry overnight versus what our policy would have left over -- across every item, every working day in the window.</p>
+                  <p>For each item on each day, leftover is the stock that didn&apos;t sell that day:</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    leftover = max(0, load &minus; sold)
+                  </p>
+                  <p>Items that ran short (sold more than loaded) are <strong>stock-outs</strong>, a different failure mode -- not counted as leftovers. That&apos;s why the formula is bounded at 0.</p>
+                  <p>Then:</p>
+                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                    leftovers saved = rep&apos;s leftover total &minus; our leftover total
+                  </p>
+                  <p>A positive number means our policy leaves <strong>less stock overnight</strong> -- leaner truck, less stale inventory, less handling. Negative means we&apos;d have left more (the tile flips to amber + down-arrow when that happens).</p>
+                </div>
+              }
+            />
+          }
           trend={
-            (t.excess_units_savings ?? t.holding_savings) > 0
+            t.leftover_units_saved > 0
               ? "up"
-              : (t.excess_units_savings ?? t.holding_savings) < 0
+              : t.leftover_units_saved < 0
               ? "down"
               : undefined
           }
-          info={
-            <InfoBubble
-              title="How is overnight stock calculated?"
-              body={
-                <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p><strong>Overnight stock</strong> is the units loaded onto the truck that didn&apos;t sell that day - pieces that have to be stored, recounted, and rolled into tomorrow&apos;s leftover. Less overnight stock = leaner van, less stale inventory, lower handling overhead.</p>
-                  <p>Per item we compute:</p>
-                  <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    overnight_units  =  max( on_truck - sold,  0 )<br />
-                    total_overnight  =  SUM(overnight_units)
-                  </p>
-                  <p>The <em>max(., 0)</em> excludes items where stock ran short - those would be lost-sales cost, not overnight stock.</p>
-                  <p>Numbers shown:</p>
-                  <ul className="list-disc pl-5 space-y-1">
-                    <li>Under the actual van load: <strong>{fmtNum(t.rep_excess_units ?? 0)} units</strong> ({fmtCurrency(t.rep_holding_value)})</li>
-                    <li>Under the recommended van load: <strong>{fmtNum(t.our_excess_units ?? 0)} units</strong> ({fmtCurrency(t.our_holding_value)})</li>
-                    <li>Units prevented: <strong>{fmtNum(t.excess_units_savings ?? 0)}</strong> - AED equivalent: <strong>{fmtCurrency(t.holding_savings)}</strong></li>
-                  </ul>
-                  <p>Why two figures? The bias-corrected forecast can redistribute issuance toward higher-priced items the model has been under-predicting; that can lift AED while units fall. <strong>Units</strong> is the metric the policy directly controls and the cleaner leftover-minimisation signal; <strong>AED</strong> is the financial context.</p>
-                </div>
-              }
-            />
-          }
           className={
-            (t.excess_units_savings ?? t.holding_savings) >= 0
+            t.leftover_units_saved >= 0
               ? "!border-l-success-600"
               : "!border-l-warning-500"
           }
         />
       </KpiRow>
 
-      {/* Daily comparison chart -- one line per story. The recommended-
-          van-load series plots ``recommended_van_load`` (leftover + fresh
-          composition), matching the headline tile exactly. The
-          forecast-quality story lives on its own ``Forecast accuracy``
-          tile -- not on this chart -- so each surface shows ONE meaning
-          of "recommended" and the two never collide. */}
-      <LineChart
+      {/* Two breakdown drilldowns above the chart -- the user picks the
+          aggregation level (category vs item) for the same columns:
+          Actual van load / Recommended van load / Actually sold /
+          Actual leftover / Recommended leftover. Both are server-sorted
+          and closed by default. */}
+      {categories.length > 0 && (
+        <details className="rounded-lg border border-default bg-surface-raised">
+          <summary className="cursor-pointer select-none px-4 py-3 text-body font-medium text-text-primary hover:bg-surface-sunken/40">
+            Category breakdown ({categories.length}{" "}
+            {categories.length === 1 ? "category" : "categories"})
+          </summary>
+          <div className="max-h-[480px] overflow-auto border-t border-default">
+            <table className="w-full text-body">
+              <thead className="sticky top-0 z-10 bg-surface-sunken">
+                <tr className="text-left">
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Category</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">SKUs</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual van load</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended van load</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actually sold</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual leftover</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended leftover</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-subtle">
+                {categories.map((c) => (
+                  <tr key={c.categoryName} className="hover:bg-surface-sunken/40">
+                    <td className="px-4 py-2 align-top font-medium text-text-primary">{c.categoryName}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{c.skus}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.rep_van_load)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.recommended_van_load)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.actual_sold)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.actual_leftover)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.recommended_leftover)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
+      {items.length > 0 && (
+        <details className="rounded-lg border border-default bg-surface-raised">
+          <summary className="cursor-pointer select-none px-4 py-3 text-body font-medium text-text-primary hover:bg-surface-sunken/40">
+            Item-by-item breakdown ({items.length} rows)
+          </summary>
+          <div className="max-h-[480px] overflow-auto border-t border-default">
+            <table className="w-full text-body">
+              <thead className="sticky top-0 z-10 bg-surface-sunken">
+                <tr className="text-left">
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Date</th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Item</th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Category</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual van load</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended van load</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actually sold</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual leftover</th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended leftover</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-subtle">
+                {items.map((r) => (
+                  <tr key={`${r.date}-${r.itemCode}`} className="hover:bg-surface-sunken/40">
+                    <td className="whitespace-nowrap px-4 py-2 align-top tabular-nums text-text-secondary">{fmtDate(r.date)}</td>
+                    <td className="px-4 py-2 align-top">
+                      <div className="truncate font-medium text-text-primary" title={r.itemName}>{r.itemName}</div>
+                      <div className="mt-0.5 text-caption uppercase tracking-wider text-text-tertiary">{r.itemCode}</div>
+                    </td>
+                    <td className="px-4 py-2 align-top text-text-secondary">
+                      {r.categoryName || (
+                        <span className="text-text-tertiary">Uncategorised</span>
+                      )}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.rep_van_load)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.recommended_van_load)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.actual_sold)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.actual_leftover)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.recommended_leftover)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </details>
+      )}
+
+      {/* Grouped bar chart -- header toggle switches between the
+          three-bar "Van load" view (rep / recommended / sold) and the
+          two-bar "Leftovers" view (actual vs recommended leftover per
+          day). Same colour tokens as the tile borders above so the eye
+          maps tile -> bar without a legend lookup. */}
+      <BarChart
         title="Day-by-day comparison"
-        subtitle="Actual van load (yellow) - recommended van load (blue) - actually sold (green, the ground truth)"
+        subtitle={chartSubtitle}
+        actions={
+          <ToggleGroup
+            options={CHART_TOGGLE_OPTIONS}
+            value={chartView}
+            onChange={setChartView}
+            ariaLabel="Chart view"
+          />
+        }
         data={data.daily as unknown as Record<string, unknown>[]}
         xKey="date"
-        series={[
-          {
-            key: "rep_van_load",
-            label: "Actual van load",
-            color: CHART_COLOR.warning,
-          },
-          {
-            key: "recommended_van_load",
-            label: "Recommended van load",
-            color: CHART_COLOR.brandPrimary,
-          },
-          {
-            key: "actual_sold",
-            label: "Actually sold",
-            color: CHART_COLOR.success,
-          },
-        ]}
+        series={chartSeries}
         height={320}
       />
     </>

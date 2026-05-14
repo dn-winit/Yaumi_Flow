@@ -27,6 +27,7 @@ complete prior version or the new one.
 from __future__ import annotations
 
 import logging
+import re
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -63,36 +64,135 @@ _PREDICTIONS_RENAME: Dict[str, str] = {
     "NonzeroRatio":       "nonzero_ratio",
     "MeanQty":            "mean_qty",
     "AvgGapDays":         "avg_gap_days",
-    "RecommendedLoad":    "recommended_load",
-    "ForecastCorrected":  "forecast_corrected",
-    "BiasPct":            "bias_pct",
-    "OpeningStock":       "opening_stock",
-    "LoadLowerBound":     "load_lower_bound",
-    "LoadUpperBound":     "load_upper_bound",
-    # Per-row sanity flag emitted by ``enrich_with_load``. PascalCase
-    # mirrors the convention used by every other reconciliation column;
-    # rows that pre-date the column read as missing and the route layer
-    # defaults to False on read for backward compatibility.
-    "ForecastBelowRecent": "forecast_below_recent",
-    # Pattern-envelope reconciliation outputs (CSV-only -- no DB schema
-    # today). ``ExpectedDemand`` is the class-aware envelope clip of
-    # ``forecast_corrected`` that the engine consumes for fresh-load
-    # calculation; ``RecentAvgPerSellingDay`` is the per-(route, item)
-    # anchor used by the envelope; the two booleans surface which side
-    # of the envelope (if any) bound the row. Rows persisted before
-    # these columns existed deserialize cleanly because consumers
-    # default to 0.0 / False on missing. ``recent_std_per_selling_day``
-    # and ``envelope_basis`` are internal engine diagnostics, computed
-    # for the envelope step but not persisted -- no downstream surface
-    # reads them.
-    "RecentAvgPerSellingDay": "recent_avg_per_selling_day",
-    "ExpectedDemand":         "expected_demand",
+    # The seven reconciliation columns (recommended_load, forecast_corrected,
+    # bias_pct, opening_stock, load_lower_bound, load_upper_bound,
+    # leftover_to_next_day) and the envelope diagnostics
+    # (recent_avg_per_selling_day, expected_demand, pattern_floor_applied,
+    # pattern_ceiling_applied, forecast_below_recent) are no longer in the
+    # forecast table -- they moved to ``yf_sales_transactions``. The
+    # sales-transactions CSV mirror has its own (lighter) rename map; see
+    # ``SALES_TRANSACTIONS_RENAME`` below.
     "PatternFloorApplied":    "pattern_floor_applied",
     "PatternCeilingApplied":  "pattern_ceiling_applied",
 }
 
+# Wire-schema contract for the sales-transactions CSV mirror
+# (``yf_sales_transactions``). PascalCase on the wire, snake_case in
+# pandas. This is the single source of truth: anything that reads the
+# mirror or merges it into another frame imports this map; nothing
+# duplicates it inline. The SQL aliases in
+# ``data_import.core.queries.QueryBuilder.sales_transactions`` are the
+# producer-side inverse and are validated against this map at module
+# import (see ``_assert_inverse_of_sales_transactions_aliases`` below).
+SALES_TRANSACTIONS_RENAME: Dict[str, str] = {
+    "TrxDate":                "trx_date",
+    "RouteCode":              "route_code",
+    "ItemCode":               "item_code",
+    "OpeningStock":           "opening_stock",
+    "FreshLoad":              "fresh_load",
+    "TotalVanLoad":           "total_van_load",
+    "LeftoverToNextDay":      "leftover_to_next_day",
+    "ActualSold":             "actual_sold",
+    "BiasPct":                "bias_pct",
+    "ForecastCorrected":      "forecast_corrected",
+    "ExpectedDemand":         "expected_demand",
+    "VanLoadLowerBound":      "van_load_lower_bound",
+    "VanLoadUpperBound":      "van_load_upper_bound",
+    "RecentDailyAvg":         "recent_daily_avg",
+    "PatternFloorApplied":    "pattern_floor_applied",
+    "PatternCeilingApplied":  "pattern_ceiling_applied",
+    "ForecastBelowRecent":    "forecast_below_recent",
+    "ForecastDormant":        "forecast_dormant",
+    "YaumiOpeningStock":      "yaumi_opening_stock",
+    "YaumiFreshLoad":         "yaumi_fresh_load",
+    "YaumiTotalVanLoad":      "yaumi_total_van_load",
+    "YaumiLeftover":          "yaumi_leftover",
+}
+
 # Keys served from the DB-mirror CSV instead of local artifact files.
 _DB_BACKED_PREDICTION_KEYS = {"test_predictions", "future_forecast"}
+
+
+# ----------------------------------------------------------------------
+# Inverse-mapping property check
+# ----------------------------------------------------------------------
+# The data flow for yf_sales_transactions is:
+#   DB (snake_case) -> SQL AS aliases (PascalCase) -> CSV
+#                   -> SALES_TRANSACTIONS_RENAME (PascalCase->snake_case)
+#                   -> in-memory pandas (snake_case)
+# The SQL aliases must therefore be the strict inverse of
+# SALES_TRANSACTIONS_RENAME. If someone adds a column on one side and
+# forgets the other, the data silently turns to NaN on read. We catch
+# that here at import time -- one regex sweep over the SELECT clause,
+# no live DB needed.
+
+_SQL_AS_ALIAS_RX = re.compile(r"(\w+)\s+AS\s+(\w+)", re.IGNORECASE)
+
+
+def _aliases_in_select(sql: str) -> Dict[str, str]:
+    """Extract ``column AS Alias`` pairs from a SELECT clause.
+
+    Returns ``{snake_db_col: PascalCaseWireAlias}``. Handles the
+    ``CAST(x AS T) AS Alias`` form too -- only the trailing AS Alias is
+    kept (regex is greedy-but-line-bounded, and the right-hand-side
+    of the *outer* AS is always the wire name we care about).
+    """
+    aliases: Dict[str, str] = {}
+    # Strip ``CAST(... AS <SqlType>)`` to leave just the outer ``... AS Alias``.
+    cast_rx = re.compile(r"CAST\s*\(([^()]+?)\s+AS\s+\w+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?\s*\)",
+                         re.IGNORECASE)
+    cleaned = cast_rx.sub(lambda m: m.group(1), sql)
+    for src, dst in _SQL_AS_ALIAS_RX.findall(cleaned):
+        aliases[src] = dst
+    return aliases
+
+
+def _assert_inverse_of_sales_transactions_aliases() -> None:
+    """Cross-check SALES_TRANSACTIONS_RENAME against the SQL producer.
+
+    Imported lazily so this module never fails to load when data_import
+    isn't on the path (e.g. unit tests of unrelated artifact reads).
+    Drift is a hard error -- silent NaN columns in van-load are exactly
+    what this guard exists to prevent.
+    """
+    try:
+        from data_import.core.queries import QueryBuilder
+        from data_import.config.settings import Settings as DISettings
+    except Exception as exc:  # pragma: no cover - env w/o data_import
+        logger.debug("Skipped sales_transactions alias check (no data_import): %s", exc)
+        return
+    try:
+        sql, _ = QueryBuilder(DISettings()).sales_transactions(routes=["__probe__"])
+    except Exception as exc:  # pragma: no cover - settings env not loaded
+        logger.debug("Skipped sales_transactions alias check (settings unloaded): %s", exc)
+        return
+    select_only = sql.split("FROM", 1)[0]
+    sql_aliases = _aliases_in_select(select_only)            # snake -> Pascal
+    rename_inv = {v: k for k, v in SALES_TRANSACTIONS_RENAME.items()}  # snake -> Pascal
+
+    missing_in_rename = set(sql_aliases) - set(rename_inv)
+    missing_in_sql = set(rename_inv) - set(sql_aliases)
+    mismatched = {
+        k: (sql_aliases[k], rename_inv[k])
+        for k in set(sql_aliases) & set(rename_inv)
+        if sql_aliases[k] != rename_inv[k]
+    }
+    problems = []
+    if missing_in_rename:
+        problems.append(f"in SQL but not in SALES_TRANSACTIONS_RENAME: {sorted(missing_in_rename)}")
+    if missing_in_sql:
+        problems.append(f"in SALES_TRANSACTIONS_RENAME but not in SQL: {sorted(missing_in_sql)}")
+    if mismatched:
+        problems.append(f"PascalCase mismatch (sql vs rename): {mismatched}")
+    if problems:
+        raise RuntimeError(
+            "SALES_TRANSACTIONS_RENAME drifted from "
+            "data_import.core.queries.sales_transactions SQL aliases: "
+            + "; ".join(problems)
+        )
+
+
+_assert_inverse_of_sales_transactions_aliases()
 
 
 class FileStorage(StorageBackend):

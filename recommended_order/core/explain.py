@@ -58,79 +58,119 @@ class Signal:
 # Detail-sentence factories (ONLY place these strings live)
 # ---------------------------------------------------------------------------
 
+# Sentences are written for a non-technical supervisor: short, plain
+# English, no formulas or engineering jargon. Numeric evidence stays on
+# the Signal.evidence dict for any downstream auditor; the user-facing
+# string is the headline only.
+
 def detail_regular_buyer(item_visits: int, total_visits: int) -> str:
-    return f"Bought on {item_visits} of last {total_visits} visits."
+    return f"Bought on {item_visits} of the last {total_visits} visits."
 
 
 def detail_due_now(days_since: int, cycle_days: int) -> str:
-    return f"Last bought {days_since}d ago; typical cycle is {cycle_days}d."
+    return (
+        f"Last bought {days_since} days ago "
+        f"— usually buys this every {cycle_days} days."
+    )
 
 
 def detail_overdue(cycles_missed: float, days_since: int) -> str:
-    return f"{cycles_missed:.1f} cycles overdue ({days_since}d since last buy)."
+    # cycles_missed stays on evidence; the headline reads naturally
+    # without exposing a "cycles" abstraction the user may not have.
+    _ = cycles_missed
+    return (
+        f"Overdue — last bought {days_since} days ago, "
+        f"longer than the usual gap."
+    )
 
 
 def detail_trending_up(old_cycle: int, new_cycle: int) -> str:
-    return f"Buying faster lately -- cycle shrank from {old_cycle}d to {new_cycle}d."
+    return (
+        f"Buying more often lately — used to buy every {old_cycle} days, "
+        f"now every {new_cycle} days."
+    )
 
 
 def detail_trending_down(old_cycle: int, new_cycle: int) -> str:
-    return f"Buying slower lately -- cycle grew from {old_cycle}d to {new_cycle}d."
+    return (
+        f"Buying less often lately — used to buy every {old_cycle} days, "
+        f"now every {new_cycle} days."
+    )
 
 
 def detail_lookalike_peer(score_pct: float, n_peers: int) -> str:
+    # Drop the "similarity-weighted score" technicality. The number of
+    # similar customers carries the story; the score is on evidence.
+    _ = score_pct
     return (
-        f"Customers with similar baskets to yours buy this item "
-        f"(similarity-weighted score {score_pct:.0f}%, {n_peers} peers)."
+        f"{n_peers} customers with similar shopping patterns "
+        f"regularly buy this item."
     )
 
 
 def detail_basket_complement(anchor_item: str, confidence: float) -> str:
-    return f"Often bought with {anchor_item} (co-purchase rate {confidence:.0%})."
+    return (
+        f"Often bought together with {anchor_item} "
+        f"— {confidence:.0%} of the time."
+    )
 
 
 def detail_reactivation(days_since_any: int) -> str:
-    return f"No visits in {days_since_any}d -- offering top route items to restart the relationship."
+    return (
+        f"No purchases in {days_since_any} days "
+        f"— suggesting a popular item to bring them back."
+    )
 
 
 def detail_first_visit() -> str:
-    return "First-time customer on this route -- seeding popular van items."
+    return (
+        "First-time customer on this route — "
+        "suggesting items that sell well to others here."
+    )
 
 
 def detail_consistent_pattern(cv: float) -> str:
-    return f"Very regular buying pattern (variability {cv:.0%})."
+    # cv stays on evidence; the user sees the human-readable claim.
+    _ = cv
+    return "Very regular buying pattern — quantities stay close to the average."
 
 
 def detail_qty_recency(avg_qty: float, recent_weighted: float, trend_factor: float, capped_to: int) -> str:
+    # Drop the formula entirely; surface the recent average and the
+    # suggestion. The raw avg, trend factor, and clamping are on
+    # evidence for auditors who need the math.
+    _ = avg_qty, trend_factor
     return (
-        f"Recency-weighted avg {recent_weighted:.1f} (raw avg {avg_qty:.1f}) "
-        f"x trend {trend_factor:.2f} -> {capped_to} (clamped to perfect zone)."
+        f"Recent visits averaged {recent_weighted:.0f} units. "
+        f"Suggesting {capped_to} units."
     )
 
 
 def detail_qty_seed(qty: int) -> str:
-    return f"Fixed seed qty of {qty} for a first-time customer -- low-risk starter."
+    return f"Suggesting {qty} units — a small starter quantity for a first-time customer."
 
 
 def detail_qty_peer(median_peer_qty: float, n_peers: int) -> str:
     return (
-        f"Similarity-weighted median qty across {n_peers} lookalike peers is "
-        f"{median_peer_qty:.0f} units."
+        f"Customers with similar patterns ({n_peers} of them) "
+        f"typically buy {median_peer_qty:.0f} units."
     )
 
 
 def detail_qty_basket(median_qty: float) -> str:
-    return f"Median co-purchased quantity is {median_qty:.0f} units."
+    return f"Typical quantity when bought together: {median_qty:.0f} units."
 
 
 def detail_feedback_adjusted(multiplier: float, source: str, n_samples: int) -> str:
-    """Sprint-4: plain-language annotation when a source's score was reweighted
-    based on observed driver outcomes for this route."""
-    pct = (multiplier - 1.0) * 100.0
-    direction = "Boosted" if pct >= 0 else "Dampened"
+    """Plain-language annotation when a recommendation lane was reweighted
+    based on what actually sold on this route recently. Direction reads
+    in the user's vocabulary; the multiplier + source + sample size stay
+    on Signal.evidence for auditors."""
+    direction = "Boosted" if multiplier >= 1.0 else "Dampened"
+    _ = source
     return (
-        f"{direction} by {abs(pct):.0f}% based on driver outcomes "
-        f"({source} lane, {n_samples} attributed recs on this route)."
+        f"{direction} based on what actually sold on this route recently "
+        f"({n_samples} similar recommendations tracked)."
     )
 
 

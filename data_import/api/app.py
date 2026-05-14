@@ -14,6 +14,56 @@ from data_import.api.routes import router
 from data_import.config.settings import Settings, get_settings
 
 
+def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> None:
+    """POST demand_forecasting's ``/reconciliation/refresh`` after a fresh
+    CSV import lands. The forecast service's reconciliation cron is the
+    sole writer of the CSV-only diagnostic columns
+    (``recent_avg_per_selling_day``, ``expected_demand``,
+    ``pattern_floor_applied`` / ``pattern_ceiling_applied``,
+    ``forecast_below_recent``). Without this hop, those columns stay
+    absent on the freshly-imported mirror until the next 03:30 Dubai
+    cron, and the van-load explainability modal shows misleading zeros
+    next to a real ``recommended_load``.
+
+    Best-effort: a missing or unreachable forecast service logs a
+    warning and returns -- the import itself succeeded and the
+    diagnostic columns will eventually be patched by the scheduled cron.
+    """
+    base = (settings.forecast_url or "").rstrip("/")
+    if not base:
+        log.info(
+            "Reverse cascade skipped -- DI_FORECAST_URL unset, "
+            "diagnostic columns will be patched on the next scheduled "
+            "reconciliation cron",
+        )
+        return
+    url = f"{base}/api/v1/forecast/reconciliation/refresh"
+    try:
+        # httpx is already in the venv (used by demand_forecasting). We
+        # only need a POST + JSON parse so the import is local; avoids
+        # paying its import cost on every cold dependency import.
+        import httpx
+        resp = httpx.post(
+            url,
+            timeout=float(settings.forecast_refresh_timeout_seconds),
+        )
+        resp.raise_for_status()
+        payload = resp.json() if resp.content else {}
+        cascade = payload.get("cascade") or {}
+        log.info(
+            "Reverse cascade ok: yf_sales_transactions refreshed %s rows, mirror cascade %s new rows",
+            payload.get("rows_updated", "?"),
+            cascade.get("new_rows", "?"),
+        )
+    except Exception as exc:
+        log.warning(
+            "Reverse cascade skipped -- /reconciliation/refresh "
+            "unreachable at %s: %s. Diagnostic columns will be patched "
+            "on the next scheduled cron.",
+            url, exc,
+        )
+
+
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
@@ -69,6 +119,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         results = importer.import_all("full")
                         new_rows = sum(r.get("new_rows", 0) for r in results.values())
                         _logger.info("Startup import complete: %d new rows across all datasets", new_rows)
+                        # Reverse cascade: after the fresh CSV mirror lands,
+                        # ask demand_forecasting to re-patch the CSV-only
+                        # diagnostic columns (recent_avg, expected_demand,
+                        # pattern_floor/ceiling_applied, forecast_below_recent)
+                        # so the van-load explainability modal renders the
+                        # real engine intermediates, not the silent zeros
+                        # that ``_first_present`` falls back to when those
+                        # columns are missing. Best-effort: a warning if the
+                        # forecast service is unreachable, never a hard fail.
+                        _cascade_reconciliation_refresh(settings, _logger)
                     else:
                         _logger.info("Data is fresh — skipping startup import")
 

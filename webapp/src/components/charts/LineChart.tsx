@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import {
   LineChart as RechartsLineChart,
   Line,
@@ -42,6 +43,9 @@ interface LineChartProps {
   title?: string;
   /** Optional helper text rendered just below the title, inside the card. */
   subtitle?: string;
+  /** Optional element rendered on the right side of the header (intended
+   *  for toggles, filter chips, etc.). Matches the Card ``actions`` slot. */
+  actions?: ReactNode;
   emptyMessage?: string;
   loading?: boolean;
   /**
@@ -61,21 +65,25 @@ export default function LineChart({
   height = DEFAULT_CHART_HEIGHT,
   title,
   subtitle,
+  actions,
   emptyMessage = "No data",
   loading = false,
   pxPerPoint = 80,
 }: LineChartProps) {
-  // Title/subtitle pair sits in one stacked block so the spacing rule is
-  // simple: the *bottom* element (subtitle when present, otherwise title)
-  // owns the gap to the chart. Avoids a dangling mb-4 when both are blank.
-  const header = (title || subtitle) ? (
-    <div className="mb-4">
-      {title && (
-        <h3 className="text-title font-semibold text-text-primary">{title}</h3>
-      )}
-      {subtitle && (
-        <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
-      )}
+  // Title/subtitle pair sits in one stacked block on the left; optional
+  // ``actions`` slot (toggle pills etc.) sits on the right, mirroring the
+  // Card component and BarChart so the three are visually interchangeable.
+  const header = (title || subtitle || actions) ? (
+    <div className="mb-4 flex items-start justify-between gap-3">
+      <div>
+        {title && (
+          <h3 className="text-title font-semibold text-text-primary">{title}</h3>
+        )}
+        {subtitle && (
+          <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
+        )}
+      </div>
+      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
     </div>
   ) : null;
 
