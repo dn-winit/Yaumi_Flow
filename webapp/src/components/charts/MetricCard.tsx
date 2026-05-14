@@ -5,16 +5,16 @@ type Trend = "up" | "down" | "neutral";
 
 interface MetricCardProps {
   label: string;
-  /** Either a pre-formatted string (animated on change) or an arbitrary
-   *  ReactNode (rendered verbatim, no count-up animation). */
+  /** Primitive values get a count-up animation on change; ReactNodes
+   *  render verbatim. Pass ``disableAnimation`` to snap primitives in
+   *  for live tiles where interpolation looks like "still settling". */
   value: string | number | ReactNode;
   trend?: Trend;
-  /** Same string/ReactNode contract as ``value``. */
   subtitle?: string | ReactNode;
   className?: string;
   loading?: boolean;
-  /** Optional element rendered next to the label (intended for InfoBubble). */
   info?: ReactNode;
+  disableAnimation?: boolean;
 }
 
 const trendConfig: Record<Trend, { icon: string; color: string }> = {
@@ -90,9 +90,16 @@ export default function MetricCard({
   className = "",
   loading = false,
   info,
+  disableAnimation = false,
 }: MetricCardProps) {
-  const animatable = isAnimatable(value);
-  const animatedValue = useAnimatedValue(animatable ? String(value) : "");
+  const isPrimitive = isAnimatable(value);
+  const primitive = isPrimitive ? String(value) : "";
+  const animatedValue = useAnimatedValue(primitive);
+  const rendered: ReactNode = !isPrimitive
+    ? value
+    : disableAnimation
+    ? primitive
+    : animatedValue;
 
   return (
     <div
@@ -116,7 +123,7 @@ export default function MetricCard({
         <>
           <div className="flex flex-wrap items-baseline gap-2 animate-fadeIn">
             <span className="text-xl font-bold text-text-primary">
-              {animatable ? animatedValue : value}
+              {rendered}
             </span>
             {trend && (
               <span className={`text-body font-medium ${trendConfig[trend].color}`}>

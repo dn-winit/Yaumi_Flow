@@ -50,10 +50,7 @@ system_prompt: |
 route_analysis_template: |
   ROUTE: {route_code} | DATE: {date}
   COVERAGE: {visited_customers}/{total_customers} ({coverage_percentage:.0f}%)
-  QUANTITY: {total_actual}/{total_recommended} ({quantity_achievement:.0f}% achievement)
-
-  ROUTE PLANNING CONTEXT:
-  {pre_context}
+  QUANTITY: {total_actual:d}/{total_recommended:d} ({quantity_achievement:.0f}% achievement)
 
   ACTUAL PERFORMANCE (visited customers):
   {actual_data}
@@ -107,7 +104,7 @@ route_analysis_template: |
      EXAMPLE STRUCTURE (use actual numbers from data):
      "Zero/low sales on specific SKUs across route - [Item code] had zero or near-zero sales in [N] out of [total] customers where it was recommended (that's [%] miss rate). These customers historically buy it [freq]% of the time. Either stock issue at distributor or price/communication gap. Tomorrow: confirm stock availability first, then investigate why consistent buyers are refusing."
 
-  ROUTE QUANTITY ANALYSIS: {total_actual} actual vs {total_recommended} recommended
+  ROUTE QUANTITY ANALYSIS: {total_actual:d} actual vs {total_recommended:d} recommended
   
   REMEMBER:
   - You're reviewing the whole route, not individual customers (unless it's a teaching example)

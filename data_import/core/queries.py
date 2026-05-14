@@ -49,11 +49,11 @@ class QueryBuilder:
                 CEILING(SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END)) AS TotalQuantity,
                 ROUND(AVG(s.UnitPrice), 2) AS AvgUnitPrice
             FROM {self._s.sales_view} s WITH (NOLOCK)
-            WHERE s.ItemType  = 'OrderItem'
-              AND s.TrxType   = 'SalesInvoice'
+            WHERE s.ItemType  = ?
+              AND s.TrxType   = ?
               AND s.RouteCode IN ({ph})
         """
-        params: list = list(routes)
+        params: list = [self._s.sales_item_type, self._s.sales_invoice_trx_type, *routes]
 
         if since_date:
             sql += "  AND s.TrxDate > ?\n"
@@ -362,11 +362,11 @@ class QueryBuilder:
                 CEILING(SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END)) AS TotalQuantity,
                 ROUND(AVG(s.UnitPrice), 2) AS AvgUnitPrice
             FROM {self._s.sales_view} s WITH (NOLOCK)
-            WHERE s.ItemType  = 'OrderItem'
-              AND s.TrxType   = 'SalesInvoice'
+            WHERE s.ItemType  = ?
+              AND s.TrxType   = ?
               AND s.RouteCode IN ({ph})
         """
-        params: list = list(routes)
+        params: list = [self._s.sales_item_type, self._s.sales_invoice_trx_type, *routes]
 
         if since_date:
             sql += "  AND s.TrxDate > ?\n"

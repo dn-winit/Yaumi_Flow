@@ -39,9 +39,12 @@ def _incremental_import() -> None:
         logger.error("[cron] Incremental import failed: %s", exc, exc_info=True)
 
 
-def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
+def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler | None:
     global _scheduler
     settings = settings or get_settings()
+    if not settings.scheduler_enabled:
+        logger.info("data_import scheduler disabled via settings.")
+        return None
 
     _scheduler = BackgroundScheduler(timezone=settings.scheduler_timezone)
     _scheduler.add_job(

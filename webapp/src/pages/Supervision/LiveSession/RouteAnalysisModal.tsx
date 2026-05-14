@@ -55,7 +55,6 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
       total_customers: ctx.totalCustomers,
       total_actual: ctx.totalActual,
       total_recommended: ctx.totalRecommended,
-      pre_context: "",
       actual_customer_codes: ctx.actualCustomerCodes,
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -63,8 +62,12 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
 
   // Persist a freshly-generated review once per session so a re-open
   // hydrates from saved storage instead of re-calling the LLM.
+  //
+  // Gated on ``success: true`` so degraded payloads (rate limit, empty
+  // input, retries exhausted) never freeze the DB column with a stale
+  // placeholder.
   useEffect(() => {
-    if (!open || !ctx || !result?.data) return;
+    if (!open || !ctx || !result?.data || !result.success) return;
     const key = ctx.sessionId;
     if (!key || persistedKey === key) return;
     void supervisionApi
@@ -72,7 +75,7 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
       .catch(() => {/* fire-and-forget; logged server-side */});
     setPersistedKey(key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ctx?.sessionId, result?.data]);
+  }, [open, ctx?.sessionId, result?.data, result?.success]);
 
   const a = (hydrated ?? result?.data ?? {}) as Record<string, unknown>;
   const list = (key: string): string[] => {

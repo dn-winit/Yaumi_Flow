@@ -59,7 +59,12 @@ class InitSessionRequest(BaseModel):
 
     route_code: str
     date: str
-    recommendations: List[Dict[str, Any]] = Field(description="Recommendation records")
+    # Optional. If absent, the server fetches recommendations from
+    # recommended_order (the canonical journey plan), so the client
+    # doesn't have to pre-fetch them. When present, the server uses
+    # them as-is so a freshly-regenerated plan reaches the session
+    # without waiting for the recommendation cache to invalidate.
+    recommendations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
 class ProcessVisitRequest(BaseModel):
@@ -124,6 +129,10 @@ class SavedVisit(BaseModel):
     preVisitBriefing: Optional[str] = None
     customerAnalysis: Optional[str] = None
     redistributions: RedistributionView = Field(default_factory=RedistributionView)
+    # Off-plan items the customer invoiced today, hydrated from
+    # yf_supervision_items rows with original_recommended_qty=0 and
+    # actual_qty>0. Same shape as the live /visit response's alsoBought.
+    alsoBought: List[AlsoBoughtRow] = Field(default_factory=list)
 
 
 class SessionVisitTotals(BaseModel):

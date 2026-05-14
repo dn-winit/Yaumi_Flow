@@ -144,16 +144,12 @@ export default function LiveSessionTab({
           actualQty: sv.totalActual,
           recommendedQty: sv.totalRecommended,
           actualSales: sv.actualSales,
-          // Forward the server-shaped redistribution view verbatim --
-          // the saved row already carries the same ``groups`` payload
-          // the live ``/visit`` response emits, so a drill-in into a
-          // previously-visited customer renders the same panel without
-          // a fresh round-trip.
           redistributions: sv.redistributions,
-          // Off-plan purchases remain a visit-time-only signal (not
-          // persisted on the saved row). A fresh auto-visit
-          // re-populates them while the supervisor is in-session.
-          alsoBought: [],
+          // Hydrated from yf_supervision_items rows where
+          // original_recommended_qty=0 and actual_qty>0 -- same off-plan
+          // chip strip the live /visit response surfaces, so a refresh
+          // never loses the supervisor's view of what was bought.
+          alsoBought: sv.alsoBought ?? [],
         };
       }
       return next;
@@ -202,34 +198,38 @@ export default function LiveSessionTab({
     customers_count: 0,
   };
 
-  // Live visit totals: hydrated from saved visits on mount, then
-  // overwritten by each ``/visit`` response. The frontend never sums
-  // the local visits map -- the server pushes the cumulative number
-  // alongside every visit result.
-  const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>({
-    visited_count: 0,
-    total_actual: 0,
-    total_recommended: 0,
-    avg_score: null,
-    unplanned_visited_count: 0,
-  });
-  // Hydrate ONCE from the saved snapshot. After the first non-null tick,
-  // visit totals are owned exclusively by ``handleVisitComplete`` (which
-  // applies the server-pushed cumulative number from each /visit
-  // response). Without this guard, the live-tier poll of /saved would
-  // race fresh /visit writes -- a slow network can land the polled
-  // snapshot AFTER a higher-count visit response, flickering the avg
-  // score backwards in front of the supervisor.
-  const hydratedFromSavedRef = useRef(false);
+  // Seeded from /session/initialize (which synchronously runs the
+  // reconciler's Phase 1) so the tiles render the correct counts
+  // immediately. Saved-visits polls keep it fresh; the monotonic
+  // accept blocks a slow poll from dragging the tile backwards behind
+  // a fresher /visit response.
+  const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>(() =>
+    sessionData?.visit_totals ?? {
+      visited_count: 0,
+      total_actual: 0,
+      total_recommended: 0,
+      avg_score: null,
+      unplanned_visited_count: 0,
+    },
+  );
   useEffect(() => {
-    if (hydratedFromSavedRef.current) return;
-    if (savedVisitsData?.visit_totals) {
-      setVisitTotals(savedVisitsData.visit_totals);
-      hydratedFromSavedRef.current = true;
-    }
+    const incoming = savedVisitsData?.visit_totals;
+    if (!incoming) return;
+    setVisitTotals((prev) =>
+      incoming.visited_count >= prev.visited_count ? incoming : prev,
+    );
   }, [savedVisitsData?.visit_totals]);
 
+  // Single readiness gate for every UI element that renders the live
+  // visit count or avg score. While this is false, the lazy-seeded
+  // ``visitTotals`` may be behind the canonical DB state if the cron
+  // ran between /session/initialize and the first /session/saved poll;
+  // the gate hides the number everywhere on the page (badge, tiles,
+  // resume banner) until ``/session/saved`` confirms, then they all
+  // paint the same final value in the same frame.
+  const countsReady = savedVisitsData != null;
   const allVisited =
+    countsReady &&
     recommendationTotals.customers_count > 0 &&
     visitTotals.visited_count === recommendationTotals.customers_count;
 
@@ -252,12 +252,6 @@ export default function LiveSessionTab({
       },
     }));
     setVisitTotals(visit.sessionTotals);
-    // Push the new write into the saved-visits cache so a re-mount (or
-    // a sibling component that reads the same query key) sees the
-    // visit without waiting for the next poll. Mark the hydration ref
-    // as latched so the refreshed /saved response can't clobber the
-    // live totals we just applied above.
-    hydratedFromSavedRef.current = true;
     qc.invalidateQueries({ queryKey: ["supervision-saved-visits", routeCode, date] });
   };
 
@@ -325,7 +319,14 @@ export default function LiveSessionTab({
     const customerByCode = new Map(customers.map((c) => [c.customerCode, c]));
     for (const code of liveVisitedSet) {
       if (autoVisitInflight.current.size >= AUTO_VISIT_MAX_INFLIGHT) break;
-      if (visits[code]) continue;
+      // Skip codes the backend already counts visited. Checking
+      // ``visits[code]`` alone races the hydration effect (its
+      // setVisits is scheduled but not committed in the same render
+      // that fires this effect), so also check ``savedVisits[code]``
+      // direct from the snapshot. Both checks needed -- without the
+      // second one, /visit fires for every already-persisted customer
+      // and the tile ticks 1, 2, 3 in front of the supervisor.
+      if (visits[code] || savedVisits[code]) continue;
       if (autoVisitInflight.current.has(code)) continue;
       const cust = customerByCode.get(code);
       if (!cust) continue;
@@ -343,7 +344,7 @@ export default function LiveSessionTab({
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveVisitedSet, visits, sessionId, customers, savedVisitsData]);
+  }, [liveVisitedSet, visits, savedVisits, sessionId, customers, savedVisitsData]);
 
   return (
     <div className="space-y-6">
@@ -356,7 +357,9 @@ export default function LiveSessionTab({
             label: "Progress",
             value: (
               <Badge variant={allVisited ? "success" : "warning"}>
-                {visitTotals.visited_count} / {recommendationTotals.customers_count}
+                {countsReady
+                  ? `${visitTotals.visited_count} / ${recommendationTotals.customers_count}`
+                  : `... / ${recommendationTotals.customers_count}`}
               </Badge>
             ),
           },
@@ -390,6 +393,7 @@ export default function LiveSessionTab({
         />
         <MetricCard
           label="Visited"
+          loading={!countsReady}
           value={`${visitTotals.visited_count} / ${recommendationTotals.customers_count}`}
           subtitle={(() => {
             const base = allVisited ? "All done" : "In progress";
@@ -398,9 +402,11 @@ export default function LiveSessionTab({
             return `${base} - ${pluralise(dropIns, "walk-in")}`;
           })()}
           trend={allVisited ? "up" : undefined}
+          disableAnimation
         />
         <MetricCard
           label="Avg visit score"
+          loading={!countsReady}
           value={
             visitTotals.avg_score != null
               ? `${visitTotals.avg_score.toFixed(1)}%`
@@ -418,6 +424,7 @@ export default function LiveSessionTab({
               ? "down"
               : undefined
           }
+          disableAnimation
         />
       </KpiRow>
 
@@ -496,19 +503,31 @@ export default function LiveSessionTab({
             );
           }
 
-          // Tiles come pre-computed from the session payload --
-          // ``unique_skus`` and ``total_units`` are filled server-side;
-          // the only thing the client overlays is the in-session
-          // ``visited`` / ``liveVisited`` flags. No counting, no sums.
+          // Green-dot semantic: "bought something today" -- either
+          // ``actualQty > 0`` in the current live session, or
+          // ``totalActual > 0`` in the saved snapshot (covers off-plan
+          // purchases now persisted in yf_supervision_items), or the
+          // customer is in ``liveVisitedSet`` (YaumiLive has a positive-
+          // qty invoice line today). A customer whose visit was
+          // processed but actuals came back all-zero (rare race) will
+          // NOT show the dot, eliminating the "green tick + zero
+          // everywhere" confusion.
           const serverTiles = sessionData?.customer_tiles ?? [];
-          const tiles: CustomerStat[] = serverTiles.map((t) => ({
-            customerCode: t.customer_code,
-            customerName: t.customer_name,
-            uniqueSkus: t.unique_skus,
-            totalUnits: t.total_units,
-            visited: visits[t.customer_code] != null || t.visited,
-            liveVisited: liveVisitedSet.has(t.customer_code),
-          }));
+          const tiles: CustomerStat[] = serverTiles.map((t) => {
+            const live = visits[t.customer_code];
+            const saved = savedVisits[t.customer_code];
+            const bought =
+              (live != null && live.actualQty > 0) ||
+              (saved != null && saved.totalActual > 0);
+            return {
+              customerCode: t.customer_code,
+              customerName: t.customer_name,
+              uniqueSkus: t.unique_skus,
+              totalUnits: t.total_units,
+              visited: bought,
+              liveVisited: liveVisitedSet.has(t.customer_code),
+            };
+          });
 
           return (
             <CustomerGrid
@@ -527,7 +546,7 @@ export default function LiveSessionTab({
       />
 
       {/* Route review trigger -- available once at least one visit exists */}
-      {visitTotals.visited_count > 0 && (
+      {countsReady && visitTotals.visited_count > 0 && (
         <Card
           title={allVisited ? "Route complete" : "Route in progress"}
           actions={

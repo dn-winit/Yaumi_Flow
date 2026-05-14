@@ -99,7 +99,12 @@ def _generate_daily(settings: Settings | None = None) -> None:
             if attempt < sc.max_retries:
                 time.sleep(sc.retry_delay_seconds)
 
-    logger.error("[cron] Daily generation FAILED after %d attempts: %s", sc.max_retries, last_error)
+    # Final failure -- surface with full traceback so the headline log
+    # carries the stack on top of the per-attempt exc_info traces.
+    logger.error(
+        "[cron] Daily generation FAILED after %d attempts: %s",
+        sc.max_retries, last_error, exc_info=last_error,
+    )
 
 
 def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:

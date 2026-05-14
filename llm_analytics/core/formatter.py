@@ -1,5 +1,14 @@
 """
 Data formatters -- convert DataFrames and dicts into prompt-ready text tables.
+
+Input dicts may arrive in either snake_case (the supervision auto-path's
+native shape) or camelCase / PascalCase (the browser-driven path's wire
+shape). ``_pick`` accepts a list of candidate keys and returns the first
+populated one. Earlier versions accepted only camelCase, which silently
+collapsed every value to zero on the supervision side -- the bug behind
+the contradictions in route summaries ("3566 units sold but 0% accuracy
+across all customers"). Producers stay free to evolve their key
+conventions; the formatter normalises at the boundary.
 """
 
 from __future__ import annotations
@@ -13,6 +22,19 @@ from llm_analytics.config.settings import Settings, get_settings
 
 def _sanitize(text: str) -> str:
     return str(text).replace('"', "inch").replace("'", "").replace("\n", " ").replace("\r", " ")
+
+
+def _pick(d: Dict[str, Any], *keys: str, default: Any = 0) -> Any:
+    """Return the first non-None value from ``keys`` in ``d``.
+
+    Lets one formatter serve both snake_case (supervision) and
+    camelCase (browser) callers without forcing the caller to translate.
+    """
+    for k in keys:
+        v = d.get(k)
+        if v is not None:
+            return v
+    return default
 
 
 class DataFormatter:
@@ -54,15 +76,21 @@ class DataFormatter:
 
         lines = ["ItemCode | ItemName | Actual | Recommended | Accuracy"]
         for item in items:
-            code = str(item.get("itemCode", ""))
-            name = _sanitize(str(item.get("itemName", "")))[:20]
-            actual = int(item.get("actualQuantity", 0))
-            rec = int(item.get("recommendedQuantity", 0))
+            code = str(_pick(item, "item_code", "itemCode", "ItemCode", default=""))
+            name = _sanitize(str(_pick(item, "item_name", "itemName", "ItemName", default="")))[:20]
+            actual = int(_pick(item, "actual_qty", "actualQuantity", "ActualQuantity", default=0))
+            rec = int(_pick(item, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0))
             acc = (actual / rec * 100) if rec > 0 else 0
             lines.append(f"{code} | {name:<20} | {actual:>6} | {rec:>11} | {acc:.0f}%")
 
-        t_act = sum(int(i.get("actualQuantity", 0)) for i in items)
-        t_rec = sum(int(i.get("recommendedQuantity", 0)) for i in items)
+        t_act = sum(
+            int(_pick(i, "actual_qty", "actualQuantity", "ActualQuantity", default=0))
+            for i in items
+        )
+        t_rec = sum(
+            int(_pick(i, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0))
+            for i in items
+        )
         t_acc = (t_act / max(t_rec, 1)) * 100
         lines.append(f"TOTAL | {'':20} | {t_act:>6} | {t_rec:>11} | {t_acc:.0f}%")
         return "\n".join(lines)
@@ -77,11 +105,11 @@ class DataFormatter:
 
         lines = ["Customer | Score | Items | Actual | Recommended | Accuracy"]
         for c in visited_customers:
-            code = str(c.get("customerCode", ""))
-            score = c.get("performanceScore", 0)
-            items = c.get("itemCount", 0)
-            actual = c.get("totalActual", 0)
-            rec = c.get("totalRecommended", 0)
+            code = str(_pick(c, "customer_code", "customerCode", default=""))
+            score = float(_pick(c, "score", "performanceScore", default=0) or 0)
+            items = int(_pick(c, "item_count", "itemCount", "items_sold", default=0) or 0)
+            actual = int(_pick(c, "total_actual", "totalActual", default=0) or 0)
+            rec = int(_pick(c, "total_recommended", "totalRecommended", default=0) or 0)
             acc = (actual / rec * 100) if rec > 0 else 0
             lines.append(f"{code} | {score:>5.0f} | {items:>5} | {actual:>6} | {rec:>11} | {acc:.0f}%")
         return "\n".join(lines)

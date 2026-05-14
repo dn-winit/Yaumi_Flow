@@ -496,6 +496,28 @@ def _test_set_recent_accuracy(svc: Any) -> Optional[float]:
 _auto_retrain_pending: dict[str, Any] = {}
 _pending_lock = threading.Lock()
 
+def _max_sales_recent_date(s: Settings) -> Optional[pd.Timestamp]:
+    """Latest ``TrxDate`` in the data_import sales_recent CSV mirror.
+
+    Returns None when the file is missing/empty or has no parseable
+    dates -- the caller treats that as "freshness unknown" and lets
+    the retrain proceed rather than blocking on a missing signal.
+    """
+    path = Path(getattr(s, "sales_recent_file", ""))
+    if not path or not path.exists():
+        return None
+    try:
+        df = pd.read_csv(path, usecols=["TrxDate"])
+    except (ValueError, KeyError, OSError):
+        return None
+    if df.empty:
+        return None
+    parsed = pd.to_datetime(df["TrxDate"], errors="coerce").dropna()
+    if parsed.empty:
+        return None
+    return parsed.max().normalize()
+
+
 def check_and_retrain(
     config: AutoRetrainConfig,
     pipeline_service: Any,
@@ -601,6 +623,27 @@ def check_and_retrain(
     if train_status.get("status") == "running":
         logger.debug("Auto-retrain: training already running, skipping")
         return
+
+    # 4. Data-freshness guard. Re-training on stale data wastes a full
+    # pipeline cycle for no accuracy lift -- check that the upstream
+    # data_import has produced new sales rows since the last successful
+    # auto-retrain. The check is best-effort (any failure falls through
+    # to allow the run); we only skip when we have positive evidence
+    # that nothing changed.
+    last_run_iso = (config.get() or {}).get("last_auto_retrain")
+    if last_run_iso:
+        try:
+            max_dt = _max_sales_recent_date(s)
+            last_run_dt = pd.Timestamp(last_run_iso).normalize()
+            if max_dt is not None and max_dt <= last_run_dt:
+                logger.info(
+                    "Auto-retrain: skipping -- upstream sales_recent max_date=%s "
+                    "not newer than last_auto_retrain=%s",
+                    max_dt.date(), last_run_dt.date(),
+                )
+                return
+        except Exception as exc:
+            logger.warning("Auto-retrain: freshness check skipped: %s", exc)
 
     # 4. Record accuracy_before
     accuracy_before = None

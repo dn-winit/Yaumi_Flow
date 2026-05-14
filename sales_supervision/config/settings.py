@@ -105,6 +105,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     auto_visit_enabled: bool = Field(default=True,
         description="Master switch for the supervision auto-fill background job.")
+    auto_visit_timezone: str = Field(default="Asia/Dubai",
+        description="Scheduler timezone -- matches the demand-forecasting + recommended-order schedulers so log timestamps line up across services.")
     auto_visit_poll_seconds: int = Field(default=60, ge=30, le=3600,
         description="Interval between reconciliation ticks. Min 30s to avoid hammering YaumiLive. "
                     "Default 60s -- with the data/LLM phase split, each tick stays sub-10s, so a "

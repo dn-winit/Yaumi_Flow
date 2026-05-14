@@ -1,4 +1,4 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { supervisionApi } from "@/api/supervision";
 import { analyticsApi } from "@/api/analytics";
 import Badge from "@/components/ui/Badge";
@@ -106,14 +106,42 @@ export default function CustomerVisit({
   initialVisit,
   onRequestAnalysis,
 }: Props) {
-  // ``initialVisit`` is the single source of truth: present = visited
-  // (auto-fired or hydrated), absent = unvisited. Kept as a constant
-  // dictionary so the render path doesn't need separate state.
-  const visited = !!initialVisit;
   const score = initialVisit?.score;
   const actuals: Record<string, number> = initialVisit?.actualSales ?? {};
-  const redistributionView = initialVisit?.redistributions;
   const alsoBought = initialVisit?.alsoBought ?? [];
+
+  // Redistribution replay is server-side-heavy (~3s per route for 30
+  // customers), so /session/saved no longer ships it inline. Fetch on
+  // demand the first time this customer's drill-in mounts; live
+  // ``/visit`` responses still carry the freshly-computed view inline
+  // and short-circuit the fetch.
+  const [redistributionView, setRedistributionView] = useState(
+    initialVisit?.redistributions,
+  );
+  useEffect(() => {
+    if (initialVisit?.redistributions) {
+      setRedistributionView(initialVisit.redistributions);
+      return;
+    }
+    if (!customerCode || !routeCode || !date) return;
+    let cancelled = false;
+    void supervisionApi
+      .getCustomerRedistribution(routeCode, date, customerCode)
+      .then((r) => {
+        if (!cancelled && r?.available) {
+          setRedistributionView(r.redistributions as typeof redistributionView);
+        }
+      })
+      .catch(() => {/* drill-in renders without the replay if it fails */});
+    return () => { cancelled = true; };
+  }, [customerCode, routeCode, date, initialVisit?.redistributions]);
+  // Green-dot semantic: ``visited`` only when the customer actually
+  // bought something -- either a planned item (totalActual > 0) or an
+  // off-plan extra (alsoBought non-empty). A visit row with all-zero
+  // actuals doesn't qualify.
+  const visited =
+    !!initialVisit &&
+    ((initialVisit.totalActual ?? 0) > 0 || alsoBought.length > 0);
 
   // Hydrate the briefing from a previously-saved JSON payload when
   // present so re-opening an already-visited customer renders the same
@@ -165,9 +193,13 @@ export default function CustomerVisit({
       setBriefing(payload);
       // Persist the structured briefing so re-opening the customer
       // hydrates from the saved row instead of re-calling the LLM.
-      // Fire-and-forget: the server queues the DB write, we don't
-      // block the UI on it.
-      void supervisionApi.saveBriefing(sessionId, customerCode, JSON.stringify(payload));
+      // Gated on res.success so a degraded response (rate limit, empty
+      // input, retries exhausted) never freezes the DB column with a
+      // placeholder -- the next attempt will retry against a clean
+      // ``NULL`` slot.
+      if (res.success) {
+        void supervisionApi.saveBriefing(sessionId, customerCode, JSON.stringify(payload));
+      }
     } catch {
       setBriefing({ briefing: "Briefing unavailable. Please try again.", key_items: [], heads_up: "" });
     } finally {
@@ -200,8 +232,8 @@ export default function CustomerVisit({
               className="w-2 h-2 rounded-full bg-success-500 shrink-0"
               title={
                 visited
-                  ? "Visit recorded in this session"
-                  : "Customer invoiced today (live from YaumiLive)"
+                  ? "Visit recorded -- may include off-plan items the customer bought today"
+                  : "Customer invoiced today (may include off-plan items)"
               }
               aria-label="visited"
             />

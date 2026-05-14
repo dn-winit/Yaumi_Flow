@@ -361,31 +361,48 @@ def _cascade_recommended_order_generate(
         getattr(s, "recommended_order_generate_timeout_seconds", 600.0)
     )
 
+    def _post_once(d: str) -> Dict[str, Any]:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                f"{url_base}/api/v1/recommended-order/generate",
+                json={"date": d, "force": True},
+            )
+            resp.raise_for_status()
+            body = resp.json()
+        return {
+            "date": d,
+            "success": bool(body.get("success")),
+            "routes_processed": int(body.get("routes_processed") or 0),
+            "total_records": int(body.get("total_records") or 0),
+            "duration_seconds": float(body.get("duration_seconds") or 0.0),
+        }
+
     results: list[Dict[str, Any]] = []
     overall_success = True
     for d in dates:
+        # One retry on transient HTTP / 5xx failure -- mirrors
+        # _cascade_data_import_refresh's pattern so the cron pair is
+        # resilient to a brief recommended_order blip without leaving
+        # downstream state stale.
         try:
-            with httpx.Client(timeout=timeout) as client:
-                resp = client.post(
-                    f"{url_base}/api/v1/recommended-order/generate",
-                    json={"date": d, "force": True},
-                )
-                resp.raise_for_status()
-                body = resp.json()
-            results.append({
-                "date": d,
-                "success": bool(body.get("success")),
-                "routes_processed": int(body.get("routes_processed") or 0),
-                "total_records": int(body.get("total_records") or 0),
-                "duration_seconds": float(body.get("duration_seconds") or 0.0),
-            })
-            if not body.get("success"):
-                overall_success = False
+            row = _post_once(d)
         except Exception as exc:
             logger.warning(
-                "recommended_order cascade failed for date=%s: %s", d, exc,
+                "recommended_order cascade attempt 1 failed for date=%s: %s; "
+                "retrying in %.1fs",
+                d, exc, _CASCADE_RETRY_DELAY_SECONDS,
             )
-            results.append({"date": d, "success": False, "error": str(exc)})
+            time.sleep(_CASCADE_RETRY_DELAY_SECONDS)
+            try:
+                row = _post_once(d)
+            except Exception as exc2:
+                logger.error(
+                    "recommended_order cascade failed after retry for date=%s: %s",
+                    d, exc2,
+                )
+                row = {"date": d, "success": False, "error": str(exc2)}
+        results.append(row)
+        if not row.get("success"):
             overall_success = False
 
     return {
@@ -873,19 +890,23 @@ def start_reconciliation_scheduler(
     if job is None:
         def job() -> None:  # type: ignore[no-redef]
             # ``horizon_days_behind`` sourced from settings (default 1 =
-            # today + yesterday). The wider horizon eliminates cross-pass
-            # chain drift -- adjacent days reconciled by separate runs see
-            # different input states (late invoices, updated forecasts),
-            # so the chain identity ``leftover_to_next_day[d] ==
-            # opening_stock[d+1]`` only holds within a single pass.
-            # Refreshing yesterday + today in one pass guarantees the
-            # cron-boundary chain is always internally consistent.
-            res = refresh_reconciliation(
-                horizon_days_behind=int(
-                    getattr(s, "reconciliation_refresh_horizon_days", 1)
-                ),
-                settings=s,
-            )
+            # today + yesterday) so the chain identity
+            # ``leftover_to_next_day[d] == opening_stock[d+1]`` holds
+            # across the cron boundary in a single pass.
+            #
+            # Wrapped in try/except so APScheduler's silent-swallow
+            # behaviour can't hide an unhandled exception -- structured
+            # log + traceback surface in ops dashboards.
+            try:
+                res = refresh_reconciliation(
+                    horizon_days_behind=int(
+                        getattr(s, "reconciliation_refresh_horizon_days", 1)
+                    ),
+                    settings=s,
+                )
+            except Exception:
+                log.exception("reconciliation_refresh_unhandled_exception")
+                return
             log.info(
                 "reconciliation_refresh_done rows=%s window=%s duration=%s ok=%s",
                 res.get("rows_updated", 0),

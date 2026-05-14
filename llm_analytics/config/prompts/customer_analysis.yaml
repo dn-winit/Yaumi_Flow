@@ -42,7 +42,7 @@ system_prompt: |
 
 customer_analysis_template: |
   CUSTOMER: {customer_code} | ROUTE: {route_code} | DATE: {date}
-  SCORE: {performance_score}% | COVERAGE: {coverage}% | ACCURACY: {accuracy}%
+  SCORE: {performance_score:.0f}% | COVERAGE: {coverage:.0f}% | ACCURACY: {accuracy:.0f}%
 
   HISTORICAL PATTERNS:
   {historical_context}
@@ -55,7 +55,7 @@ customer_analysis_template: |
   STRUCTURE YOUR FEEDBACK:
 
   1. PERFORMANCE SUMMARY (2-3 sentences):
-     - Start: "You scored {performance_score}% - this is [concerning/needs improvement/solid/strong]"
+     - Start: "You scored {performance_score:.0f}% - this is [concerning/needs improvement/solid/strong]"
      - Highlight: One thing they did well (mention item and why it matters to this customer)
      - Concern: One major issue (mention item and what likely went wrong)
      - Be conversational: "You did well with [item], customer clearly needed it. But we missed on [item] - looks like [reason]"

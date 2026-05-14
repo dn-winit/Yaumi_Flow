@@ -23,7 +23,6 @@ class RouteAnalysisRequest(BaseModel):
     total_customers: int = 0
     total_actual: int = 0
     total_recommended: int = 0
-    pre_context: str = ""
     actual_customer_codes: Optional[List[str]] = None
 
 

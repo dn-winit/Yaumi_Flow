@@ -1,5 +1,13 @@
 """
 API routes for LLM analytics.
+
+``success`` on the response is derived from the analyzer's
+``_degraded`` marker: a fallback dict (rate limit, retries exhausted,
+parse failure) downgrades ``success`` to ``False`` so the supervision
+saver skips the DB UPDATE and a later tick can retry against a clean
+slate. Without this, fallback strings ("Analysis not available: ...")
+would land in the user-facing column and the column's NOT NULL state
+would block the retry from ever running.
 """
 
 from __future__ import annotations
@@ -17,9 +25,13 @@ from llm_analytics.api.schemas import (
     PreVisitRequest,
     RouteAnalysisRequest,
 )
-from llm_analytics.core.analyzer import Analyzer
+from llm_analytics.core.analyzer import DEGRADED_KEY, Analyzer
 
 router = APIRouter()
+
+
+def _success_of(result: dict) -> bool:
+    return not bool(result.get(DEGRADED_KEY))
 
 
 # ------------------------------------------------------------------
@@ -44,7 +56,7 @@ def analyze_customer(
         accuracy=req.accuracy,
     )
 
-    return AnalysisResponse(success=True, analysis_type="customer", data=result)
+    return AnalysisResponse(success=_success_of(result), analysis_type="customer", data=result)
 
 
 # ------------------------------------------------------------------
@@ -65,11 +77,10 @@ def analyze_route(
         total_customers=req.total_customers,
         total_actual=req.total_actual,
         total_recommended=req.total_recommended,
-        pre_context=req.pre_context,
         actual_customer_codes=codes,
     )
 
-    return AnalysisResponse(success=True, analysis_type="route", data=result)
+    return AnalysisResponse(success=_success_of(result), analysis_type="route", data=result)
 
 
 # ------------------------------------------------------------------
@@ -88,7 +99,7 @@ def pre_visit_briefing(
         date=req.date,
         items=req.items,
     )
-    return AnalysisResponse(success=True, analysis_type="pre_visit", data=result)
+    return AnalysisResponse(success=_success_of(result), analysis_type="pre_visit", data=result)
 
 
 # ------------------------------------------------------------------

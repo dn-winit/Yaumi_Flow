@@ -43,6 +43,8 @@ from sales_supervision.api.schemas import (
     VisitResultPayload,
     VisitScore,
 )
+from sales_supervision.core.constants import TIER_UNPLANNED
+from sales_supervision.models.schemas import SessionItem
 from sales_supervision.core.redistribution import (
     compute_buffer_ledger,
     compute_redistribution_for_unplanned,
@@ -138,34 +140,33 @@ _sessions = _SessionRegistry(_ss.session_registry_max, _ss.session_ttl_seconds)
 @router.post("/initialize", response_model=SessionResponse)
 def initialize_session(
     req: InitSessionRequest,
+    background_tasks: BackgroundTasks,
     mgr: SessionManager = Depends(get_session_manager),
     db_saver: DbSaver = Depends(get_db_saver),
     auto_visit_svc=Depends(get_auto_visit_service),
 ):
-    # Bring the supervision DB up to date with YaumiLive for this
-    # (route, date) BEFORE we hydrate. Same code path the 60s cron
-    # uses; running it synchronously here means the saved snapshot we
-    # load below already reflects every customer YaumiLive has invoiced
-    # so far. The page then snaps straight to the correct count instead
-    # of ticking 1, 2, 3 in front of the supervisor as a per-customer
-    # reconciliation walks the counter up.
+    # Page-open is READ-ONLY: hydrate from whatever the cron has already
+    # persisted, return immediately. Reconciliation is fired as a
+    # BackgroundTask so any post-last-tick YaumiLive activity catches up
+    # in <60s via the saved-visits poll; the frontend's ``countsReady``
+    # gate keeps the tile in skeleton until /session/saved confirms, so
+    # the supervisor never sees stale numbers. Invalidating the cron's
+    # cached session here forces its next tick to pick up the journey
+    # plan that's current at page-open time.
     if auto_visit_svc is not None and db_saver.available:
-        try:
-            # ``skip_llm=True`` runs only Phase 0 + Phase 1 (route
-            # header refresh + visit upserts). LLM phases (briefings,
-            # retros) are handled by the 60s cron -- idempotent, so
-            # the next tick picks them up. Keeps page-open latency
-            # bounded to a few seconds.
-            auto_visit_svc.reconcile_route(req.route_code, req.date, skip_llm=True)
-        except Exception as exc:
-            # Best-effort -- the 60s cron will catch up on the next tick
-            # even if this synchronous attempt fails.
-            logger.warning(
-                "init_session_reconcile_failed route=%s date=%s err=%s",
-                req.route_code, req.date, exc,
-            )
+        auto_visit_svc.invalidate_route(req.route_code, req.date)
+        background_tasks.add_task(
+            auto_visit_svc.reconcile_route,
+            req.route_code, req.date, skip_llm=True,
+        )
 
-    session = mgr.create_session(req.route_code, req.date, req.recommendations)
+    # Recommendations: client-supplied take precedence (freshest after
+    # a manual regenerate); server falls back to recommended_order so
+    # the wire contract stays optional. Single source either way.
+    recs = req.recommendations
+    if not recs and auto_visit_svc is not None:
+        recs = auto_visit_svc._recs.get_recommendations(req.route_code, req.date) or []
+    session = mgr.create_session(req.route_code, req.date, recs)
     if db_saver.available:
         saved = db_saver.load_session_visits(req.route_code, req.date)
         if saved:
@@ -184,6 +185,7 @@ def process_visit(
     mgr: SessionManager = Depends(get_session_manager),
     live: LiveActualsClient = Depends(get_live_actuals),
     db_saver: DbSaver = Depends(get_db_saver),
+    auto_visit_svc=Depends(get_auto_visit_service),
 ):
     """Mark a customer visited and persist the visit to YaumiAIML.
 
@@ -193,7 +195,10 @@ def process_visit(
     customer's item rows are upserted in a single transaction. The
     upsert runs as a FastAPI ``BackgroundTask`` so the response returns
     to the field UI immediately and warehouse latency never blocks a
-    visit tap.
+    visit tap. A second BackgroundTask then fires the LLM briefing +
+    customer analysis so every column in the supervision tables --
+    including the LLM ones -- is populated within seconds of the
+    green-dot moment.
     """
     session = _sessions.get(req.session_id)
     if session is None:
@@ -218,9 +223,13 @@ def process_visit(
     with _sessions.lock_for(req.session_id):
         actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
 
-        # Scoring evaluates planned items only; surface any extras the
-        # customer bought as ``alsoBought`` so the UI can show them as
-        # awareness-only context (no score impact).
+        # Scoring evaluates planned items only; off-plan purchases are
+        # surfaced as ``alsoBought`` for the live UI and ALSO appended to
+        # ``customer.items`` with ``recommended_qty=0, tier=UNPLANNED`` so
+        # they ride through ``upsert_visit`` into ``yf_supervision_items``.
+        # That lets the saved-visits hydration emit them again on page
+        # reload (same wire shape as the live response), so off-plan
+        # purchases never silently disappear after a refresh.
         planned_item_codes = {it.item_code for it in customer.items}
         also_bought_rows = [
             AlsoBoughtRow(item_code=code, qty=int(qty))
@@ -230,6 +239,22 @@ def process_visit(
         also_bought_rows.sort(key=lambda r: r.qty, reverse=True)
 
         result = mgr.process_visit(session, req.customer_code, actual_sales)
+
+        for row in also_bought_rows:
+            customer.items.append(SessionItem(
+                item_code=row.item_code,
+                item_name="",
+                recommended_qty=0,
+                actual_qty=int(row.qty),
+                was_sold=True,
+                tier=TIER_UNPLANNED,
+                raw={
+                    "ItemCode": row.item_code,
+                    "ItemName": "",
+                    "RecommendedQuantity": 0,
+                    "Tier": TIER_UNPLANNED,
+                },
+            ))
 
         # Cumulative buffer ledger across the session's visited walk so
         # this visit's allocation decisions reflect EVERY earlier visit's
@@ -255,6 +280,19 @@ def process_visit(
             snapshot,
             req.customer_code,
         )
+        # Fire briefing + customer LLM right after the visit row lands so
+        # the green-dot moment populates every supervision column,
+        # including the LLM ones. FastAPI runs BackgroundTasks
+        # sequentially, so ``upsert_visit`` completes before this fires
+        # and the saver sees the just-persisted row. The 60s cron stays
+        # as a safety net for any visit that lands while this service is
+        # unreachable.
+        if auto_visit_svc is not None:
+            background_tasks.add_task(
+                auto_visit_svc.fire_llms_for_visit,
+                session,
+                req.customer_code,
+            )
 
     visit_payload = VisitResultPayload(
         score=VisitScore(
@@ -365,6 +403,7 @@ def save_route_analysis(
 def saved_visits(
     route_code: str,
     date: str,
+    include_redistributions: bool = False,
     db_saver: DbSaver = Depends(get_db_saver),
 ):
     """Already-saved visit data for a (route, date), keyed by
@@ -372,16 +411,38 @@ def saved_visits(
     prior visit renders their actuals + score immediately, without
     re-running the briefing -> mark-visited flow.
 
-    Returns ``available=False`` when the DB isn't configured or no
-    session has landed for the (route, date) yet -- the UI then falls
-    back to the empty-state path.
+    ``include_redistributions=False`` (default) skips the expensive
+    per-customer replay; drill-in fetches one customer at a time via
+    ``GET /session/redistribution/{route}/{date}/{customer_code}``.
+    Set to True only when the caller needs every visit's replay in one
+    response (legacy clients / one-off audit scripts).
     """
     if not db_saver.available:
         return SavedVisitsResponse(available=False)
-    payload = db_saver.load_session_visits(route_code, date)
+    payload = db_saver.load_session_visits(
+        route_code, date, include_redistributions=include_redistributions,
+    )
     if not payload:
         return SavedVisitsResponse(available=False)
     return SavedVisitsResponse(**payload)
+
+
+@router.get("/redistribution/{route_code}/{date}/{customer_code}")
+def redistribution_for_customer(
+    route_code: str,
+    date: str,
+    customer_code: str,
+    db_saver: DbSaver = Depends(get_db_saver),
+):
+    """On-demand redistribution replay for one customer. The saved-visits
+    hot path skips replay to keep polling cheap; the supervisor's
+    per-customer drill-in modal fires this once on open."""
+    if not db_saver.available:
+        return {"available": False}
+    view = db_saver.load_redistribution_for_customer(route_code, date, customer_code)
+    if view is None:
+        return {"available": False}
+    return {"available": True, "redistributions": view}
 
 
 @router.get("/unplanned/{session_id}", response_model=UnplannedVisitsResponse)

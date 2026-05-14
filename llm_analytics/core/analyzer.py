@@ -1,17 +1,39 @@
 """
 Main analyzer -- orchestrates client, prompts, formatting, caching, rate limiting.
+
+Three production-grade invariants the rest of the module enforces:
+
+  1. **Cache key reflects content.** Every cache call passes the full
+     identity of the call (route+date+customer **plus** a content
+     signature **plus** model name **plus** prompt-source hash). A
+     visit's analysis cached at 09:00 with zero actuals does not get
+     served back at 17:00 after the sales have landed.
+
+  2. **Fallbacks never persist.** When the LLM is rate-limited, errors,
+     or returns garbage, the analyzer returns a ``_degraded=True`` dict.
+     The cache is bypassed and the API layer downgrades ``success`` to
+     ``False`` so the supervision saver skips DB write -- a later tick
+     will retry on a clean slate.
+
+  3. **Empty-state short-circuit.** If the input genuinely has no items
+     or no sales activity, we synthesise a deterministic, honest
+     response (and cache it cheaply) instead of letting the LLM
+     hallucinate "clean slate / build relationship" prose from nothing.
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 import pandas as pd
 from pydantic import ValidationError
 
 from llm_analytics.config.settings import Settings, get_settings
-from llm_analytics.core.client import LLMClient
+from llm_analytics.core.client import LLMClient, TruncatedResponseError
 from llm_analytics.core.formatter import DataFormatter
 from llm_analytics.core.prompt_loader import PromptLoader
 from llm_analytics.core.validator import sanitize_customer_codes
@@ -20,6 +42,67 @@ from llm_analytics.services.cache import LLMCache
 from llm_analytics.services.rate_limiter import RateLimiter
 
 logger = logging.getLogger(__name__)
+
+# Marker key on responses that did not come from a successful LLM call.
+# The API route reads this to downgrade the HTTP success flag; the cache
+# write path reads it to skip persistence; the supervision saver reads
+# the downgraded success flag to skip the DB UPDATE. One marker, three
+# enforcement points -- impossible for a fallback to silently land in the
+# user-facing column.
+DEGRADED_KEY = "_degraded"
+
+
+def _items_signature(items: List[Dict[str, Any]]) -> str:
+    """Stable digest over the per-item data fed to the prompt.
+
+    Captures item identity + the two quantities that drive every
+    narrative the LLM produces. A visit scored before actuals land
+    (all ``actual_qty=0``) and the same visit re-evaluated after the
+    sale (real ``actual_qty>0``) hash to different signatures, so the
+    second call doesn't get the first one's stale cache.
+    """
+    from llm_analytics.core.formatter import _pick
+    parts = []
+    for it in items or []:
+        code = str(_pick(it, "item_code", "itemCode", "ItemCode", default=""))
+        rec = int(_pick(it, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0) or 0)
+        act = int(_pick(it, "actual_qty", "actualQuantity", "ActualQuantity", default=0) or 0)
+        parts.append(f"{code}:{rec}:{act}")
+    parts.sort()
+    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+def _is_empty_visit(items: List[Dict[str, Any]]) -> bool:
+    """No items at all OR every item has zero recommended *and* zero actual."""
+    from llm_analytics.core.formatter import _pick
+    if not items:
+        return True
+    for it in items:
+        rec = int(_pick(it, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0) or 0)
+        act = int(_pick(it, "actual_qty", "actualQuantity", "ActualQuantity", default=0) or 0)
+        if rec > 0 or act > 0:
+            return False
+    return True
+
+
+def _prompts_version(prompts_dir: str) -> str:
+    """Hash the prompt YAMLs so a prompt edit auto-invalidates the cache.
+
+    Walks every ``*.yaml`` under ``prompts_dir`` (deterministic ordering
+    by path) and folds the content bytes into a sha256. Cheap -- runs
+    once at analyzer construction.
+    """
+    h = hashlib.sha256()
+    root = Path(prompts_dir)
+    if not root.exists():
+        return "no-prompts"
+    for f in sorted(root.rglob("*.yaml")):
+        try:
+            h.update(f.name.encode())
+            h.update(f.read_bytes())
+        except Exception:
+            continue
+    return h.hexdigest()[:12]
 
 
 class Analyzer:
@@ -42,6 +125,10 @@ class Analyzer:
             acquire_timeout_seconds=self._s.rate_limit_acquire_timeout_seconds,
             poll_interval_seconds=self._s.rate_limit_poll_interval_seconds,
         )
+        # Snapshot of the model + prompt source at construction. Folded
+        # into every cache key so a model swap or prompt edit invalidates
+        # the cache without an explicit clear.
+        self._cache_version = f"{self._s.model}|{_prompts_version(self._s.prompts_dir)}"
 
     # ------------------------------------------------------------------
     # Customer analysis
@@ -58,10 +145,30 @@ class Analyzer:
         coverage: float = 0.0,
         accuracy: float = 0.0,
     ) -> Dict[str, Any]:
-        cache_kwargs = dict(customer_code=customer_code, route_code=route_code, date=date)
+        cache_kwargs = dict(
+            customer_code=customer_code, route_code=route_code, date=date,
+            _v=self._cache_version,
+            _content=_items_signature(current_items),
+            _score=int(round(performance_score)),
+        )
         cached = self._cache.get("customer_analysis", **cache_kwargs)
         if cached:
             return cached
+
+        # Empty-state contract: honest deterministic response. Saves a
+        # rate-limit slot and an LLM call, and -- critically -- prevents
+        # the model from inventing "clean slate / build relationship"
+        # prose when there is literally no data to analyse.
+        #
+        # Marked degraded so the API layer downgrades ``success`` to
+        # False and supervision skips the DB save. The next tick (after
+        # real actuals land) regenerates against a non-empty payload
+        # and writes the real analysis. Without this, the empty-state
+        # placeholder would land in the column and the saver's
+        # ``WHERE column IS NULL`` guard would block the real analysis
+        # from ever being written.
+        if _is_empty_visit(current_items):
+            return self._empty_customer_response(customer_code)
 
         if not self._limiter.acquire():
             return self._fallback("customer", customer_code=customer_code,
@@ -74,13 +181,16 @@ class Analyzer:
         user = self._prompts.render(
             "customer_analysis", "customer_analysis_template",
             customer_code=customer_code, route_code=route_code, date=date,
-            performance_score=performance_score, coverage=coverage, accuracy=accuracy,
+            performance_score=int(round(performance_score)),
+            coverage=int(round(coverage)),
+            accuracy=int(round(accuracy)),
             historical_context=historical, current_visit_table=visit_table,
         )
 
         result = self._call_with_retry(system, user, CustomerAnalysis, "customer_analysis")
         result["customer_code"] = customer_code
-        self._cache.set("customer_analysis", result, **cache_kwargs)
+        if not result.get(DEGRADED_KEY):
+            self._cache.set("customer_analysis", result, **cache_kwargs)
         return result
 
     # ------------------------------------------------------------------
@@ -95,13 +205,37 @@ class Analyzer:
         total_customers: int,
         total_actual: int = 0,
         total_recommended: int = 0,
-        pre_context: str = "",
         actual_customer_codes: Optional[Set[str]] = None,
     ) -> Dict[str, Any]:
-        cache_kwargs = dict(route_code=route_code, date=date)
+        # Route signature folds in every visited customer's totals so the
+        # cache distinguishes "13/40 customers in, partial actuals" from
+        # "40/40 in, full actuals" -- the two states produce different
+        # narratives and must not collide.
+        from llm_analytics.core.formatter import _pick
+        route_sig = hashlib.sha256(
+            "|".join(
+                f"{_pick(c, 'customer_code', 'customerCode', default='')}:"
+                f"{int(_pick(c, 'total_actual', 'totalActual', default=0) or 0)}:"
+                f"{int(_pick(c, 'total_recommended', 'totalRecommended', default=0) or 0)}"
+                for c in sorted(
+                    visited_customers or [],
+                    key=lambda x: str(_pick(x, "customer_code", "customerCode", default="")),
+                )
+            ).encode()
+        ).hexdigest()[:16]
+
+        cache_kwargs = dict(
+            route_code=route_code, date=date,
+            _v=self._cache_version,
+            _content=route_sig,
+            _visited=len(visited_customers or []),
+        )
         cached = self._cache.get("route_analysis", **cache_kwargs)
         if cached:
             return cached
+
+        if not visited_customers:
+            return self._empty_route_response(route_code)
 
         if not self._limiter.acquire():
             return self._fallback("route", route_code=route_code, reason="Rate limit exceeded")
@@ -117,9 +251,9 @@ class Analyzer:
             route_code=route_code, date=date,
             visited_customers=visited, total_customers=total_customers,
             coverage_percentage=coverage_pct,
-            total_actual=total_actual, total_recommended=total_recommended,
+            total_actual=int(total_actual), total_recommended=int(total_recommended),
             quantity_achievement=qty_achievement,
-            pre_context=pre_context, actual_data=actual_data,
+            actual_data=actual_data,
         )
 
         result = self._call_with_retry(system, user, RouteAnalysis, "route_analysis")
@@ -128,7 +262,8 @@ class Analyzer:
         if actual_customer_codes:
             result = sanitize_customer_codes(result, actual_customer_codes)
 
-        self._cache.set("route_analysis", result, **cache_kwargs)
+        if not result.get(DEGRADED_KEY):
+            self._cache.set("route_analysis", result, **cache_kwargs)
         return result
 
     # ------------------------------------------------------------------
@@ -143,16 +278,26 @@ class Analyzer:
         date: str,
         items: List[Dict[str, Any]],
     ) -> Dict[str, Any]:
-        cache_kwargs = dict(customer_code=customer_code, route_code=route_code, date=date, analysis_type="pre_visit")
+        cache_kwargs = dict(
+            customer_code=customer_code, route_code=route_code, date=date,
+            analysis_type="pre_visit",
+            _v=self._cache_version,
+            _content=_items_signature(items),
+        )
         cached = self._cache.get("pre_visit_briefing", **cache_kwargs)
         if cached:
             return cached
+
+        if _is_empty_visit(items):
+            return self._empty_briefing_response(customer_code)
 
         if not self._limiter.acquire():
             return self._fallback("pre_visit", customer_code=customer_code, reason="Rate limit exceeded")
 
         # Build a rich items table with all explainability fields so the LLM
         # can weave cycle days, frequency, trend, and reasoning into the briefing.
+        # Accepts both snake_case (supervision auto-path) and camel/Pascal
+        # (browser path) so a single helper covers every producer.
         def _get(d: Dict, *keys: str, default: Any = "") -> Any:
             for k in keys:
                 v = d.get(k)
@@ -162,33 +307,44 @@ class Analyzer:
 
         def _safe(v: Any) -> str:
             # Strip characters that break Groq's JSON validation when echoed
-            # back in output strings — notably inch marks in item names like
+            # back in output strings -- notably inch marks in item names like
             # 'Fresh Tortilla Plain 8" 6PC'.
             return str(v).replace('"', " inch").replace("\\", "/") if v is not None else ""
 
         lines = []
         total_qty = 0
         for it in items:
-            qty = int(_get(it, "recommendedQty", "RecommendedQuantity", default=0))
+            qty = int(_get(it, "recommended_qty", "recommendedQty", "RecommendedQuantity", default=0) or 0)
             total_qty += qty
-            cycle = _get(it, "purchaseCycleDays", "PurchaseCycleDays")
-            days_since = _get(it, "daysSinceLastPurchase", "DaysSinceLastPurchase")
-            freq = _get(it, "frequencyPercent", "FrequencyPercent")
-            trend = _get(it, "trendFactor", "TrendFactor")
-            why_item = _get(it, "whyItem", "WhyItem")
-            why_qty = _get(it, "whyQuantity", "WhyQuantity")
+            cycle = _get(it, "purchase_cycle_days", "purchaseCycleDays", "PurchaseCycleDays")
+            days_since = _get(it, "days_since_last_purchase", "daysSinceLastPurchase", "DaysSinceLastPurchase")
+            freq = _get(it, "frequency_percent", "frequencyPercent", "FrequencyPercent")
+            trend = _get(it, "trend_factor", "trendFactor", "TrendFactor")
+            why_item = _get(it, "why_item", "whyItem", "WhyItem")
+            why_qty = _get(it, "why_quantity", "whyQuantity", "WhyQuantity")
+            source = _get(it, "source", "Source")
+            tier = _get(it, "tier", "Tier")
 
             parts = [
-                f"  Item: {_safe(_get(it, 'itemCode', 'ItemCode', default='?'))} — {_safe(_get(it, 'itemName', 'ItemName'))}",
-                f"  Recommended qty: {qty} | Tier: {_safe(_get(it, 'tier', 'Tier'))} | Source: {_safe(_get(it, 'source', 'Source'))}",
+                f"  Item: {_safe(_get(it, 'item_code', 'itemCode', 'ItemCode', default='?'))} - {_safe(_get(it, 'item_name', 'itemName', 'ItemName'))}",
+                f"  Recommended qty: {qty} | Tier: {_safe(tier)} | Source: {_safe(source)}",
             ]
             facts = []
             if cycle:
-                facts.append(f"buys every {cycle} days")
+                try:
+                    facts.append(f"buys every {int(round(float(cycle)))} days")
+                except (TypeError, ValueError):
+                    pass
             if days_since:
-                facts.append(f"last bought {days_since} days ago")
+                try:
+                    facts.append(f"last bought {int(days_since)} days ago")
+                except (TypeError, ValueError):
+                    pass
             if freq:
-                facts.append(f"buys this on {freq}% of visits")
+                try:
+                    facts.append(f"buys this on {int(round(float(freq)))}% of visits")
+                except (TypeError, ValueError):
+                    pass
             if trend and str(trend) != "1.0":
                 facts.append(f"trend factor {trend}")
             if facts:
@@ -203,9 +359,11 @@ class Analyzer:
         # Customer-level context summary
         context_parts = []
         for it in items:
-            why = _get(it, "whyItem", "WhyItem")
+            why = _get(it, "why_item", "whyItem", "WhyItem")
             if why:
-                context_parts.append(f"- {_safe(_get(it, 'itemCode', 'ItemCode'))}: {_safe(why)}")
+                context_parts.append(
+                    f"- {_safe(_get(it, 'item_code', 'itemCode', 'ItemCode'))}: {_safe(why)}"
+                )
         customer_context = "\n".join(context_parts) if context_parts else "No additional context"
 
         system = self._prompts.get_system_prompt("pre_visit_briefing")
@@ -223,7 +381,8 @@ class Analyzer:
 
         result = self._call_with_retry(system, user, PreVisitBriefing, "pre_visit_briefing")
         result["customer_code"] = customer_code
-        self._cache.set("pre_visit_briefing", result, **cache_kwargs)
+        if not result.get(DEGRADED_KEY):
+            self._cache.set("pre_visit_briefing", result, **cache_kwargs)
         return result
 
     # ------------------------------------------------------------------
@@ -252,31 +411,50 @@ class Analyzer:
     # ------------------------------------------------------------------
 
     def _call_with_retry(self, system: str, user: str, model_cls: type, label: str) -> Dict[str, Any]:
-        """Call LLM with retries on JSON parse/validation failure."""
+        """Call LLM with retries on transient errors. Validation failures
+        on the final attempt return the raw dict (so a structurally
+        almost-right response still degrades gracefully). Truncations are
+        treated as fatal because retrying without a bigger token budget
+        just repeats the failure."""
+        last_exc: Optional[str] = None
         for attempt in range(self._s.max_retries):
             raw: Optional[Dict[str, Any]] = None
             try:
                 raw = self._client.chat(system, user, attempt=attempt)
-
-                # Validate with Pydantic
                 validated = model_cls(**raw)
                 return validated.model_dump()
 
+            except TruncatedResponseError as exc:
+                # Bigger ``max_tokens`` is the real fix; a retry on the
+                # same prompt won't help. Skip remaining attempts.
+                logger.error("%s truncated (max_tokens=%d): %s",
+                             label, self._s.max_tokens, exc)
+                return self._fallback(label, reason=f"output truncated at {self._s.max_tokens} tokens")
+
             except ValidationError as exc:
                 logger.warning("%s validation failed (attempt %d): %s", label, attempt + 1, exc)
+                last_exc = str(exc)
                 if attempt == self._s.max_retries - 1 and isinstance(raw, dict):
+                    # Pydantic rejected one field but the shape is mostly
+                    # right -- pass the raw dict through so the UI can at
+                    # least render the populated keys instead of an
+                    # error placeholder. Mark degraded so the saver
+                    # treats it as "best-effort, retry next tick".
+                    raw[DEGRADED_KEY] = True
+                    raw["_degraded_reason"] = f"validation: {exc}"
                     return raw
             except Exception as exc:
                 logger.error("%s failed (attempt %d): %s", label, attempt + 1, exc)
+                last_exc = str(exc)
                 if attempt == self._s.max_retries - 1:
                     return self._fallback(label, reason=str(exc))
 
-        return self._fallback(label, reason="All retries exhausted")
+        return self._fallback(label, reason=last_exc or "All retries exhausted")
 
     @staticmethod
     def _fallback(label: str, **context: Any) -> Dict[str, Any]:
         reason = context.get("reason", "Analysis unavailable")
-        base = {
+        base: Dict[str, Any] = {
             "performance_summary": f"Analysis not available: {reason}",
             "route_summary": f"Analysis not available: {reason}",
             "briefing": f"Analysis not available: {reason}",
@@ -288,8 +466,55 @@ class Analyzer:
             "critical_issues": [],
             "key_items": [],
             "heads_up": "",
+            DEGRADED_KEY: True,
+            "_degraded_reason": reason,
         }
         for k, v in context.items():
             if k != "reason":
                 base[k] = v
         return base
+
+    @staticmethod
+    def _empty_customer_response(customer_code: str) -> Dict[str, Any]:
+        """Deterministic honest response when there is no visit data to
+        analyse. Saves an LLM call and prevents hallucinated narratives
+        like "clean slate / build relationship from the ground up".
+
+        Marked degraded so the API layer downgrades ``success`` to False
+        and supervision skips the DB save -- a later tick with real
+        actuals overwrites NULL with the real analysis. Without the
+        marker, the placeholder text would land in the column and the
+        ``WHERE column IS NULL`` saver guard would freeze it forever.
+        """
+        return {
+            "customer_code": customer_code,
+            "performance_summary": "No sales activity recorded for this visit yet.",
+            "supervisor_instructions": [],
+            "strengths": [],
+            "weaknesses": [],
+            DEGRADED_KEY: True,
+            "_degraded_reason": "empty input -- pending real visit data",
+        }
+
+    @staticmethod
+    def _empty_route_response(route_code: str) -> Dict[str, Any]:
+        return {
+            "route_code": route_code,
+            "route_summary": "No visited customers yet on this route.",
+            "supervisor_priorities": [],
+            "high_performers_with_practices": [],
+            "critical_issues": [],
+            DEGRADED_KEY: True,
+            "_degraded_reason": "empty input -- pending real visit data",
+        }
+
+    @staticmethod
+    def _empty_briefing_response(customer_code: str) -> Dict[str, Any]:
+        return {
+            "customer_code": customer_code,
+            "briefing": "No recommendations for this customer today.",
+            "key_items": [],
+            "heads_up": "",
+            DEGRADED_KEY: True,
+            "_degraded_reason": "empty input -- no items recommended",
+        }

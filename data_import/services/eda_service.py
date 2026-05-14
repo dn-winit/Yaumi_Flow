@@ -1068,8 +1068,8 @@ class EdaService:
                 ItemCode,
                 SUM(CASE WHEN QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS Qty
             FROM {self._s.sales_view} WITH (NOLOCK)
-            WHERE ItemType = 'OrderItem'
-              AND TrxType  = 'SalesInvoice'
+            WHERE ItemType = ?
+              AND TrxType  = ?
               AND RouteCode = ?
               AND CAST(TrxDate AS DATE) = ?
             GROUP BY CustomerCode, ItemCode
@@ -1082,7 +1082,10 @@ class EdaService:
             )
             conn.timeout = self._s.db.live_query_timeout
             cursor = conn.cursor()
-            cursor.execute(sql, (str(route_code), date))
+            cursor.execute(sql, (
+                self._s.sales_item_type, self._s.sales_invoice_trx_type,
+                str(route_code), date,
+            ))
             rows = cursor.fetchall()
         except Exception as exc:
             logger.error("Live route-sales query failed: %s", exc)
@@ -1126,8 +1129,8 @@ class EdaService:
                 ItemCode,
                 SUM(CASE WHEN QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS Qty
             FROM {self._s.sales_view} WITH (NOLOCK)
-            WHERE ItemType = 'OrderItem'
-              AND TrxType  = 'SalesInvoice'
+            WHERE ItemType = ?
+              AND TrxType  = ?
               AND RouteCode = ?
               AND CustomerCode = ?
               AND CAST(TrxDate AS DATE) = ?
@@ -1141,7 +1144,10 @@ class EdaService:
             )
             conn.timeout = self._s.db.live_query_timeout
             cursor = conn.cursor()
-            cursor.execute(sql, (str(route_code), str(customer_code), date))
+            cursor.execute(sql, (
+                self._s.sales_item_type, self._s.sales_invoice_trx_type,
+                str(route_code), str(customer_code), date,
+            ))
             rows = cursor.fetchall()
         except Exception as exc:
             logger.error("Live customer-sales query failed: %s", exc)

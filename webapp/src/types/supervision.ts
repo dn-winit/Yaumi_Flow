@@ -172,15 +172,14 @@ export interface SavedVisit {
   actualSales: Record<string, number>;
   totalActual: number;
   totalRecommended: number;
-  // LLM payloads previously saved for this customer. Carried as
-  // opaque strings -- the analytics layer JSON-parses on render.
   preVisitBriefing?: string | null;
   customerAnalysis?: string | null;
-  /** Server emits the redistribution view on hydration too, so a
-   *  reload of an already-visited customer renders the same panel
-   *  without a fresh ``/visit`` round-trip. Always present on the
-   *  wire -- ``groups`` is empty when there's nothing to show. */
   redistributions: RedistributionView;
+  /** Off-plan items the customer invoiced -- persisted in
+   *  ``yf_supervision_items`` with ``original_recommended_qty=0`` so a
+   *  page reload hydrates the same "Also bought" chip strip the live
+   *  ``/visit`` response surfaces. Empty array when no off-plan rows. */
+  alsoBought: AlsoBoughtRow[];
 }
 
 export interface SavedVisitsResponse {

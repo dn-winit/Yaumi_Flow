@@ -66,8 +66,8 @@ export default function CustomerGrid({
                     className="w-2 h-2 rounded-full bg-success-500 shrink-0"
                     title={
                       c.visited
-                        ? "Visit recorded in this session"
-                        : "Customer invoiced today (live from YaumiLive)"
+                        ? "Visit recorded -- may include off-plan items the customer bought today"
+                        : "Customer invoiced today (may include off-plan items)"
                     }
                     aria-label="visited"
                   />

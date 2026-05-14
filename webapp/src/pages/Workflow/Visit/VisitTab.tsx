@@ -78,28 +78,25 @@ function VisitSession({
 
   const recordings = recs.data?.data ?? [];
 
-  // Auto-init: as soon as recs land for the active (route, date), spin
-  // up a supervision session. Re-running `initSession` is gated by an
-  // initRef so a re-render or refetch doesn't double-initialise.
+  // Auto-init: fire ``initSession`` in parallel with the recs query
+  // instead of waiting for recs to land. The server fetches its own
+  // recs from recommended_order (TTL-cached, effectively free after
+  // the cron has warmed it), so the client doesn't need to forward
+  // them in the body. This drops the page-open critical path from
+  // ``recs + init`` (serial) to ``max(recs, init)`` (parallel).
+  // ``initRef`` keeps the auto-init idempotent across re-renders.
   const initRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   useEffect(() => {
-    if (sessionId) return;            // session already active
-    if (recs.loading) return;          // wait for the rec fetch
-    if (recordings.length === 0) return; // empty -> handled below
+    if (sessionId) return;
+    if (!routeCode || !date) return;
 
     const key = `${routeCode}|${date}`;
-    if (initRef.current?.key === key) return; // init already in flight for this scope
+    if (initRef.current?.key === key) return;
 
     setInitError(null);
     const promise = (async () => {
       try {
-        const sessionRes = await supervisionApi.initSession(
-          routeCode,
-          date,
-          recordings as unknown as Record<string, unknown>[],
-        );
-        // Backend emits camelCase ``sessionId`` only -- no snake_case
-        // fallback (Pydantic ``extra="forbid"`` enforces the contract).
+        const sessionRes = await supervisionApi.initSession(routeCode, date);
         const session = sessionRes.session;
         setSessionId(session.sessionId);
         setSessionData(session);
@@ -108,7 +105,7 @@ function VisitSession({
       }
     })();
     initRef.current = { key, promise };
-  }, [sessionId, recs.loading, recordings, routeCode, date]);
+  }, [sessionId, routeCode, date]);
 
   const handleGenerate = async () => {
     try {

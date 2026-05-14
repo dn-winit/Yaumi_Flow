@@ -284,6 +284,10 @@ _LEN_TIER = 50
 _LEN_STATUS = 20
 
 
+class _SkipReplay(Exception):
+    """Sentinel: caller asked to defer redistribution replay."""
+
+
 class DbSaver:
     """Pushes supervision session data to 3 DB tables in YaumiAIML."""
 
@@ -302,15 +306,15 @@ class DbSaver:
 
     def _pool(self):
         """Resolve (and lazily create) the shared AIML pool for this
-        saver's connection string. Sized to accommodate concurrent
-        BackgroundTask upserts (one per /visit fired in flight) plus
-        the auto-visit reconciler tick -- floor of 4 leaves headroom
-        for both. Pool sizing applies only on first creation of a
-        given (conn_str, autocommit) key; later calls reuse the
-        existing pool unchanged."""
+        saver's connection string. Sized to ``auto_visit_data_phase_workers``
+        (default 8) so the cron's parallel customer upserts never block
+        on the semaphore -- previously capped at 4, which serialised
+        half the workers and inflated tick duration. Pool sizing applies
+        only on first creation of a given (conn_str, autocommit) key;
+        later calls reuse the existing pool unchanged."""
         return get_pool(
             self._db.connection_string(),
-            max_connections=4,
+            max_connections=int(self._s.auto_visit_data_phase_workers),
             connect_timeout=int(self._db.connection_timeout),
             query_timeout=int(self._db.query_timeout),
             autocommit=False,
@@ -590,26 +594,6 @@ class DbSaver:
             route_code, date, "cs.llm_pre_visit_briefing IS NOT NULL",
         )
 
-    def list_visited_customer_codes(self, route_code: str, date: str) -> set[str]:
-        """Return the set of customer_codes that have a **visit** row
-        for the (route, date) -- ``visit_sequence > 0`` across any
-        session_id. Pre-visit-briefing rows (``visit_sequence = 0``)
-        are excluded so the reconciler's data phase still re-processes
-        a briefed-but-not-yet-visited customer when YaumiLive surfaces
-        their invoice.
-
-        Used by the auto-visit reconciler's data phase to short-circuit
-        customers whose visit has already been persisted, keeping each
-        tick O(new visits) rather than O(all customers). The earlier
-        version of this method returned every persisted code -- a
-        briefing-only row would silently mask the customer's first
-        live invoice. The ``visit_sequence > 0`` filter aligns the
-        method with its docstring and its single caller's intent.
-        """
-        return self._list_customer_codes_with(
-            route_code, date, "cs.visit_sequence > 0",
-        )
-
     def save_pre_visit_briefing(
         self, snapshot: Dict[str, Any], customer_code: str, content: str,
     ) -> Dict[str, Any]:
@@ -728,7 +712,10 @@ class DbSaver:
             )
             return {"success": False, "error": str(exc)}
 
-    def load_session_visits(self, route_code: str, date: str) -> Optional[Dict[str, Any]]:
+    def load_session_visits(
+        self, route_code: str, date: str,
+        *, include_redistributions: bool = True,
+    ) -> Optional[Dict[str, Any]]:
         """Return saved per-customer visit data for a (route, date).
 
         Used by the live UI to hydrate already-visited customers on
@@ -797,24 +784,77 @@ class DbSaver:
                 custs, items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=True,
                 )
-                # Pull the full canonical set (visited + not) so the
-                # redistribution shaper can see every planned downstream
-                # candidate. The returned ``visits`` map still surfaces
-                # ONLY visited rows (preserves the existing wire
-                # contract); the unvisited rows are used purely to
-                # populate the synthetic Session that ``shape_redistri
-                # bution_view`` walks during replay.
-                all_custs, all_items = self._fetch_canonical_rows(
-                    cursor, route_code, date, visited_only=False,
-                )
+                # The full canonical set + the per-visit redistribution
+                # replay are the costliest piece of the saved-visits
+                # build (~3 s for a route with 30 visited customers).
+                # They're only needed when a supervisor opens the
+                # per-customer drill-in. Polling callers pass
+                # ``include_redistributions=False`` so the periodic
+                # refresh stays cheap; drill-in hits the dedicated
+                # ``/session/redistribution/{sid}/{customer}`` endpoint.
+                if include_redistributions:
+                    all_custs, all_items = self._fetch_canonical_rows(
+                        cursor, route_code, date, visited_only=False,
+                    )
+                else:
+                    all_custs, all_items = None, None
                 return self._build_visits_payload(
                     sid, route_header, custs, items,
                     all_custs=all_custs, all_items=all_items,
+                    include_redistributions=include_redistributions,
                 )
         except Exception as exc:
             logger.error(
                 "DB load_session_visits failed for %s/%s: %s",
                 route_code, date, exc,
+            )
+            return None
+
+    def load_redistribution_for_customer(
+        self, route_code: str, date: str, customer_code: str,
+    ) -> Optional[Dict[str, Any]]:
+        """Replay the per-customer redistribution view on demand.
+
+        Drill-in path: the saved-visits hot path skips replay to keep
+        polling cheap; the supervisor's per-customer modal calls this
+        once on open. Reads the same canonical row set + replay engine
+        the hot path used to do for every visit at once, so the wire
+        shape is unchanged.
+        """
+        if not self.available:
+            return None
+        try:
+            with self._open_conn() as conn:
+                cursor = conn.cursor()
+                cursor.execute(
+                    f"SELECT TOP 1 * FROM {self._s.route_summary_table} "
+                    f"WHERE route_code = ? AND supervision_date = ? "
+                    f"ORDER BY session_started_at DESC",
+                    (route_code, date),
+                )
+                rh_row = cursor.fetchone()
+                if not rh_row:
+                    return None
+                rh_cols = [d[0] for d in cursor.description]
+                route_header = dict(zip(rh_cols, rh_row))
+                custs, items = self._fetch_canonical_rows(
+                    cursor, route_code, date, visited_only=True,
+                )
+                all_custs, all_items = self._fetch_canonical_rows(
+                    cursor, route_code, date, visited_only=False,
+                )
+            sid = f"{route_code}_{date}"
+            full = self._build_visits_payload(
+                sid, route_header, custs, items,
+                all_custs=all_custs, all_items=all_items,
+                include_redistributions=True,
+            )
+            visit = (full.get("visits") or {}).get(str(customer_code))
+            return visit.get("redistributions") if visit else None
+        except Exception as exc:
+            logger.error(
+                "DB load_redistribution_for_customer failed for %s/%s/%s: %s",
+                route_code, date, customer_code, exc,
             )
             return None
 
@@ -824,6 +864,7 @@ class DbSaver:
         *,
         all_custs: Optional[List[Dict]] = None,
         all_items: Optional[List[Dict]] = None,
+        include_redistributions: bool = True,
     ) -> Dict[str, Any]:
         """Translate stored rows into the visit-result shape the live
         UI consumes. Single source of truth for the column-to-JSON
@@ -838,7 +879,13 @@ class DbSaver:
         opted in yet) the visit rows carry the safe-default empty
         ``redistributions`` view.
         """
+        # actualSales is the wire-level dict of every item the customer
+        # invoiced (planned + off-plan). also_bought_by_cust carries the
+        # off-plan subset -- rows with no recommendation but a positive
+        # actual -- so the saved-visits hydration emits the same
+        # ``alsoBought`` chip strip the live /visit response surfaces.
         actuals_by_cust: Dict[str, Dict[str, int]] = {}
+        also_bought_by_cust: Dict[str, List[Dict[str, Any]]] = {}
         for it in items:
             cc = str(it.get("customer_code", ""))
             if not cc:
@@ -846,7 +893,16 @@ class DbSaver:
             ic = str(it.get("item_code", ""))
             if not ic:
                 continue
-            actuals_by_cust.setdefault(cc, {})[ic] = int(it.get("actual_qty") or 0)
+            qty_act = int(it.get("actual_qty") or 0)
+            actuals_by_cust.setdefault(cc, {})[ic] = qty_act
+            rec_qty = int(it.get("original_recommended_qty") or 0)
+            if rec_qty == 0 and qty_act > 0:
+                also_bought_by_cust.setdefault(cc, []).append({
+                    "item_code": ic,
+                    "qty": qty_act,
+                })
+        for cc, rows in also_bought_by_cust.items():
+            rows.sort(key=lambda r: r["qty"], reverse=True)
 
         # Build the redistribution views in one pass. Local imports
         # avoid a hard import cycle (api.schemas -> models, but
@@ -855,6 +911,12 @@ class DbSaver:
         # the per-visit upsert path.
         redistributions_by_cust: Dict[str, Dict[str, Any]] = {}
         try:
+            if not include_redistributions:
+                # Caller is the periodic poll path; skip the expensive
+                # per-customer replay and emit the safe-default empty
+                # view below. Drill-in fetches one customer at a time
+                # via ``compute_redistribution_for_customer``.
+                raise _SkipReplay
             from sales_supervision.core.redistribution import (
                 compute_redistributions_for_saved_visits,
             )
@@ -938,6 +1000,8 @@ class DbSaver:
             )
             for cc, view in views.items():
                 redistributions_by_cust[cc] = view.model_dump()
+        except _SkipReplay:
+            pass
         except Exception as exc:
             # Safe default: leave the per-visit redistributions empty.
             # ``logger.exception`` captures the traceback so future
@@ -972,6 +1036,7 @@ class DbSaver:
                 "redistributions":   redistributions_by_cust.get(
                     cc, _empty_redistribution_dict(),
                 ),
+                "alsoBought":        also_bought_by_cust.get(cc, []),
             }
 
         # Pre-aggregated visit totals so the live UI can show the

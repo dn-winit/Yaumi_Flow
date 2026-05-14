@@ -69,19 +69,30 @@ DB_TO_REC = {
 
 
 def is_fallback(result):
-    """Detect Analyzer fallback responses (rate-limit miss, provider error).
-    Fallbacks have a ``reason`` key set to a known marker; we never persist
-    those -- the column stays NULL so verification flags the gap and the
-    next run retries cleanly."""
+    """Detect Analyzer degraded responses (rate-limit miss, provider
+    error, retries exhausted, empty input).
+
+    The Analyzer now stamps every non-success response with
+    ``_degraded: True`` and writes the reason into ``_degraded_reason``
+    -- one marker, one decision point. We never persist these; the
+    column stays NULL so verification flags the gap and the next run
+    retries cleanly against fresh inputs.
+
+    Falls back to the legacy ``reason`` / empty-dict heuristic so older
+    cached responses (pre-marker) still get rejected on read-back.
+    """
     if not isinstance(result, dict):
         return True
+    if result.get("_degraded") is True:
+        return True
+    # Legacy heuristic kept for any pre-marker cached responses.
     reason = str(result.get("reason", "")).lower()
     if reason and any(t in reason for t in (
         "rate limit", "rate_limit", "fallback",
         "provider error", "unavailable", "error",
     )):
         return True
-    if all(not v for k, v in result.items() if k != "reason"):
+    if all(not v for k, v in result.items() if k not in ("reason", "_degraded", "_degraded_reason")):
         return True
     return False
 
@@ -476,9 +487,8 @@ def main():
                         date=day,
                         visited_customers=visited_payload,
                         total_customers=planned_count,
-                        total_actual=float(session.total_actual),
-                        total_recommended=float(session.total_recommended),
-                        pre_context=None,
+                        total_actual=int(session.total_actual),
+                        total_recommended=int(session.total_recommended),
                         actual_customer_codes=set(
                             c.customer_code for c in visited_session_custs
                         ),

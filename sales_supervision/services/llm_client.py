@@ -80,20 +80,25 @@ class LlmClient:
         date: str,
         visited_customers: List[Dict[str, Any]],
         total_customers: int,
-        total_actual: float,
-        total_recommended: float,
+        total_actual: int,
+        total_recommended: int,
         actual_customer_codes: List[str],
     ) -> Optional[str]:
         """Route-level retrospective. Same return contract as
-        :meth:`analyze_customer` -- JSON string or None."""
+        :meth:`analyze_customer` -- JSON string or None.
+
+        Wire types are integers, not floats: quantities are unit counts
+        with no fractional meaning. Sending floats was leaking ``.0``
+        into the prompt's ``QUANTITY: {total_actual}/{total_recommended}``
+        line and the model echoed the precision back into the summary.
+        """
         body = {
             "route_code": route_code,
             "date": date,
             "visited_customers": visited_customers,
             "total_customers": int(total_customers),
-            "total_actual": float(total_actual),
-            "total_recommended": float(total_recommended),
-            "pre_context": None,
+            "total_actual": int(total_actual),
+            "total_recommended": int(total_recommended),
             "actual_customer_codes": actual_customer_codes,
         }
         return self._post("/analyze/route", body)

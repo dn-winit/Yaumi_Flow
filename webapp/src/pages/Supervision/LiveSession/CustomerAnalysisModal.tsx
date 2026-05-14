@@ -66,8 +66,13 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
 
   // Persist a freshly-generated analysis once per (sessionId, customerCode)
   // so a re-open hydrates from saved storage instead of re-calling the LLM.
+  //
+  // Gated on ``success: true`` so degraded payloads (rate limit, empty
+  // input, retries exhausted) never land in the DB column -- those
+  // come back from the analyzer as success=false and the next attempt
+  // (after real data arrives) gets a clean slate to write into.
   useEffect(() => {
-    if (!open || !ctx || !result?.data) return;
+    if (!open || !ctx || !result?.data || !result.success) return;
     const key = `${ctx.sessionId}::${ctx.customerCode}`;
     if (persistedKey === key) return;
     void supervisionApi
@@ -75,7 +80,7 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
       .catch(() => {/* fire-and-forget; logged server-side */});
     setPersistedKey(key);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ctx?.sessionId, ctx?.customerCode, result?.data]);
+  }, [open, ctx?.sessionId, ctx?.customerCode, result?.data, result?.success]);
 
   const a = (hydrated ?? result?.data ?? {}) as Record<string, unknown>;
   const list = (key: string): string[] => {
@@ -119,7 +124,6 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
           <AnalysisList title="Strengths" tone="success" items={list("strengths")} />
           <AnalysisList title="Areas for improvement" tone="warning" items={list("weaknesses")} />
           <AnalysisList title="Actions required" tone="danger" items={list("supervisor_instructions")} />
-          <AnalysisList title="Likely reasons" tone="info" items={list("likely_reasons")} />
         </div>
       )}
     </Modal>
