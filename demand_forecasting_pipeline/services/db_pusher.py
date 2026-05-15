@@ -40,7 +40,7 @@ from demand_forecasting_pipeline.config.settings import (
     get_settings,
 )
 from demand_forecasting_pipeline.observability import DB_PUSH_ROWS
-from demand_forecasting_pipeline.services.db_pool import (
+from common.db_pool import (
     FATAL_DB_ERRORS,
     get_pool,
 )

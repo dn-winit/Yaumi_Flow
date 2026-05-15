@@ -37,7 +37,7 @@ import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.services.db_pool import FATAL_DB_ERRORS, get_pool
+from common.db_pool import FATAL_DB_ERRORS, get_pool
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     enrich_with_load,
     forward_fill_closing,

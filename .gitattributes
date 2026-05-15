@@ -1,0 +1,49 @@
+# Normalise line endings -- stops "LF -> CRLF" warnings on every Windows
+# commit, while keeping bash/PowerShell-launched scripts in their native
+# format so they remain runnable on each platform.
+
+* text=auto eol=lf
+
+# Windows-native scripts must keep CRLF or cmd.exe mis-parses them.
+*.bat        text eol=crlf
+*.cmd        text eol=crlf
+*.ps1        text eol=crlf
+
+# POSIX-only shell scripts must stay LF even on Windows clones.
+*.sh         text eol=lf
+
+# Source code -- explicit LF so diffs are stable cross-OS.
+*.py         text eol=lf
+*.ts         text eol=lf
+*.tsx        text eol=lf
+*.js         text eol=lf
+*.jsx        text eol=lf
+*.json       text eol=lf
+*.yml        text eol=lf
+*.yaml       text eol=lf
+*.toml       text eol=lf
+*.md         text eol=lf
+*.sql        text eol=lf
+*.css        text eol=lf
+*.html       text eol=lf
+
+# Binary -- never normalise, never diff.
+*.png        binary
+*.jpg        binary
+*.jpeg       binary
+*.gif        binary
+*.ico        binary
+*.svg        binary
+*.pdf        binary
+*.zip        binary
+*.gz         binary
+*.tar        binary
+*.woff       binary
+*.woff2      binary
+*.ttf        binary
+*.eot        binary
+
+# Lockfiles -- treat as text but suppress diff noise.
+package-lock.json   text -diff
+yarn.lock           text -diff
+pnpm-lock.yaml      text -diff

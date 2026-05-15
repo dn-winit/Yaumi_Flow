@@ -172,9 +172,11 @@ cp .env.example .env
 ### Run all services
 
 ```bash
-bash scripts/start-all.sh        # macOS / Linux / Git Bash
-scripts\start-all.bat            # Windows cmd
+python scripts/serve_local.py                # backends + webapp, health-gated startup
+python scripts/serve_local.py --skip-webapp  # backends only
 ```
+
+Ctrl-C stops every subprocess cleanly. If any backend exits unexpectedly, the launcher tears the rest down.
 
 Or run individually:
 
@@ -185,12 +187,6 @@ python -m recommended_order            # :8001
 python -m sales_supervision            # :8004
 python -m llm_analytics                # :8003
 cd webapp && npm run dev               # :3000
-```
-
-Stop everything:
-
-```bash
-bash scripts/stop-all.sh
 ```
 
 ### Production build
@@ -263,15 +259,13 @@ forecast_new/
 │   ├── tailwind.config.ts
 │   └── vite.config.ts
 │
-├── scripts/                     # start-all / stop-all + create_tables.sql
+├── scripts/                     # serve_local.py + backfill_*.py + verify_*.py + create_tables.sql
 ├── data/                        # Shared CSV directory (gitignored content)
 ├── docker-compose.yml           # Container orchestration
 ├── Dockerfile.backend           # Shared Python image (5 services)
 ├── Dockerfile.frontend          # nginx-served webapp build
 ├── nginx.conf                   # Reverse proxy for the docker-compose web service
 ├── render.yaml                  # Render Blueprint (one-click multi-service deploy)
-├── railway.json                 # Railway deployment hint
-├── Procfile                     # Single-process Heroku-style fallback
 └── requirements.txt             # Aggregator of per-service requirements
 ```
 

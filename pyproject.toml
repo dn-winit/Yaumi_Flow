@@ -1,0 +1,63 @@
+# Repo-wide Python tooling config. Per-service dependency manifests stay
+# in each module's requirements.txt -- this file only carries cross-cutting
+# linter / test settings so a single command can audit the whole repo.
+
+[tool.ruff]
+line-length = 110
+target-version = "py311"
+extend-exclude = [
+    "webapp",
+    "data",
+    "logs",
+    "venv",
+    ".venv",
+    "build",
+    "dist",
+    "**/__pycache__",
+    "**/migrations",
+    "**/cache",
+]
+
+[tool.ruff.lint]
+# Conservative set -- catches real bugs without churn-inducing style noise.
+select = [
+    "E",   # pycodestyle errors
+    "F",   # pyflakes (unused imports, undefined names)
+    "W",   # pycodestyle warnings
+    "I",   # isort (import order)
+    "B",   # flake8-bugbear (likely bugs)
+    "UP",  # pyupgrade (modern syntax)
+]
+ignore = [
+    "E501",  # line length -- handled by formatter
+    "B008",  # function call in default -- common for FastAPI Depends + pydantic Field(default_factory=...)
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]  # re-exports
+"scripts/**.py"  = ["E402"]  # path-setup before imports is intentional
+
+[tool.ruff.lint.isort]
+known-first-party = [
+    "common",
+    "data_import",
+    "demand_forecasting_pipeline",
+    "recommended_order",
+    "llm_analytics",
+    "sales_supervision",
+]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = "test_*.py"
+python_classes = "Test*"
+python_functions = "test_*"
+filterwarnings = [
+    "error::DeprecationWarning:demand_forecasting_pipeline.*",
+    "error::DeprecationWarning:recommended_order.*",
+    "error::DeprecationWarning:data_import.*",
+    "error::DeprecationWarning:llm_analytics.*",
+    "error::DeprecationWarning:sales_supervision.*",
+    "error::DeprecationWarning:common.*",
+]

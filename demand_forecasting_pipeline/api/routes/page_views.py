@@ -39,7 +39,7 @@ from demand_forecasting_pipeline.api.schemas import (
 )
 from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
-from demand_forecasting_pipeline.services.db_pool import get_pool
+from common.db_pool import get_pool
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     _concentrated_buyers_index,
     _journey_index,

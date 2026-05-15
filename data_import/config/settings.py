@@ -11,24 +11,7 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
-
-def _read_allow_origins() -> list[str]:
-    """Read ``YF_ALLOW_ORIGINS`` and parse comma/semicolon-separated or
-    JSON-list. Falls back to local-dev origin. Reads ``os.environ``
-    directly so we bypass pydantic-settings' JSON-only env-list parser
-    -- one shared env var works as a plain string across every service.
-    """
-    import json
-    raw = os.getenv("YF_ALLOW_ORIGINS", "").strip()
-    if not raw:
-        return ["http://localhost:3000"]
-    if raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-            return [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            pass
-    return [s.strip() for s in raw.replace(";", ",").split(",") if s.strip()]
+from common.settings_base import read_allow_origins as _read_allow_origins
 
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _MODULE_ROOT.parent

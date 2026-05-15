@@ -16,7 +16,7 @@ import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from demand_forecasting_pipeline.services.db_pool import (
+from common.db_pool import (
     FATAL_DB_ERRORS,
     get_pool,
     with_db_retry,

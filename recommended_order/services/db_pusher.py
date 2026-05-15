@@ -16,10 +16,8 @@ import pandas as pd
 # demand_forecasting_pipeline because it was the first writer; every
 # other AIML writer (this module, sales_supervision/db_saver) now
 # routes through the same factory so a single semaphore bounds
-# concurrent connections across services. The shared infra import
-# is already established (recommended_order/data/manager.py imports
-# the reconciliation engine from demand_forecasting_pipeline).
-from demand_forecasting_pipeline.services.db_pool import (
+# concurrent connections across services.
+from common.db_pool import (
     FATAL_DB_ERRORS as _POOL_FATAL_ERRORS,
     get_pool,
 )

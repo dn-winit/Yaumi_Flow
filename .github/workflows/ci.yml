@@ -1,0 +1,72 @@
+# CI: lightweight gate that catches the bulk of staged-branch regressions
+# without needing a real DB. Two parallel jobs:
+#   1. python    -- byte-compile every module so import-time errors,
+#                   syntax issues, and broken relative imports are caught.
+#   2. webapp    -- run `tsc -b --noEmit` so a TS regression cannot slip
+#                   into `staged` or `main`.
+#
+# Anything heavier (pytest, db integration, e2e) requires the live
+# warehouse and runs locally before each push. This file is intentionally
+# scoped to what GitHub-hosted runners can validate hermetically.
+
+name: CI
+
+on:
+  push:
+    branches: [staged, main]
+  pull_request:
+    branches: [staged, main]
+
+# Cancel in-flight runs on the same ref when a newer commit lands so we
+# don't waste runner minutes on stale work.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: Python compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Byte-compile all Python sources
+        # ``compileall`` parses every file -- catches syntax errors and
+        # broken indentation without needing any runtime dependency, so
+        # this job stays fast and deterministic.
+        run: |
+          python -m compileall -q -j 0 \
+            common \
+            data_import \
+            demand_forecasting_pipeline \
+            recommended_order \
+            llm_analytics \
+            sales_supervision \
+            scripts
+
+  webapp:
+    name: Webapp typecheck
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: webapp
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+          cache-dependency-path: webapp/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck

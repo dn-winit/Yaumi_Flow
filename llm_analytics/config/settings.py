@@ -11,22 +11,9 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from common.settings_base import read_allow_origins as _read_allow_origins
+
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
-
-
-def _read_allow_origins() -> list[str]:
-    """Read shared ``YF_ALLOW_ORIGINS`` (comma/semicolon or JSON list)."""
-    import json
-    raw = os.getenv("YF_ALLOW_ORIGINS", "").strip()
-    if not raw:
-        return ["http://localhost:3000"]
-    if raw.startswith("["):
-        try:
-            parsed = json.loads(raw)
-            return [str(x).strip() for x in parsed if str(x).strip()]
-        except Exception:
-            pass
-    return [s.strip() for s in raw.replace(";", ",").split(",") if s.strip()]
 
 
 class Settings(BaseSettings):

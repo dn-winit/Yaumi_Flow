@@ -33,14 +33,10 @@ from typing import Any, Dict, Iterator, List, Optional
 
 import pyodbc
 
-# Cross-service import: the bounded AIML pool lives in
-# demand_forecasting_pipeline so every YaumiAIML writer (this module,
-# recommended_order/db_pusher, the demand-forecast pusher) shares one
-# semaphore-bounded connection cap. The cross-service shape mirrors
-# what auto_visit_service already does (it imports df settings for the
-# cascade refresh) and what data/manager imports (recon engine), so no
-# new dependency direction is introduced.
-from demand_forecasting_pipeline.services.db_pool import get_pool
+# The bounded AIML pool lives in ``common.db_pool`` so every YaumiAIML
+# writer (this module, recommended_order/db_pusher, the demand-forecast
+# pusher) shares one semaphore-bounded connection cap.
+from common.db_pool import get_pool
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
