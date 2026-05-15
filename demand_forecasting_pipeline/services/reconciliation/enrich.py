@@ -128,6 +128,47 @@ def forward_fill_closing(df: pd.DataFrame, lookback_days: int) -> pd.DataFrame:
     keep = ["RouteCode", "ItemCode", "TrxDate", "ClosingQty"]
     return filled[keep]
 
+
+# ----------------------------------------------------------------------
+# Activity predicate -- single source of truth for "this row has truck
+# movement worth surfacing".
+#
+# Used by every consumer of the forecast view (van_load_view, past
+# performance, predictions) so the row universe is uniform across UI
+# surfaces: a cell shows up everywhere or nowhere -- never in one
+# place and not another. Adding a new signal (e.g. a future returns
+# column) means appending one entry to ``_ACTIVITY_COLUMNS`` and the
+# predicate flows through every caller automatically.
+# ----------------------------------------------------------------------
+
+_ACTIVITY_COLUMNS: tuple[str, ...] = (
+    "recommended_load",         # engine fresh recommendation
+    "opening_stock",            # our simulated carry into today
+    "yaumi_total_van_load",     # rep's actual truck load (open + alloc)
+    "yaumi_leftover",           # rep's physical closing
+    "actual_sold",              # real invoiced sales
+)
+
+
+def activity_mask(df: pd.DataFrame) -> pd.Series:
+    """Boolean mask: True wherever ANY observed signal is positive.
+
+    Missing columns contribute zero (the column may not exist on a
+    cold-start frame). Negative values are clipped to zero so a stray
+    bad row never flips the predicate true. The result lines up with
+    ``df.index`` so callers slice directly: ``df[activity_mask(df)]``.
+    """
+    total = pd.Series(0.0, index=df.index, dtype="float64")
+    for col in _ACTIVITY_COLUMNS:
+        if col in df.columns:
+            total = total + (
+                pd.to_numeric(df[col], errors="coerce")
+                .fillna(0.0)
+                .clip(lower=0.0)
+            )
+    return total > 0
+
+
 # ----------------------------------------------------------------------
 # Public helper
 # ----------------------------------------------------------------------

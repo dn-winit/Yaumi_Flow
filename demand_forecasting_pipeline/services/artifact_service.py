@@ -242,9 +242,14 @@ class ArtifactService:
         df = self._merge_sales_transactions(df)
         has_recon = "recommended_load" in df.columns and "opening_stock" in df.columns
         if has_recon:
-            rec = pd.to_numeric(df["recommended_load"], errors="coerce").fillna(0.0)
-            op = pd.to_numeric(df["opening_stock"], errors="coerce").fillna(0.0)
-            df = df[(rec + op) > 0]
+            # Single source of truth for "this row has truck movement
+            # worth surfacing" -- see ``activity_mask`` in enrich.py.
+            # Every consumer of this view shares the same predicate so
+            # no UI surface can silently narrow the scope below another.
+            from demand_forecasting_pipeline.services.reconciliation.enrich import (
+                activity_mask,
+            )
+            df = df[activity_mask(df)]
         elif "prediction" in df.columns:
             df = df[pd.to_numeric(df["prediction"], errors="coerce").fillna(0) > 0]
         return df
@@ -449,11 +454,49 @@ class ArtifactService:
             if c in work.columns:
                 work = work.drop(columns=c)
 
+        # Scope sx_work to the routes / dates the forecast frame already
+        # covers. The outer merge below is then bounded by the same
+        # universe -- it adds rep-only SKUs (items the rep stocked but
+        # the model did not predict for) WITHIN the active scope, never
+        # rep activity from unrelated routes or dates outside the
+        # working window.
+        sx_work = sx_work[
+            sx_work["_join_route"].astype(str).isin(
+                work["_join_route"].astype(str).unique()
+            )
+            & sx_work["_join_date"].astype(str).isin(
+                work["_join_date"].astype(str).unique()
+            )
+        ]
+
+        # OUTER so rep-only items survive. Forecast columns stay NaN
+        # for those rows; the activity filter in ``van_load_view``
+        # keeps them only when the rep side carries real signal. Pure
+        # reflection of every observed cell, no scope-narrowing at the
+        # merge boundary.
         merged = work.merge(
             sx_work,
             on=["_join_date", "_join_route", "_join_item"],
-            how="left",
+            how="outer",
         )
+        # Rep-only (outer-side) rows arrive with the PascalCase keys
+        # NaN -- the forecast side had no row. Backfill from the
+        # ``_join_*`` columns (always populated, because they are the
+        # merge keys) so every row downstream has TrxDate / RouteCode
+        # / ItemCode populated. Done before the drop below so no row
+        # ever leaves this function without a key triple.
+        if "TrxDate" not in merged.columns:
+            merged["TrxDate"] = pd.NaT
+        merged["TrxDate"] = pd.to_datetime(merged["TrxDate"], errors="coerce").fillna(
+            pd.to_datetime(merged["_join_date"], errors="coerce")
+        )
+        for col, jkey in (("RouteCode", "_join_route"), ("ItemCode", "_join_item")):
+            if col not in merged.columns:
+                merged[col] = None
+            merged[col] = (
+                merged[col].astype(object).where(merged[col].notna(), merged[jkey])
+                .astype(str)
+            )
         merged = merged.drop(columns=["_join_date", "_join_route", "_join_item"])
 
         # Alias new column names back to the legacy ones downstream uses.

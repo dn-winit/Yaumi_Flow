@@ -397,23 +397,16 @@ def past_performance(
     if not fc_df.empty and pred_col is not None:
         fc_df = fc_df.copy()
         fc_df["TrxDate"] = pd.to_datetime(fc_df["TrxDate"], errors="coerce").dt.normalize()
-        # Carry-aware scope: keep rows with ANY truck contribution -- fresh
-        # load (engine recommendation > 0) OR opening stock (yesterday's
-        # leftover already on the truck). Pure-carry items (Predicted == 0
-        # but opening > 0) are real physical inventory the rep manages
-        # today; dropping them silently under-reports rep_van_load and
-        # our_van_load by the carry sum. Same filter ``van_load_view``
-        # applies upstream -- this line reasserts it after the artifact
-        # layer's optional filtering. The earlier ``Predicted > 0`` rule
-        # was the same bug ``van_load_view`` had been carrying around in
-        # 2026-Q1 (route 9209 lost ~7.8k units of hidden carry that way).
-        rec_load = pd.to_numeric(
-            fc_df.get("recommended_load", 0), errors="coerce",
-        ).fillna(0.0)
-        opening = pd.to_numeric(
-            fc_df.get("opening_stock", 0), errors="coerce",
-        ).fillna(0.0)
-        fc_df = fc_df[(rec_load + opening) > 0]
+        # Single source of truth for the activity predicate -- the same
+        # helper ``ArtifactService.van_load_view`` calls. Sharing one
+        # definition makes scope drift between Past Performance and the
+        # Van Load tile physically impossible: both pass through the
+        # same boolean mask. See ``activity_mask`` in enrich.py for the
+        # column list and rationale.
+        from demand_forecasting_pipeline.services.reconciliation.enrich import (
+            activity_mask,
+        )
+        fc_df = fc_df[activity_mask(fc_df)]
         fc_df["RouteCode"] = fc_df["RouteCode"].astype(str)
         fc_df["ItemCode"]  = fc_df["ItemCode"].astype(str)
         # fc_df_full keeps a route-scoped, carry-aware view for cross-day

@@ -218,6 +218,28 @@ class VanLoadService:
         sales   = self._load_csv(self._s.sales_recent_file)
         returns = self._load_csv(self._s.returns_recent_file)
 
+        # Apply the same forward-fill the DB-write path uses, so a
+        # non-trip day (Friday weekend, holiday, rep off) carries the
+        # last working day's closing forward into ``past_leftover``
+        # instead of dropping the row and reporting an empty truck.
+        # Reusing ``forward_fill_closing`` keeps the carry rule in one
+        # place -- this is the same primitive ``_fetch_yaumi_loading``
+        # calls when populating ``yaumi_opening_stock`` in
+        # yf_sales_transactions, so CSV-fallback and DB-backed views
+        # report identical rep carry chains. Filtered to the target
+        # route up front so the per-(route, item) reindex stays
+        # bounded by the active item set for this request.
+        if not closing.empty:
+            from demand_forecasting_pipeline.services.reconciliation.enrich import (
+                forward_fill_closing,
+            )
+            route_closing = closing[closing.RouteCode.astype(str) == rcode]
+            if not route_closing.empty:
+                closing = forward_fill_closing(
+                    route_closing,
+                    int(self._s.opening_stock_lookback_days),
+                )
+
         items: dict[str, dict[str, Any]] = {}
 
         def _ensure(item_code, name="", cat="", cat_name=""):
