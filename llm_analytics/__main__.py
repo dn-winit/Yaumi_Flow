@@ -12,6 +12,7 @@ if _ROOT_ENV.exists():
     load_dotenv(_ROOT_ENV)
 
 
+from common.runtime import port_from_env
 from llm_analytics.config.settings import get_settings
 
 
@@ -21,7 +22,7 @@ def main() -> None:
         "llm_analytics.api.app:create_app",
         factory=True,
         host=settings.host,
-        port=settings.port,
+        port=port_from_env(settings.port),
         workers=settings.workers,
         log_level=settings.log_level.lower(),
     )

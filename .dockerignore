@@ -1,0 +1,77 @@
+# Keep the Docker build context small (and the image privacy-safe).
+# Every file matched here is NOT shipped to the Docker daemon, so a
+# fresh build no longer waltzes 3+ GB of venv / node_modules / customer
+# CSVs across the wire.
+
+# ---------- VCS + IDE ----------
+.git
+.gitignore
+.gitattributes
+.github
+.gitlab
+.vscode
+.idea
+.claude
+
+# ---------- Python local state ----------
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.coverage
+htmlcov
+.venv
+venv
+env
+
+# ---------- Node / webapp ----------
+# The frontend has its own Dockerfile -- it shouldn't be in the backend
+# build context at all.
+webapp
+node_modules
+**/node_modules
+**/dist
+**/.vite
+
+# ---------- Runtime / generated data (never bake into image) ----------
+data
+logs
+**/logs
+**/cache
+demand_forecasting_pipeline/artifacts
+recommended_order/output
+recommended_order/file_storage
+llm_analytics/cache
+
+# ---------- Secrets (defence in depth -- gitignored too) ----------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# ---------- Dev-only scripts + tooling ----------
+scripts/_*
+**/test_*.py
+**/tests
+.dockerignore
+Dockerfile*
+docker-compose*.yml
+nginx.conf
+README.md
+CHANGELOG.md
+LICENSE
+pyproject.toml
+render.yaml
+fly.toml
+railway.toml
+
+# ---------- macOS / Windows noise ----------
+.DS_Store
+Thumbs.db
+desktop.ini

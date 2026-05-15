@@ -1,44 +1,60 @@
-# Render Blueprint -- deploy all services with one click
+# Render Blueprint -- deploy all services with one click.
 # https://render.com/docs/blueprint-spec
+#
+# Each backend gets its own ``healthCheckPath`` so Render's rolling
+# deploys gate properly (a new instance only takes traffic once /health
+# returns 200). Python version is pinned via ``PYTHON_VERSION`` in the
+# shared env-var group below so every service builds on the same
+# interpreter -- bumping it stays a one-line change.
 
 services:
   - type: web
     name: yaumi-data-import
     runtime: python
+    plan: starter
     buildCommand: pip install -r data_import/requirements.txt
     startCommand: python -m data_import
+    healthCheckPath: /api/v1/data/health
     envVars:
       - fromGroup: yaumi-shared
 
   - type: web
     name: yaumi-forecast
     runtime: python
+    plan: starter
     buildCommand: pip install -r demand_forecasting_pipeline/requirements.txt
     startCommand: python -m demand_forecasting_pipeline
+    healthCheckPath: /api/v1/forecast/health
     envVars:
       - fromGroup: yaumi-shared
 
   - type: web
     name: yaumi-orders
     runtime: python
+    plan: starter
     buildCommand: pip install -r recommended_order/requirements.txt
     startCommand: python -m recommended_order
+    healthCheckPath: /api/v1/recommended-order/health
     envVars:
       - fromGroup: yaumi-shared
 
   - type: web
     name: yaumi-supervision
     runtime: python
+    plan: starter
     buildCommand: pip install -r sales_supervision/requirements.txt
     startCommand: python -m sales_supervision
+    healthCheckPath: /api/v1/supervision/health
     envVars:
       - fromGroup: yaumi-shared
 
   - type: web
     name: yaumi-analytics
     runtime: python
+    plan: starter
     buildCommand: pip install -r llm_analytics/requirements.txt
     startCommand: python -m llm_analytics
+    healthCheckPath: /api/v1/analytics/health
     envVars:
       - fromGroup: yaumi-shared
 
@@ -70,6 +86,18 @@ services:
 envVarGroups:
   - name: yaumi-shared
     envVars:
+      # Pin the runtime so every service builds on the same interpreter --
+      # bumping it stays a one-line change here.
+      - key: PYTHON_VERSION
+        value: 3.12.0
+
+      # PYTHONPATH = render's repo checkout root so ``from common...``
+      # resolves identically to local dev.
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+
+      # Secrets -- ``sync: false`` makes Render prompt for the value in
+      # the dashboard instead of committing it here.
       - key: DI_DB_HOST
         sync: false
       - key: DI_DB_USERNAME
@@ -78,5 +106,3 @@ envVarGroups:
         sync: false
       - key: LLM_API_KEY
         sync: false
-      - key: PYTHONPATH
-        value: /opt/render/project/src

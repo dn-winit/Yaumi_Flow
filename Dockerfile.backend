@@ -1,36 +1,81 @@
-FROM python:3.12-slim
+# ----------------------------------------------------------------------
+# Shared backend image -- one image runs any of the 5 services. The
+# concrete service is chosen by the start command (``python -m <module>``)
+# passed via docker-compose / cloud platform config.
+#
+# Layout follows the 12-factor split: deps and code go into the image,
+# data + secrets are runtime concerns supplied by env + mounted volumes.
+# ----------------------------------------------------------------------
 
-# System deps for pyodbc (SQL Server driver)
+FROM python:3.12-slim AS base
+
+# System deps for pyodbc (Microsoft ODBC Driver 17 for SQL Server).
+# Build tools are purged after install so they don't bloat the final layer.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    curl gnupg2 unixodbc-dev gcc g++ && \
+        curl gnupg2 unixodbc-dev gcc g++ && \
     curl -fsSL https://packages.microsoft.com/keys/microsoft.asc | gpg --dearmor -o /usr/share/keyrings/microsoft-prod.gpg && \
     echo "deb [signed-by=/usr/share/keyrings/microsoft-prod.gpg] https://packages.microsoft.com/debian/12/prod bookworm main" > /etc/apt/sources.list.d/mssql-release.list && \
     apt-get update && ACCEPT_EULA=Y apt-get install -y msodbcsql17 && \
-    apt-get purge -y gnupg2 gcc g++ && apt-get autoremove -y && rm -rf /var/lib/apt/lists/*
+    apt-get purge -y gnupg2 gcc g++ && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
+
+# Non-root runtime user. Created here so subsequent COPY layers can be
+# owned by it -- avoids a separate `chown -R` at the end of the build.
+RUN groupadd --system --gid 1001 app && \
+    useradd --system --uid 1001 --gid 1001 --home /app --shell /usr/sbin/nologin app
 
 WORKDIR /app
 
-# Install Python deps (shared across all services)
-COPY data_import/requirements.txt /tmp/req-di.txt
-COPY demand_forecasting_pipeline/requirements.txt /tmp/req-df.txt
-COPY recommended_order/requirements.txt /tmp/req-ro.txt
-COPY sales_supervision/requirements.txt /tmp/req-ss.txt
-COPY llm_analytics/requirements.txt /tmp/req-llm.txt
+# ---------- Python deps (cached layer) ----------
+# Copy only requirements first so a code-only change doesn't bust the
+# pip-install layer. Each service has its own manifest so the union is
+# the full install set.
+COPY data_import/requirements.txt                  /tmp/req-di.txt
+COPY demand_forecasting_pipeline/requirements.txt  /tmp/req-df.txt
+COPY recommended_order/requirements.txt            /tmp/req-ro.txt
+COPY sales_supervision/requirements.txt            /tmp/req-ss.txt
+COPY llm_analytics/requirements.txt                /tmp/req-llm.txt
 
 RUN pip install --no-cache-dir \
     -r /tmp/req-di.txt \
     -r /tmp/req-df.txt \
     -r /tmp/req-ro.txt \
     -r /tmp/req-ss.txt \
-    -r /tmp/req-llm.txt
+    -r /tmp/req-llm.txt && \
+    rm -f /tmp/req-*.txt
 
-# Copy all modules + data
-COPY data_import/ /app/data_import/
-COPY demand_forecasting_pipeline/ /app/demand_forecasting_pipeline/
-COPY recommended_order/ /app/recommended_order/
-COPY sales_supervision/ /app/sales_supervision/
-COPY llm_analytics/ /app/llm_analytics/
-COPY data/ /app/data/
+# ---------- Application code ----------
+# ``common/`` is the shared utility package every service imports
+# (``from common.db_pool ...``, ``from common.settings_base ...``);
+# leaving it out crashes every container on startup.
+COPY --chown=app:app common/                       /app/common/
+COPY --chown=app:app data_import/                  /app/data_import/
+COPY --chown=app:app demand_forecasting_pipeline/  /app/demand_forecasting_pipeline/
+COPY --chown=app:app recommended_order/            /app/recommended_order/
+COPY --chown=app:app sales_supervision/            /app/sales_supervision/
+COPY --chown=app:app llm_analytics/                /app/llm_analytics/
+COPY --chown=app:app scripts/                      /app/scripts/
 
-ENV PYTHONPATH=/app
-ENV PYTHONUNBUFFERED=1
+# Data directory is created (so settings.data_dir resolves) but kept
+# EMPTY in the image. CSV mirrors and forecast artifacts are runtime
+# state, supplied by a mounted volume in compose / a persistent disk on
+# the cloud platform / the import scheduler itself on first run. Baking
+# customer data into a pushed image would be a privacy regression.
+RUN mkdir -p /app/data/imports /app/data/forecast /app/data/recommendations && \
+    chown -R app:app /app/data
+
+# ``PYTHONPATH=/app`` makes every top-level package importable regardless
+# of which service is started. ``PYTHONUNBUFFERED`` flushes stdout/stderr
+# per line so container logs appear in real time (no 4 KiB pipe buffer
+# lag during incidents).
+ENV PYTHONPATH=/app \
+    PYTHONUNBUFFERED=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+USER app
+
+# CMD intentionally omitted -- each service is launched via
+# ``command: python -m <service>`` in docker-compose / cloud config.
+# The ports honour the ``PORT`` env var when set (Cloud Run / Heroku /
+# Railway assign one dynamically); otherwise each service's settings
+# pin its canonical port (8001-8005).
