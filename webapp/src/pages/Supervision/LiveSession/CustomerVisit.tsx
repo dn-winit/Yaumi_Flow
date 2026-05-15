@@ -77,6 +77,14 @@ interface Props {
    * "this customer has been visited" signal the component reads.
    */
   initialVisit?: InitialVisit;
+  /**
+   * Pre-visit briefing JSON saved by the auto-visit cron. Flows in for
+   * EVERY planned customer (visited or not) so the briefing modal
+   * renders without a live LLM call. ``initialVisit.preVisitBriefing``
+   * still wins when present (it's the same value, scoped to the
+   * visited row), so visited-customer behaviour is unchanged.
+   */
+  initialBriefing?: string | null;
   onRequestAnalysis: (payload: {
     sessionId: string;
     customerCode: string;
@@ -104,6 +112,7 @@ export default function CustomerVisit({
   totalUnits,
   liveVisited = false,
   initialVisit,
+  initialBriefing: initialBriefingRaw,
   onRequestAnalysis,
 }: Props) {
   const score = initialVisit?.score;
@@ -144,21 +153,36 @@ export default function CustomerVisit({
     ((initialVisit.totalActual ?? 0) > 0 || alsoBought.length > 0);
 
   // Hydrate the briefing from a previously-saved JSON payload when
-  // present so re-opening an already-visited customer renders the same
-  // briefing without re-calling the LLM.
+  // present so re-opening a customer renders the same briefing without
+  // re-calling the LLM. ``initialVisit.preVisitBriefing`` (visited
+  // path) wins when set; otherwise fall back to the
+  // ``initialBriefingProp`` channel (non-visited planned customers,
+  // populated by the auto-visit cron and shipped via the top-level
+  // ``briefings`` map on /session/saved).
   const initialBriefing = useMemo<Record<string, unknown> | null>(() => {
-    if (!initialVisit?.preVisitBriefing) return null;
+    const raw = initialVisit?.preVisitBriefing ?? initialBriefingRaw ?? null;
+    if (!raw) return null;
     try {
-      const parsed = JSON.parse(initialVisit.preVisitBriefing);
+      const parsed = JSON.parse(raw);
       return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
     } catch {
       return null;
     }
-  }, [initialVisit?.preVisitBriefing]);
+  }, [initialVisit?.preVisitBriefing, initialBriefingRaw]);
 
   const [briefing, setBriefing] = useState<Record<string, unknown> | null>(initialBriefing);
   const [briefingOpen, setBriefingOpen] = useState(false);
   const [briefingLoading, setBriefingLoading] = useState(false);
+
+  // ``initialBriefing`` may arrive AFTER mount -- the parent fills it
+  // from /session/saved which resolves async. Functional setter keeps
+  // a user-initiated fetch (handleBriefing) from being clobbered: we
+  // only fill an empty slot. ``prev ?? initialBriefing`` is the
+  // single race-safe primitive here.
+  useEffect(() => {
+    if (!initialBriefing) return;
+    setBriefing((prev) => prev ?? initialBriefing);
+  }, [initialBriefing]);
 
   const handleBriefing = async () => {
     setBriefingOpen(true);

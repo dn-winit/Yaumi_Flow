@@ -486,6 +486,14 @@ export default function LiveSessionTab({
                         }
                       : undefined
                   }
+                  // Briefing hydrates for EVERY planned customer
+                  // (visited or not). The auto-visit cron writes the
+                  // briefing for the whole planned set; we just plumb
+                  // the saved value through so the modal renders
+                  // without a fresh LLM call.
+                  initialBriefing={
+                    savedVisitsData?.briefings?.[selected.customerCode] ?? null
+                  }
                   onRequestAnalysis={(payload) =>
                     setCustCtx({
                       sessionId: payload.sessionId,

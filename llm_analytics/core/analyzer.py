@@ -65,11 +65,33 @@ def _items_signature(items: List[Dict[str, Any]]) -> str:
     parts = []
     for it in items or []:
         code = str(_pick(it, "item_code", "itemCode", "ItemCode", default=""))
-        rec = int(_pick(it, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0) or 0)
-        act = int(_pick(it, "actual_qty", "actualQuantity", "ActualQuantity", default=0) or 0)
+        rec = int(_pick(it, *_REC_QTY_KEYS, default=0) or 0)
+        act = int(_pick(it, *_ACT_QTY_KEYS, default=0) or 0)
         parts.append(f"{code}:{rec}:{act}")
     parts.sort()
     return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+
+
+# Every shape that a recommended-quantity / actual-quantity field has
+# ever been emitted under. The supervision auto-path uses snake_case
+# (``recommended_qty``), the browser briefing form uses short camel
+# (``recommendedQty``), and the customer-analysis form uses long camel
+# (``recommendedQuantity``); the rec-engine sometimes emits the
+# PascalCase form. Listing every variant here means producers never
+# need to translate -- and "empty visit" detection cannot silently
+# fail because one caller spelt it differently.
+_REC_QTY_KEYS = (
+    "recommended_qty",
+    "recommendedQty",
+    "recommendedQuantity",
+    "RecommendedQuantity",
+)
+_ACT_QTY_KEYS = (
+    "actual_qty",
+    "actualQty",
+    "actualQuantity",
+    "ActualQuantity",
+)
 
 
 def _is_empty_visit(items: List[Dict[str, Any]]) -> bool:
@@ -78,8 +100,8 @@ def _is_empty_visit(items: List[Dict[str, Any]]) -> bool:
     if not items:
         return True
     for it in items:
-        rec = int(_pick(it, "recommended_qty", "recommendedQuantity", "RecommendedQuantity", default=0) or 0)
-        act = int(_pick(it, "actual_qty", "actualQuantity", "ActualQuantity", default=0) or 0)
+        rec = int(_pick(it, *_REC_QTY_KEYS, default=0) or 0)
+        act = int(_pick(it, *_ACT_QTY_KEYS, default=0) or 0)
         if rec > 0 or act > 0:
             return False
     return True

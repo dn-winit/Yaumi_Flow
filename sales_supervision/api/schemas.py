@@ -260,6 +260,13 @@ class SavedVisitsResponse(BaseModel):
     visits: Dict[str, SavedVisit] = Field(default_factory=dict)
     routeAnalysis: Optional[str] = None
     visit_totals: SessionVisitTotals = Field(default_factory=SessionVisitTotals)
+    # Pre-visit briefings keyed by ``customer_code``. Populated for
+    # every planned customer that has a non-NULL ``llm_pre_visit_briefing``
+    # column -- visited AND not-yet-visited -- so the live UI can render
+    # any planned customer's briefing without a fresh LLM call. Drop-in
+    # (unplanned) customers are not represented here: the rep cannot
+    # plan for whom they may serve.
+    briefings: Dict[str, str] = Field(default_factory=dict)
 
 
 class SaveBriefingRequest(BaseModel):

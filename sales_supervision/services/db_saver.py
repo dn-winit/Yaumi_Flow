@@ -794,11 +794,22 @@ class DbSaver:
                     )
                 else:
                     all_custs, all_items = None, None
-                return self._build_visits_payload(
+                # Pre-visit briefings for every planned customer
+                # (visited + not-yet-visited). Pulled even on the cheap
+                # poll path -- the dict is small and lets the FE render
+                # any planned customer's briefing without a live LLM
+                # call. Empty when the cron has not yet briefed any
+                # customer on this route/date.
+                briefings = self._fetch_planned_briefings(
+                    cursor, route_code, date,
+                )
+                payload = self._build_visits_payload(
                     sid, route_header, custs, items,
                     all_custs=all_custs, all_items=all_items,
                     include_redistributions=include_redistributions,
                 )
+                payload["briefings"] = briefings
+                return payload
         except Exception as exc:
             logger.error(
                 "DB load_session_visits failed for %s/%s: %s",
@@ -1367,6 +1378,51 @@ class DbSaver:
         cols = [d[0] for d in cursor.description]
         items = [dict(zip(cols, row)) for row in cursor.fetchall()]
         return custs, items
+
+    def _fetch_planned_briefings(
+        self, cursor: Any, route_code: str, date: str,
+    ) -> Dict[str, str]:
+        """Return ``customer_code -> pre-visit briefing JSON`` for every
+        planned customer on (route, date) whose briefing column is
+        populated -- visited AND not-yet-visited.
+
+        The auto-visit cron writes the briefing for every planned customer
+        in the background, so this is the single hydration channel that
+        lets the live UI render the briefing modal for any planned
+        customer without a fresh LLM call. Drop-in (unplanned) rows are
+        excluded by ``qty_recommended > 0`` -- supervisors cannot
+        pre-brief a drop-in.
+
+        Single SELECT, no locks held -- safe to call on every poll.
+        """
+        sql = f"""
+            ;WITH route_sessions AS (
+                SELECT session_id
+                FROM {self._s.route_summary_table}
+                WHERE route_code = ? AND supervision_date = ?
+            ),
+            ranked AS (
+                SELECT cs.customer_code, cs.llm_pre_visit_briefing,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY cs.customer_code
+                           ORDER BY cs.record_saved_at DESC, cs.id DESC
+                       ) AS rn
+                FROM {self._s.customer_summary_table} cs
+                INNER JOIN route_sessions rs ON rs.session_id = cs.session_id
+                WHERE cs.customer_code IS NOT NULL
+                  AND cs.qty_recommended > 0
+                  AND cs.llm_pre_visit_briefing IS NOT NULL
+            )
+            SELECT customer_code, llm_pre_visit_briefing
+            FROM ranked WHERE rn = 1
+        """
+        cursor.execute(sql, (route_code, date))
+        briefings: Dict[str, str] = {}
+        for code, briefing in cursor.fetchall():
+            if not code or not briefing:
+                continue
+            briefings[str(code)] = str(briefing)
+        return briefings
 
     # ------------------------------------------------------------------
     # Reconstruct session from DB rows

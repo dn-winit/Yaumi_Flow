@@ -189,4 +189,9 @@ export interface SavedVisitsResponse {
   // Route-level LLM review for the (route, date), if any.
   routeAnalysis?: string | null;
   visit_totals: SessionVisitTotals;
+  // Pre-visit briefings keyed by customer_code. Populated for every
+  // planned customer the cron has briefed -- visited OR not-yet-visited
+  // -- so the briefing modal can render any planned customer without a
+  // fresh LLM round-trip. Drop-in (unplanned) customers are not present.
+  briefings?: Record<string, string>;
 }
