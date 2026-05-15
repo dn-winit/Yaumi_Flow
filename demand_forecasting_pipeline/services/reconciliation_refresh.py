@@ -252,6 +252,15 @@ def refresh_reconciliation(
         #    override. ``engine_actuals_df`` covers [actuals_min_date, end]
         #    which is a superset of the write window [start, end]; filter
         #    down here so the merge only touches rows we are writing.
+        # ``how="outer"`` is load-bearing -- not a stylistic choice. With
+        # ``how="left"`` the write universe was the forecast frame; any
+        # (route, item, date) the rep stocked / sold but the model did
+        # not predict for got silently dropped, so the DB's rep-side
+        # totals were 5-12% lower than the YaumiLive raw views. The
+        # outer merge keeps every observed row from both sides; rep-only
+        # rows arrive with NaN in the policy-chain columns -- the upsert
+        # layer below converts those to NULL on the wire, and downstream
+        # readers that gate on ``(rec + op) > 0`` already skip them.
         if not engine_actuals_df.empty:
             actual_sold_df = engine_actuals_df[
                 (engine_actuals_df["trx_date"] >= str(start))
@@ -261,7 +270,7 @@ def refresh_reconciliation(
                 write_df = write_df.merge(
                     actual_sold_df,
                     on=["trx_date", "route_code", "item_code"],
-                    how="left",
+                    how="outer",
                 )
             else:
                 write_df["actual_sold"] = None
@@ -278,7 +287,7 @@ def refresh_reconciliation(
             write_df = write_df.merge(
                 yaumi_df,
                 on=["trx_date", "route_code", "item_code"],
-                how="left",
+                how="outer",
             )
         else:
             for c in (
@@ -287,6 +296,26 @@ def refresh_reconciliation(
             ):
                 write_df[c] = None
         # yaumi_* columns remain NULL where no rep activity exists for that cell.
+
+        # 7c. Outer merges may produce rows whose key columns came in
+        #     as pandas NaT/NaN (won't happen on a clean dataset but
+        #     guard explicitly so a future data quirk can't write a
+        #     malformed key). Drop them with a single visible log line
+        #     rather than letting the staging-table INSERT fail late.
+        before = len(write_df)
+        write_df = write_df.dropna(subset=["trx_date", "route_code", "item_code"])
+        dropped = before - len(write_df)
+        if dropped:
+            logger.warning(
+                "reconciliation_refresh dropped %d row(s) with NaN merge keys "
+                "after outer merges -- check upstream sales / yaumi feeds",
+                dropped,
+            )
+        # Re-normalise key types so the upsert sees uniform strings even
+        # for rows that arrived only from the outer side.
+        write_df["trx_date"]   = write_df["trx_date"].astype(str).str[:10]
+        write_df["route_code"] = write_df["route_code"].astype(str)
+        write_df["item_code"]  = write_df["item_code"].astype(str)
 
         # 8. UPSERT into yf_sales_transactions
         rows_updated = _upsert_sales_transactions(s, write_df)
