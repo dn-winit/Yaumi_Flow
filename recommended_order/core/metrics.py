@@ -22,7 +22,7 @@ import csv
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -132,7 +132,14 @@ class LastGenerationTracker:
         calibration_summary: Dict[str, Any],
         duration_seconds: float,
     ) -> None:
-        now = datetime.utcnow().isoformat()
+        # ``isoformat()`` on a naive datetime produces no timezone
+        # suffix, which is what the downstream snapshot consumers (the
+        # /summary endpoint + dashboard tile) expect. Use the modern
+        # ``datetime.now(timezone.utc)`` to silence the utcnow()
+        # deprecation, then drop the tzinfo to preserve the legacy
+        # wire shape (``2026-05-18T13:00:00.000000`` not
+        # ``...+00:00``).
+        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
         with self._lock:
             self._last_run_at = now
             self._last_target_date = target_date

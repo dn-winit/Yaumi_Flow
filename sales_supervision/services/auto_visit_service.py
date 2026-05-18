@@ -42,7 +42,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date as _date_cls, datetime, timedelta
+from datetime import date as _date_cls, datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Phase concurrency caps live in Settings (auto_visit_data_phase_workers,
@@ -113,7 +113,7 @@ class _SessionCacheEntry:
     # (route, date) pairs no operator has touched for hours get
     # dropped -- keeps ``_sessions`` from growing unbounded across
     # multi-day operation.
-    last_seen_at: datetime = field(default_factory=datetime.utcnow)
+    last_seen_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     # Per-session lock serialising in-memory mutation across the worker
     # pool. process_visit / _register_unplanned mutate session.customers
     # and assign visit_sequence by scanning the current max -- two
@@ -175,7 +175,7 @@ class AutoVisitService:
         # enabled, 5+ minutes) never accumulates a lag larger than one
         # route's processing time -- the 2x poll threshold in
         # ``health.py`` is dimensioned for per-route, not per-tick.
-        self._last_reconcile_at = datetime.utcnow()
+        self._last_reconcile_at = datetime.now(timezone.utc)
         # Evict cache entries whose (route, date) pairs nobody has
         # touched in ``auto_visit_session_ttl_seconds``. Cheap walk
         # under the existing _sessions_lock; runs once per tick so
@@ -195,7 +195,7 @@ class AutoVisitService:
             # minutes even though the cron was actively writing. With
             # this stamp, lag tracks the gap between consecutive route
             # completions -- always well under the 2x poll threshold.
-            self._last_reconcile_at = datetime.utcnow()
+            self._last_reconcile_at = datetime.now(timezone.utc)
         if any(r.get("planned_visits") or r.get("unplanned_visits") for r in out):
             logger.info("Auto-visit tick summary: %s", out)
         else:
@@ -257,7 +257,7 @@ class AutoVisitService:
         ttl = int(self._s.auto_visit_session_ttl_seconds)
         if ttl <= 0:
             return
-        cutoff = datetime.utcnow() - timedelta(seconds=ttl)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl)
         with self._sessions_lock:
             stale = [
                 sid for sid, cache in self._sessions.items()
@@ -346,7 +346,7 @@ class AutoVisitService:
                 cache_for_sig = self._sessions.get(session.session_id)
                 if cache_for_sig is not None:
                     cache_for_sig.last_header_signature = sig
-                    cache_for_sig.last_seen_at = datetime.utcnow()
+                    cache_for_sig.last_seen_at = datetime.now(timezone.utc)
 
         # ---- Phase 1: Data sync (parallel, cap=auto_visit_data_phase_workers) ----
         invoiced = self._live.get_route_sales(route_code, date) or []
@@ -660,7 +660,7 @@ class AutoVisitService:
         # 1. In-process cache. Stamp ``last_seen_at`` so the TTL
         # eviction sweep does not drop an active (route, date) entry
         # under the operator's nose.
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
         with self._sessions_lock:
             for cache in self._sessions.values():
                 if cache.session.route_code == str(route_code) and cache.session.date == str(date):

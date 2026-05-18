@@ -408,8 +408,62 @@ def compute_drift_status(
     }
     DRIFT_PCT.set(float(delta) if delta is not None else 0.0)
     with _drift_cache_lock:
+        # Track the prior status under the same lock so the webhook
+        # below only fires on a state TRANSITION into "significant",
+        # not on every poll that happens to land on the same status.
+        # Without this the dashboard's 5-min polling cycle would
+        # spam alerts.
+        prior = _drift_cache.get("status") if _drift_cache else None
         _drift_cache, _drift_cache_ts = result, time.time()
+    if status == "significant" and prior != "significant":
+        _fire_drift_webhook(s, result)
     return result
+
+
+def _fire_drift_webhook(settings: Settings, result: dict[str, Any]) -> None:
+    """POST a drift-alert payload to ``YF_DRIFT_WEBHOOK_URL`` when the
+    detector first transitions into ``significant`` state.
+
+    Fire-and-forget by design: a slow or down webhook endpoint MUST
+    NOT block drift computation (which is on the interactive UI path
+    via /retrain/config). 5s timeout + caught exception covers the
+    full surface; if the webhook fails, the drift state is already
+    logged + exposed on the prometheus DRIFT_PCT gauge so ops still
+    has signal through other channels.
+
+    Body shape is intentionally minimal -- callers can wire to Slack
+    incoming webhooks (which accept ``{"text": ...}``), PagerDuty
+    Events API, or a custom endpoint. The structured ``drift`` field
+    carries the full metric breakdown for downstream parsing.
+
+    No-op when ``YF_DRIFT_WEBHOOK_URL`` is unset -- dev environments
+    skip the webhook entirely without configuration noise.
+    """
+    url = (os.environ.get("YF_DRIFT_WEBHOOK_URL") or "").strip()
+    if not url:
+        return
+    delta = result.get("delta")
+    payload = {
+        "text": (
+            f"[demand_forecasting] DRIFT SIGNIFICANT: accuracy dropped "
+            f"{abs(delta) if delta is not None else '?'} pts "
+            f"(recent={result.get('recent_accuracy')}, "
+            f"baseline={result.get('baseline_accuracy')}, "
+            f"source={result.get('source')})"
+        ),
+        "drift": result,
+    }
+    try:
+        import httpx
+        with httpx.Client(timeout=5.0) as client:
+            client.post(url, json=payload)
+        logger.info("Drift webhook fired -> %s", url)
+    except Exception as exc:
+        logger.warning(
+            "Drift webhook POST failed (URL=%s): %s -- continuing "
+            "(prometheus gauge + log line still carry the signal)",
+            url, exc,
+        )
 
 def _recent_window(settings: Settings) -> tuple[str, str]:
     """Trailing N-calendar-day window used by the drift detector.

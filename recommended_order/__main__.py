@@ -12,12 +12,20 @@ if _ROOT_ENV.exists():
     load_dotenv(_ROOT_ENV)
 
 
-from common.runtime import port_from_env
+from common.runtime import port_from_env, require_env
 from recommended_order.config.settings import get_settings
 
 
 def main() -> None:
     settings = get_settings()
+
+    # Production guard: the lazy auto-heal in /get + /generate calls
+    # demand_forecasting's /reconciliation/refresh when the carry chain
+    # is missing for the target date. With ``RO_DEMAND_FORECASTING_URL``
+    # unset, /get raises a clear RuntimeError -> structured 200 envelope
+    # (correct for dev), but a production deploy without it means the
+    # nightly cron has no recovery path at all.
+    require_env(["RO_DEMAND_FORECASTING_URL"], service="recommended_order")
 
     # For workers > 1, uvicorn needs a factory string (it forks processes)
     uvicorn.run(

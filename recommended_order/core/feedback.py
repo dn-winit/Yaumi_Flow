@@ -39,7 +39,7 @@ import logging
 import os
 import tempfile
 import threading
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
@@ -471,7 +471,12 @@ def compute_feedback_adjustments(
     Honours ``SafetyClamps.feedback_enabled`` (caller usually checks too).
     Window is clamped to [feedback_window_min_days, feedback_window_max_days].
     """
-    today_dt = today or datetime.utcnow()
+    # Naive UTC by design: callers compare ``today_dt`` against rec
+    # ``generated_at`` timestamps that are also naive UTC (see
+    # metrics.py). Keeping both sides naive avoids a "can't compare
+    # aware to naive" TypeError; switching to aware here would
+    # cascade through every downstream date-math site.
+    today_dt = today or datetime.now(timezone.utc).replace(tzinfo=None)
     window = max(
         clamps.feedback_window_min_days,
         min(clamps.feedback_window_max_days, int(clamps.feedback_window_days)),

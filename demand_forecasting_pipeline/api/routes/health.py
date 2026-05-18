@@ -134,23 +134,77 @@ def health_check(
     art_svc: ArtifactService = Depends(get_artifact_service),
     pipe_svc: PipelineService = Depends(get_pipeline_service),
 ):
-    """Legacy summary - always 200 unless the process itself is dead.
-    Kept for back-compat with monitoring scripts. New monitoring should
-    target ``/health/live`` and ``/health/ready``."""
+    """Runtime-health summary -- always 200 unless the process is dead.
+    Kept for back-compat; new monitoring targets ``/health/live`` and
+    ``/health/ready``.
+
+    ``status`` reflects RUNTIME readiness (the predictions, page-views,
+    and reconciliation surfaces can serve requests), NOT training-
+    pipeline state. Missing model artifacts are listed in
+    ``artifacts`` as informational state -- consumers that care about
+    "has training ever completed" inspect that field or call
+    ``/health/training-state`` (dedicated endpoint).
+
+    Pre-split, this endpoint reported ``degraded`` whenever any of the
+    seven training artifacts was missing -- which made every fresh
+    deployment look broken in the dashboard even though predictions,
+    reconciliation, and page-views were all healthy. Pipeline error
+    statuses still mark the service degraded since those reflect
+    runtime concerns.
+    """
     settings = get_settings()
     artifacts = art_svc.check_artifacts()
-    all_present = all(artifacts.values())
 
     statuses = pipe_svc.get_all_status()
     pipe_summary = {k: dict(v).get("status", "unknown") for k, v in statuses.items()}
+    # ``error`` is the only runtime-fatal pipeline state; ``idle``,
+    # ``running``, ``success`` are all healthy. ``unknown`` is treated
+    # as healthy because it's the legitimate "never ran" cold-start
+    # state, not a failure signal.
+    pipelines_runtime_ok = not any(
+        s == "error" for s in pipe_summary.values()
+    )
 
     return HealthResponse(
-        status="healthy" if all_present else "degraded",
+        status="healthy" if pipelines_runtime_ok else "degraded",
         artifacts=ArtifactStatus(**artifacts),
         pipelines=pipe_summary,
         config_path=settings.pipeline_config,
         cache_keys=art_svc.cache_keys,
     )
+
+
+@router.get("/health/training-state")
+def training_state(
+    art_svc: ArtifactService = Depends(get_artifact_service),
+) -> dict[str, Any]:
+    """Dedicated endpoint for "has training run, and is it fresh?".
+    Separated from ``/health`` so a fresh deployment with no trained
+    model yet (legitimate cold-start) doesn't read as degraded in the
+    runtime health dashboard.
+
+    The retrain UI consumes this directly. ``status``:
+      * ``trained``    -- all artifacts present
+      * ``partial``    -- some artifacts present (mid-training, or
+                          older training that doesn't produce every
+                          modern artifact)
+      * ``untrained``  -- no artifact present yet
+    """
+    artifacts = art_svc.check_artifacts()
+    present = sum(1 for v in artifacts.values() if v)
+    total = len(artifacts)
+    if present == total:
+        status = "trained"
+    elif present == 0:
+        status = "untrained"
+    else:
+        status = "partial"
+    return {
+        "status": status,
+        "artifacts_present": present,
+        "artifacts_total": total,
+        "artifacts": artifacts,
+    }
 
 
 @router.get("/health/live")

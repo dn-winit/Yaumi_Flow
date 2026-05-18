@@ -57,6 +57,40 @@ class TestGet:
         # OR return empty. Either way: not a 5xx.
         assert_not_5xx(resp, f"far-past {far_past}")
 
+    def test_pre_system_date_returns_structured_200(
+        self, client: httpx.Client, base_urls: dict[str, str],
+        primary_route: str, pre_system_date: str,
+    ) -> None:
+        """Regression: year-2020 input used to raise an uncaught
+        ``HTTPStatusError`` from the auto-heal path (horizon exceeds
+        demand_forecasting's 365-day cap) -> bare 500. Now returns a
+        structured 200 + ``diagnosis`` envelope so the UI can render
+        a positive "no data this far back" message instead of an
+        error toast."""
+        resp = client.post(
+            f"{base_urls['recommended_order']}/get",
+            json={
+                "date": pre_system_date,
+                "route_code": primary_route,
+                "limit": 10,
+            },
+        )
+        body = assert_ok(resp, f"pre-system date {pre_system_date}")
+        assert body.get("success") is True, (
+            f"expected success=True with empty data, got {body}"
+        )
+        assert body.get("total") == 0, (
+            f"pre-system date should have zero results: {body}"
+        )
+        assert body.get("data") == [], (
+            f"pre-system date should have empty data list: {body}"
+        )
+        # ``diagnosis`` carries the user-facing explanation; we don't
+        # assert specific text, just that the envelope is present.
+        assert body.get("diagnosis"), (
+            f"missing diagnosis envelope for pre-system date: {body}"
+        )
+
     def test_bad_date_format_rejected(
         self, client: httpx.Client, base_urls: dict[str, str],
         primary_route: str,

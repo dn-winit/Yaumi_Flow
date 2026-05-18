@@ -12,12 +12,21 @@ if _ROOT_ENV.exists():
     load_dotenv(_ROOT_ENV)
 
 
-from common.runtime import port_from_env
+from common.runtime import port_from_env, require_env
 from demand_forecasting_pipeline.config.settings import get_settings
 
 
 def main() -> None:
     settings = get_settings()
+    # Production guard: reconciliation cascades to data_import (CSV
+    # mirror) and recommended_order (regenerate) on every refresh.
+    # Missing URLs silently no-op in dev/staging; production must fail
+    # boot so the dashboard never serves stale carry-chain or
+    # recommendations after a successful DB write.
+    require_env(
+        ["DF_DATA_IMPORT_URL", "DF_RECOMMENDED_ORDER_URL"],
+        service="demand_forecasting",
+    )
     uvicorn.run(
         "demand_forecasting_pipeline.api.app:create_app",
         factory=True,

@@ -8,6 +8,39 @@ heavier belongs in the per-service config layer.
 from __future__ import annotations
 
 import os
+from typing import Iterable
+
+
+def is_production() -> bool:
+    """True only when ``YF_ENV=production``. Used by the boot-time env
+    validation below: dev/staging keeps the soft-skip behaviour where
+    missing optional URLs degrade silently; production hard-fails so an
+    operator can't deploy a half-configured service.
+    """
+    return os.getenv("YF_ENV", "").strip().lower() == "production"
+
+
+def require_env(names: Iterable[str], *, service: str) -> None:
+    """In production, hard-fail boot when any of ``names`` is unset or
+    empty. No-op in dev/staging so a developer running the stack
+    locally without a full warehouse config still gets working services
+    (the soft-skip paths in cascade helpers handle the missing URL
+    cleanly).
+
+    Centralised here so every service applies the same prod-vs-dev
+    invariant -- otherwise each ``__main__.py`` would re-implement the
+    YF_ENV check with subtle drift.
+    """
+    if not is_production():
+        return
+    missing = [n for n in names if not (os.getenv(n) or "").strip()]
+    if missing:
+        raise RuntimeError(
+            f"{service}: required environment variables unset in production: "
+            f"{sorted(missing)}. Set YF_ENV to anything other than 'production' "
+            f"to allow the soft-skip behaviour, or populate these env vars "
+            f"before booting."
+        )
 
 
 def port_from_env(default: int, var_name: str = "PORT") -> int:

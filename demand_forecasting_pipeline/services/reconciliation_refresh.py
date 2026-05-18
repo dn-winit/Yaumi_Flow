@@ -30,7 +30,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
 import pandas as pd
@@ -150,7 +150,7 @@ def refresh_reconciliation(
     global _LAST_REFRESH_AT
 
     s = settings or get_settings()
-    now = today or datetime.utcnow()
+    now = today or datetime.now(timezone.utc)
     today_dt = now.date()
     start = (now - timedelta(days=max(0, int(horizon_days_behind)))).date()
     end = today_dt  # never write future
@@ -165,7 +165,7 @@ def refresh_reconciliation(
         with _REFRESH_LOCK:
             last = _LAST_REFRESH_AT
         if last is not None:
-            elapsed = (datetime.utcnow() - last).total_seconds()
+            elapsed = (datetime.now(timezone.utc) - last).total_seconds()
             if elapsed < CRON_SKIP_IF_RECENT_SECONDS:
                 logger.info(
                     "reconciliation_refresh_skipped_recent: last successful "
@@ -377,7 +377,7 @@ def refresh_reconciliation(
         # concurrent backstop tick reading the timestamp sees the most
         # recent value under the same critical section that wrote it.
         # ``global`` already declared at the top of the function.
-        _LAST_REFRESH_AT = datetime.utcnow()
+        _LAST_REFRESH_AT = datetime.now(timezone.utc)
     finally:
         # Release BEFORE the cascade so a slow / retried HTTP round-trip
         # can never block a subsequent caller. The DB MERGE above is the

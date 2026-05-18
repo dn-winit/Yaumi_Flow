@@ -45,7 +45,13 @@ def import_dataset(
 
     Cache invalidation runs in a finally so that any partial import which
     still touched the CSV (rows written before a downstream raise) does
-    not leave aggregations serving stale data.
+    not leave aggregations serving stale data. Invalidated on every
+    successful import -- not just when ``new_rows > 0`` -- because the
+    dedup-merge path (used by the reconciliation cascade with
+    ``lookback_days``) can rewrite existing rows in place without
+    growing the row count. Unconditional invalidation is cheap (the
+    next request re-parses the CSV anyway via the mtime memo) and
+    closes the silent-stale window for UPSERT-style datasets.
     """
     result: dict = {}
     try:
@@ -54,7 +60,7 @@ def import_dataset(
         )
         return ImportResponse(**result)
     finally:
-        if result.get("new_rows", 0) > 0:
+        if result.get("success"):
             eda.invalidate()
 
 
@@ -64,14 +70,16 @@ def import_all(
     importer: DataImporter = Depends(get_importer),
     eda: EdaService = Depends(get_eda_service),
 ):
-    """Import all datasets. Same try/finally invariant as /import."""
+    """Import all datasets. Same try/finally invariant as /import:
+    invalidate on any successful per-dataset import so an UPSERT-only
+    refresh can't leave aggregations serving stale rows."""
     results: dict = {}
     try:
         results = importer.import_all(req.mode, lookback_days=req.lookback_days)
         success = all(r.get("success", False) for r in results.values())
         return ImportAllResponse(success=success, results=results)
     finally:
-        if any(r.get("new_rows", 0) > 0 for r in results.values()):
+        if any(r.get("success") for r in results.values()):
             eda.invalidate()
 
 
