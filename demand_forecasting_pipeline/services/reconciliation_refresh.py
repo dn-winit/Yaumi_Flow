@@ -61,6 +61,15 @@ logger = logging.getLogger(__name__)
 # lock across it would compound the wait).
 _REFRESH_LOCK = threading.Lock()
 
+# Last successful refresh timestamp (UTC). Read under ``_REFRESH_LOCK``.
+# Used by the cron-context call below to short-circuit when the
+# data_import cascade already ran reconciliation within the last
+# ``CRON_SKIP_IF_RECENT_SECONDS`` window. Manual ``/refresh`` calls
+# bypass this guard via ``force=True`` so operators can always trigger
+# a fresh run on demand.
+_LAST_REFRESH_AT: Optional[datetime] = None
+CRON_SKIP_IF_RECENT_SECONDS = 1800  # 30 min
+
 
 # Engine output column -> yf_sales_transactions column name.
 # Single source of truth for the renaming; the SQL builder below uses
@@ -105,6 +114,7 @@ def refresh_reconciliation(
     horizon_days_behind: int = 0,
     settings: Optional[Settings] = None,
     today: Optional[datetime] = None,
+    force: bool = True,
 ) -> Dict[str, Any]:
     """Recompute the carry chain + diagnostics for ``[today-behind, today]``
     and UPSERT into yf_sales_transactions.
@@ -115,17 +125,61 @@ def refresh_reconciliation(
             values support backfill-style re-runs across past dates.
         settings: optional override for tests.
         today: optional override for tests.
+        force: When ``False``, the call short-circuits if another caller
+            already ran a successful refresh within
+            ``CRON_SKIP_IF_RECENT_SECONDS``. This is the cron-context
+            backstop path: the 03:30 demand_forecasting cron used to
+            re-run the entire reconciliation 30 minutes after the 03:00
+            data_import cascade had already done the same work (~99s of
+            wasted compute every night). The "skipped" return now
+            collapses that double-fire to a no-op when the primary path
+            succeeded; the backstop still works for its real purpose
+            (firing when the 03:00 cascade failed silently). Manual
+            ``/refresh`` callers and the data_import cascade itself
+            pass ``force=True`` so they always perform the work.
 
     Returns:
         Dict with ``success``, ``rows_updated``, ``window``,
         ``duration_seconds``, and on cascade ``cascade``.
     """
+    # Module-level: stamped at the end of every successful refresh,
+    # read by the dedup-check below. ``global`` declared up here so
+    # the read in the dedup gate and the write at the bottom share the
+    # same scope -- Python's parser requires the declaration before
+    # the first reference.
+    global _LAST_REFRESH_AT
+
     s = settings or get_settings()
     now = today or datetime.utcnow()
     today_dt = now.date()
     start = (now - timedelta(days=max(0, int(horizon_days_behind)))).date()
     end = today_dt  # never write future
     window = (str(start), str(end))
+
+    # Cron-context dedup: if a recent successful refresh already wrote
+    # rows for this window, the backstop cron has nothing to add. Manual
+    # callers (``force=True``) and the data_import cascade always
+    # bypass this guard. Read under the lock so two parallel cron ticks
+    # can't both decide to skip on a stale snapshot.
+    if not force:
+        with _REFRESH_LOCK:
+            last = _LAST_REFRESH_AT
+        if last is not None:
+            elapsed = (datetime.utcnow() - last).total_seconds()
+            if elapsed < CRON_SKIP_IF_RECENT_SECONDS:
+                logger.info(
+                    "reconciliation_refresh_skipped_recent: last successful "
+                    "refresh was %.0fs ago (<%ds threshold); 03:00 cascade "
+                    "already covered this window",
+                    elapsed, CRON_SKIP_IF_RECENT_SECONDS,
+                )
+                return {
+                    "success": True,
+                    "skipped": True,
+                    "reason": "recent_refresh",
+                    "elapsed_seconds": round(elapsed, 1),
+                    "window": window,
+                }
 
     if start > end:
         return {"success": False, "error": f"inverted window {window}",
@@ -319,6 +373,11 @@ def refresh_reconciliation(
 
         # 8. UPSERT into yf_sales_transactions
         rows_updated = _upsert_sales_transactions(s, write_df)
+        # Stamp last-successful-refresh BEFORE releasing the lock so a
+        # concurrent backstop tick reading the timestamp sees the most
+        # recent value under the same critical section that wrote it.
+        # ``global`` already declared at the top of the function.
+        _LAST_REFRESH_AT = datetime.utcnow()
     finally:
         # Release BEFORE the cascade so a slow / retried HTTP round-trip
         # can never block a subsequent caller. The DB MERGE above is the
@@ -980,15 +1039,32 @@ def start_reconciliation_scheduler(
             # Wrapped in try/except so APScheduler's silent-swallow
             # behaviour can't hide an unhandled exception -- structured
             # log + traceback surface in ops dashboards.
+            # ``force=False``: the data_import 03:00 cron now cascades
+            # reconciliation directly, so by the time this 03:30 cron
+            # fires the work is usually already done. The dedup guard
+            # inside ``refresh_reconciliation`` checks the last-success
+            # timestamp and short-circuits to a no-op when it fired
+            # within the past 30 min. Backstop semantics preserved:
+            # if the 03:00 cascade failed (network blip, downstream
+            # outage), the last-success timestamp is stale and this
+            # cron does the real work.
             try:
                 res = refresh_reconciliation(
                     horizon_days_behind=int(
                         getattr(s, "reconciliation_refresh_horizon_days", 1)
                     ),
                     settings=s,
+                    force=False,
                 )
             except Exception:
                 log.exception("reconciliation_refresh_unhandled_exception")
+                return
+            if res.get("skipped"):
+                log.info(
+                    "reconciliation_refresh_backstop_noop reason=%s elapsed=%ss "
+                    "(primary 03:00 cascade succeeded; backstop has nothing to do)",
+                    res.get("reason"), res.get("elapsed_seconds"),
+                )
                 return
             log.info(
                 "reconciliation_refresh_done rows=%s window=%s duration=%s ok=%s",

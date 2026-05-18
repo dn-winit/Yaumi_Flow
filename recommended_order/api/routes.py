@@ -385,14 +385,34 @@ def _sales_transactions_has(s, target_date: str) -> bool:
 
 
 def _trigger_reconciliation_refresh(s, horizon_days_behind: int) -> dict:
-    """POST demand_forecasting's /reconciliation/refresh."""
+    """POST demand_forecasting's /reconciliation/refresh.
+
+    Wraps every transport / HTTP-status error as a ``RuntimeError`` so
+    callers ``_ensure_carry_chain_present`` and ``_generate_routes`` see
+    a single exception type and return the structured "carry_chain_
+    missing" envelope instead of leaking a 500 to the supervisor UI.
+    Without the wrap, a 422 (horizon out of bounds) bubbled up as an
+    uncaught ``httpx.HTTPStatusError`` -- e.g. a pre-system date request
+    asking for a 2329-day horizon against demand_forecasting's 365-day
+    cap rendered as a bare ``Internal Server Error``.
+    """
     import httpx
     url = f"{s.demand_forecasting_url.rstrip('/')}/api/v1/forecast/reconciliation/refresh"
     logger.warning("carry_chain_auto_heal: POST %s?horizon_days_behind=%d", url, horizon_days_behind)
-    with httpx.Client(timeout=s.reconciliation_preflight_timeout_seconds) as client:
-        resp = client.post(url, params={"horizon_days_behind": horizon_days_behind})
-        resp.raise_for_status()
-        body = resp.json()
+    try:
+        with httpx.Client(timeout=s.reconciliation_preflight_timeout_seconds) as client:
+            resp = client.post(url, params={"horizon_days_behind": horizon_days_behind})
+            resp.raise_for_status()
+            body = resp.json()
+    except httpx.HTTPStatusError as exc:
+        raise RuntimeError(
+            f"reconciliation_refresh rejected horizon={horizon_days_behind} "
+            f"with {exc.response.status_code}: {exc.response.text[:200]}"
+        ) from exc
+    except httpx.RequestError as exc:
+        raise RuntimeError(
+            f"reconciliation_refresh unreachable at {url}: {exc}"
+        ) from exc
     if not body.get("success"):
         raise RuntimeError(f"reconciliation_refresh returned success=False: {body}")
     return body
@@ -414,6 +434,22 @@ def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
             f"RO_DEMAND_FORECASTING_URL is unset -- cannot auto-heal."
         )
     horizon = max(0, (today_d - _date.fromisoformat(target_date)).days)
+    # demand_forecasting caps horizon at 365 days (one full year of
+    # back-fill). A request for a date older than that is by definition
+    # out of the auto-heal envelope -- the reconciliation cron has
+    # never carried state that far back. Fail fast with a clear
+    # message; the caller catches RuntimeError and returns the
+    # structured "carry_chain_missing" envelope to the UI instead of
+    # letting the inevitable 422 from demand_forecasting bubble up as
+    # an unhandled HTTPStatusError -> bare 500.
+    _MAX_AUTOHEAL_HORIZON = 365
+    if horizon > _MAX_AUTOHEAL_HORIZON:
+        raise RuntimeError(
+            f"yf_sales_transactions has no row for {target_date} "
+            f"({horizon} days back); the auto-heal window is "
+            f"{_MAX_AUTOHEAL_HORIZON} days -- request a date within "
+            f"the past year or run a manual backfill."
+        )
     body = _trigger_reconciliation_refresh(s, horizon)
     dm.refresh()
     if _sales_transactions_has(s, target_date):

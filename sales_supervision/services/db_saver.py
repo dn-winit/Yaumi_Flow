@@ -150,15 +150,23 @@ def _merge_sql(
 
 
 # Mutable columns on a per-visit upsert. Excludes the natural key
-# (session_id) and ``session_started_at`` -- the latter stamps the very
-# first INSERT and is preserved across subsequent UPDATEs so the row
-# always reflects "when this session opened".
+# (session_id) and the two timestamp columns owned by other paths:
+#   * ``session_started_at`` stamps the very first INSERT and is
+#     preserved across subsequent UPDATEs so the row always reflects
+#     "when this session opened".
+#   * ``session_completed_at`` is bound NULL on every cron upsert
+#     because the cron has no completion semantics. Including it in
+#     the UPDATE column list was a bug: a separate path setting the
+#     column to a real timestamp would have it clobbered to NULL on
+#     the next 60s cron tick. INSERT-only matches the lifecycle
+#     correctly -- if no path ever writes a completion timestamp the
+#     column stays NULL, which is the honest representation.
 _ROUTE_UPDATE_COLS = [
     "route_code", "supervision_date",
     "customers_planned", "customers_visited",
     "planned_qty_recommended", "visited_qty_recommended", "visited_qty_actual",
     "route_performance_score",
-    "session_status", "session_completed_at",
+    "session_status",
 ]
 
 # Mutable columns for a customer row on a per-visit upsert. Excludes the

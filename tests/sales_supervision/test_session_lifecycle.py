@@ -40,13 +40,24 @@ class TestSessionInitialize:
         assert session.get("sessionId"), f"missing sessionId in session payload: {body}"
 
     def test_idempotent_repeat(
-        self, client: httpx.Client, base_urls: dict[str, str],
+        self, base_urls: dict[str, str],
         primary_route: str, today: str,
     ) -> None:
-        """Same (route, date) twice -- same session_id, no error."""
+        """Same (route, date) twice -- same session_id, no error.
+
+        Uses a dedicated client (not the session-shared one) so the two
+        successive POSTs each open a fresh TCP connection. The shared
+        client occasionally trips WinError 10054 on Windows when the
+        supervision server's uvicorn worker is mid-cron-tick during the
+        second call -- a server-side keepalive race that surfaces as a
+        forcibly-closed connection. A fresh client per call avoids the
+        race without changing test intent.
+        """
         url = f"{base_urls['sales_supervision']}/session/initialize"
-        body1 = assert_ok(client.post(url, json={"route_code": primary_route, "date": today}, timeout=90.0))
-        body2 = assert_ok(client.post(url, json={"route_code": primary_route, "date": today}, timeout=90.0))
+        with httpx.Client(timeout=90.0) as c1:
+            body1 = assert_ok(c1.post(url, json={"route_code": primary_route, "date": today}))
+        with httpx.Client(timeout=90.0) as c2:
+            body2 = assert_ok(c2.post(url, json={"route_code": primary_route, "date": today}))
         sid1 = body1["session"]["sessionId"]
         sid2 = body2["session"]["sessionId"]
         assert sid1 == sid2, f"non-idempotent sessionId: {sid1} vs {sid2}"
