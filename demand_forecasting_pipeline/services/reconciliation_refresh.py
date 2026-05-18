@@ -373,15 +373,16 @@ def refresh_reconciliation(
 
         # 8. UPSERT into yf_sales_transactions
         rows_updated = _upsert_sales_transactions(s, write_df)
-        # Stamp last-successful-refresh BEFORE releasing the lock so a
-        # concurrent backstop tick reading the timestamp sees the most
-        # recent value under the same critical section that wrote it.
-        # ``global`` already declared at the top of the function.
-        _LAST_REFRESH_AT = datetime.now(timezone.utc)
     finally:
         # Release BEFORE the cascade so a slow / retried HTTP round-trip
         # can never block a subsequent caller. The DB MERGE above is the
-        # only step that needs serialisation.
+        # only step that needs serialisation. Note: we do NOT stamp
+        # ``_LAST_REFRESH_AT`` here -- the stamp is moved to after the
+        # cascades complete so a cascade failure leaves the timestamp
+        # stale and the 03:30 backstop cron will rerun the full work.
+        # Otherwise: DB write succeeds + cascade fails => stamp is
+        # fresh => 03:30 backstop sees "recent refresh" and skips =>
+        # CSV mirror lags the DB for up to 24h.
         _REFRESH_LOCK.release()
 
     # 9. Cascade the new CSV mirror (sales_transactions dataset). The
@@ -428,8 +429,9 @@ def refresh_reconciliation(
             "recommendations will lag until RECOMMENDED_ORDER_URL is configured",
             recommended_order_cascade.get("reason") or "unknown",
         )
+    full_success = cascade_ok and ro_ok
     payload: Dict[str, Any] = {
-        "success": cascade_ok and ro_ok,
+        "success": full_success,
         "rows_updated": int(rows_updated),
         "window": window,
         "duration_seconds": round((pd.Timestamp.now() - t0).total_seconds(), 2),
@@ -449,6 +451,16 @@ def refresh_reconciliation(
             f"may be stale for some dates in the window -- safe to retry"
         )
         payload["error_code"] = "recommended_order_cascade_failed_retriable"
+    # Stamp _LAST_REFRESH_AT ONLY on a fully-successful run (DB write
+    # AND both cascades). Cascade failure leaves the stamp stale so
+    # the 03:30 backstop cron re-runs the full work next time -- the
+    # CSV mirror cannot silently lag the DB for a full day after a
+    # transient cascade outage. Stamp under the lock so a concurrent
+    # cron tick sees the value atomically.
+    if full_success:
+        # ``global`` already declared at the top of the function.
+        with _REFRESH_LOCK:
+            _LAST_REFRESH_AT = datetime.now(timezone.utc)  # noqa: F841
     return payload
 
 
@@ -886,14 +898,38 @@ def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
         except Exception:
             try:
                 conn.rollback()
-            except Exception:
-                pass
+            except Exception as rollback_exc:
+                # A rollback that itself raises is a serious signal --
+                # the connection is in an undefined state. Log at
+                # ERROR so the orphaned-connection event is visible;
+                # original write error still re-raised below.
+                logger.error(
+                    "sales_transactions UPSERT rollback FAILED "
+                    "(connection state undefined): %s", rollback_exc,
+                )
             raise
         finally:
+            # ``DROP TABLE IF EXISTS`` (SQL Server 2016+) is the
+            # cleanup that survives a poisoned cursor. The previous
+            # ``IF OBJECT_ID(...) IS NOT NULL DROP TABLE...`` runs as
+            # a regular statement and re-raises through the cursor
+            # if the connection is already in a broken state -- the
+            # bare ``except: pass`` then leaves the temp table
+            # orphaned in tempdb. Under connection pooling the orphan
+            # accumulates across cron ticks because the connection is
+            # re-used. ``IF EXISTS`` syntax is engine-side conditional
+            # and runs even when the cursor's last error sticks. We
+            # also log any drop failure visibly so an unexpected
+            # tempdb issue can be diagnosed instead of silently
+            # accumulating.
             try:
-                cur.execute("IF OBJECT_ID('tempdb..#sales_stage') IS NOT NULL DROP TABLE #sales_stage;")
-            except Exception:
-                pass
+                cur.execute("DROP TABLE IF EXISTS tempdb..#sales_stage;")
+            except Exception as drop_exc:
+                logger.warning(
+                    "sales_transactions UPSERT: temp-table cleanup "
+                    "failed (will be reclaimed when pooled connection "
+                    "closes): %s", drop_exc,
+                )
 
 
 # ---------------------------------------------------------------------------

@@ -180,10 +180,25 @@ class DbPusher:
                         # DELETE in this transaction never persists when
                         # the INSERT half fails. Pool exit then closes
                         # the (now-clean) connection.
+                        #
+                        # A rollback that itself raises is a serious
+                        # signal: the connection is in an undefined
+                        # state and the next caller that pulls it from
+                        # the pool may observe partial writes. Log
+                        # loudly at ERROR so operators see the broken-
+                        # connection event; don't swallow the rollback
+                        # exception silently. The original write error
+                        # is still re-raised so callers see the actual
+                        # root cause.
                         try:
                             conn.rollback()
-                        except Exception:
-                            pass
+                        except Exception as rollback_exc:
+                            logger.error(
+                                "db_pusher rollback FAILED after write "
+                                "exception (connection state undefined; "
+                                "pool will close + recreate this slot): %s",
+                                rollback_exc,
+                            )
                         raise
 
                 duration = round(time.time() - t0, 2)

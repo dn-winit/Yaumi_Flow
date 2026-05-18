@@ -263,11 +263,24 @@ _LEN_CUSTOMER_NAME = 255
 
 def _str_clip(value: Any, max_len: int) -> str:
     """Coerce to string and clip at the schema's NVARCHAR length so we
-    never trip a "String or binary data would be truncated" error."""
+    never trip a "String or binary data would be truncated" error.
+
+    Emits a WARNING when truncation actually happens so a column whose
+    real-world value has outgrown the schema becomes visible in ops
+    logs instead of silently losing the tail. The first 32 chars of
+    the original are included so an operator can grep for the source
+    record without dumping the whole payload.
+    """
     if value is None:
         return ""
     s = str(value)
-    return s if len(s) <= max_len else s[:max_len]
+    if len(s) <= max_len:
+        return s
+    logger.warning(
+        "supervision saver truncated %d-char string -> %d (head=%r)",
+        len(s), max_len, s[:32],
+    )
+    return s[:max_len]
 
 
 def _empty_redistribution_dict() -> Dict[str, Any]:
@@ -647,6 +660,19 @@ class DbSaver:
             logger.error("save_route_analysis failed (sid=%s): %s", sid, exc)
             return {"success": False, "error": str(exc)}
 
+    # Defense-in-depth whitelist for the LLM column name interpolation
+    # below. The two callers (``save_pre_visit_briefing`` and
+    # ``save_customer_analysis``) pass static literals from this set,
+    # but a future maintainer wiring user input into ``column`` would
+    # otherwise have a SQL-injection surface. SQL Server's `[]`
+    # bracket-escape rules already neutralise most injection vectors,
+    # but a strict whitelist is the contract worth enforcing
+    # explicitly.
+    _ALLOWED_LLM_COLUMNS = frozenset({
+        "llm_pre_visit_briefing",
+        "llm_performance_analysis",
+    })
+
     def _save_customer_llm_column(
         self, snapshot: Dict[str, Any], customer_code: str,
         column: str, content: str,
@@ -656,8 +682,9 @@ class DbSaver:
         Ensures the route header + the customer row exist via the same
         idempotent upsert helpers the visit path uses, then UPDATEs the
         targeted LLM column. ``column`` is a writer-controlled literal
-        from a fixed set, never a request input -- safe to interpolate
-        into the SQL even though the rest of the value is parameterised.
+        from a fixed set (enforced via ``_ALLOWED_LLM_COLUMNS``) so
+        the SQL interpolation is safe even though Pydantic doesn't
+        validate it.
 
         **Idempotency guard.** The UPDATE includes a
         ``[column] IS NULL`` predicate so two writers (the live browser
@@ -666,6 +693,14 @@ class DbSaver:
         sees rowcount = 0 and returns. A retry on the same content is
         a no-op.
         """
+        if column not in self._ALLOWED_LLM_COLUMNS:
+            # Fail fast with a clear contract violation rather than
+            # interpolating an unknown column into the UPDATE.
+            return {
+                "success": False,
+                "error": f"_save_customer_llm_column: column {column!r} "
+                f"not in allowed set {sorted(self._ALLOWED_LLM_COLUMNS)}",
+            }
         if not self.available:
             return {"success": False, "error": "DB not configured"}
         sid = snapshot.get("sessionId", "")

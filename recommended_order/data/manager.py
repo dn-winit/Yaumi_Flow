@@ -16,6 +16,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
@@ -74,9 +75,18 @@ class DataManager:
         self._meta_path = Path(self._settings.shared_data_dir) / ".ro_manager_meta.json"
 
     def _write_meta(self, meta: Dict[str, Any]) -> None:
+        # Atomic write: serialise to a sibling .tmp then os.replace
+        # onto the canonical path. Without this, two concurrent
+        # refresh threads racing into ``write_text`` could leave a
+        # half-written JSON that a downstream reader's
+        # ``json.loads`` then raises on. ``os.replace`` is atomic on
+        # both POSIX and Windows -- a reader sees either the old
+        # complete file or the new complete file, never a partial.
         try:
             self._meta_path.parent.mkdir(parents=True, exist_ok=True)
-            self._meta_path.write_text(json.dumps(meta, indent=2, default=str))
+            tmp_path = self._meta_path.with_suffix(self._meta_path.suffix + ".tmp")
+            tmp_path.write_text(json.dumps(meta, indent=2, default=str))
+            os.replace(tmp_path, self._meta_path)
         except Exception as exc:
             logger.warning("Failed to write manager meta: %s", exc)
 

@@ -420,10 +420,20 @@ def _trigger_reconciliation_refresh(s, horizon_days_behind: int) -> dict:
 
 def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
     """Auto-heal yf_sales_transactions for non-future dates by triggering
-    reconciliation_refresh with the minimal horizon covering target_date."""
+    reconciliation_refresh with the minimal horizon covering target_date.
+
+    ``today`` is computed in the scheduler timezone so a UTC-deployed
+    server interpreting a Dubai cron's ``target_date`` doesn't
+    misclassify Dubai-today as the future. Previously ``date.today()``
+    used the server's local zone; at 23:30 UTC = 03:30 Dubai-tomorrow,
+    target_date held Dubai-tomorrow's ISO and the comparison
+    short-circuited the auto-heal entirely. Using the same TZ that
+    produced ``target_date`` keeps the contract self-consistent.
+    """
     s = get_settings()
-    from datetime import date as _date
-    today_d = _date.today()
+    from datetime import date as _date, datetime
+    from zoneinfo import ZoneInfo
+    today_d = datetime.now(ZoneInfo(s.scheduler.timezone)).date()
     if target_date > today_d.strftime("%Y-%m-%d"):
         return
     if _sales_transactions_has(s, target_date):
