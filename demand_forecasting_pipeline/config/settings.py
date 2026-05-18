@@ -213,17 +213,37 @@ class Settings(BaseSettings):
     reconciliation_refresh_timezone: str = Field(default="Asia/Dubai")
     reconciliation_refresh_hour: int = Field(default=3, ge=0, le=23)
     reconciliation_refresh_minute: int = Field(default=30, ge=0, le=59)
-    # ``horizon_days_behind`` for the daily cron. Default 1 (= refresh
-    # today + yesterday in one simulation pass) eliminates the
-    # cross-pass chain drift documented in enrich.py:752 -- adjacent
-    # days reconciled by different cron runs see different input states
-    # (late invoices, updated forecasts), so the chain identity
-    # ``leftover_to_next_day[d] == opening_stock[d+1]`` only holds within
-    # a single pass. Setting this to 1+ guarantees the boundary between
-    # yesterday and today is always written by the SAME pass, so the
-    # chain is internally consistent across the cron cadence.
+    # ``horizon_days_behind`` for the daily cron. Default 30 (= refresh
+    # the last month every morning). Two motivations on top of the
+    # adjacent-pass chain identity that already required 1+:
+    #
+    #   * YaumiLive late-posts invoices, returns, and closing-stock
+    #     corrections days after the original trip date. With a narrow
+    #     horizon, the cron writes a date's row once, then never re-
+    #     touches it; the row freezes against whatever state YL had
+    #     at write time, and any retroactive update silently drifts
+    #     into a CSV-vs-DB mismatch. A 30-day rolling window means
+    #     every morning rewrites all month-old rows against the
+    #     current YL state, catching late posts automatically. The
+    #     daily cron self-heals the entire visible window without any
+    #     manual ``/refresh`` call.
+    #   * The cross-pass chain identity ``leftover_to_next_day[d] ==
+    #     opening_stock[d+1]`` -- documented in enrich.py:752 -- still
+    #     holds because every adjacent-day boundary inside the window
+    #     is written by the SAME simulation pass.
+    #
+    # Cost: each cron tick scans ~30 days of forecast + actuals and
+    # cascades recommended_order generation for the same window
+    # (~30 min wall-clock at current 12-route × ~60-item scale on the
+    # nightly worker). The window runs once at 03:30 Asia/Dubai, well
+    # before any UI traffic, so the cost is invisible to users.
+    #
     # Override per environment via DF_RECONCILIATION_REFRESH_HORIZON_DAYS.
-    reconciliation_refresh_horizon_days: int = Field(default=1, ge=0, le=30)
+    # The ceiling is bumped to 90 so ops can backfill a full quarter
+    # without an env-var clamp; the daily default stays at 30 because
+    # wider windows are exponentially more expensive for diminishing
+    # late-post coverage (most YL corrections land within 1-2 weeks).
+    reconciliation_refresh_horizon_days: int = Field(default=30, ge=0, le=90)
 
     # Log rotation. The rotating file handler in ``observability.py``
     # reads these so ops can adjust retention without redeploying.
