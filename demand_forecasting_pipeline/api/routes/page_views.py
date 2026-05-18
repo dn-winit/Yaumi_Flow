@@ -226,13 +226,25 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
                 query_timeout=int(s.db.query_timeout),
                 autocommit=True,
             )
+            # Compare like-for-like: the CSV mirror is restricted to
+            # ``live_route_codes`` at the source, so the DB count has to
+            # be filtered the same way or the probe would always look
+            # "DB > CSV" and fire a false-positive warning on every
+            # tick. Empty config falls back to the unfiltered count so
+            # legacy behavior is preserved when the registry isn't set.
+            routes = list(getattr(s, "live_route_codes", []) or [])
+            db_sql = (
+                "SELECT COUNT(*) FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
+                "WITH (NOLOCK) WHERE trx_date = ?"
+            )
+            db_params: list = [str(date)]
+            if routes:
+                db_sql += f" AND route_code IN ({','.join(['?'] * len(routes))})"
+                db_params.extend(str(r) for r in routes)
+            db_sql += ";"
             with probe_pool.acquire() as conn:
                 cur = conn.cursor()
-                cur.execute(
-                    "SELECT COUNT(*) FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-                    "WITH (NOLOCK) WHERE trx_date = ?;",
-                    (str(date),),
-                )
+                cur.execute(db_sql, db_params)
                 db_today = int(cur.fetchone()[0])
         except Exception as exc:
             logger.warning(

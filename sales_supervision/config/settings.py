@@ -110,6 +110,13 @@ class Settings(BaseSettings):
         description="Concurrency cap for the LLM phase. Stays small because LLM "
                     "providers rate-limit aggressively and per-call latency runs "
                     "multi-second; raising this rarely improves throughput.")
+    auto_visit_session_ttl_seconds: int = Field(default=14400, ge=300, le=86400,
+        description="In-memory session cache eviction TTL. Entries for (route, date) "
+                    "pairs not touched by any tick within this window are dropped so "
+                    "``_sessions`` cannot grow unbounded across days of operation. "
+                    "Default 4h is comfortably longer than the typical end-of-shift "
+                    "(rep usually finishes within 3h of arriving on route) so an "
+                    "active session is never evicted under the operator's nose.")
 
     # Recommended-order client (used by the reconciler to scope a session).
     recommended_order_url: str = Field(default="http://localhost:8001",

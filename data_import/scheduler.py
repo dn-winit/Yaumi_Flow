@@ -35,6 +35,27 @@ def _incremental_import() -> None:
             logger.info("[cron] EDA cache invalidated")
         except Exception as exc:
             logger.warning("[cron] EDA invalidate skipped: %s", exc)
+        # Reverse cascade: POST demand_forecasting's reconciliation
+        # refresh so the diagnostic columns + carry chain in
+        # ``yf_sales_transactions`` align with the freshly-mirrored
+        # CSVs in the SAME cron tick. Without this call, the diagnostic
+        # state lagged by up to 30 minutes until the independent 03:30
+        # reconciliation cron fired -- the explainability modal showed
+        # stale ``expected_demand`` and ``pattern_*`` columns against an
+        # already-fresh ``recommended_load``. Best-effort: a transient
+        # forecast-service outage logs a warning and the scheduled
+        # reconciliation cron picks up the work later. Imported lazily
+        # so the scheduler module stays free of FastAPI app deps.
+        try:
+            from data_import.api.app import _cascade_reconciliation_refresh
+            _cascade_reconciliation_refresh(settings, logger)
+        except Exception as exc:
+            logger.warning(
+                "[cron] Reverse cascade after import skipped: %s -- "
+                "diagnostic columns will be patched by the next "
+                "scheduled reconciliation cron",
+                exc,
+            )
     except Exception as exc:
         logger.error("[cron] Incremental import failed: %s", exc, exc_info=True)
 

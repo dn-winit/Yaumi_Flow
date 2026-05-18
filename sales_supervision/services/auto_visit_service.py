@@ -42,7 +42,7 @@ import logging
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date as _date_cls, datetime
+from datetime import date as _date_cls, datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Phase concurrency caps live in Settings (auto_visit_data_phase_workers,
@@ -101,6 +101,19 @@ class _SessionCacheEntry:
     # holds the most complete state. ``0`` means "never fired in this
     # process" (cross-restart fires once before catching up).
     last_visit_count_at_route_llm: int = 0
+    # Signature of the last route-header upsert the cron sent to the
+    # DB. ``None`` forces the next tick to write so a process restart
+    # always re-stamps once. After that, the cron skips
+    # ``refresh_route_header`` when the live summary state is byte-
+    # identical to the persisted one -- no MERGE on idle routes, no
+    # noise in the DB write log, no wasted lock acquisition every 60s.
+    last_header_signature: Optional[Tuple[Any, ...]] = None
+    # Wall-clock instant of the last reconcile_route tick for this
+    # cached entry. Read by the TTL eviction sweep so entries for
+    # (route, date) pairs no operator has touched for hours get
+    # dropped -- keeps ``_sessions`` from growing unbounded across
+    # multi-day operation.
+    last_seen_at: datetime = field(default_factory=datetime.utcnow)
     # Per-session lock serialising in-memory mutation across the worker
     # pool. process_visit / _register_unplanned mutate session.customers
     # and assign visit_sequence by scanning the current max -- two
@@ -153,6 +166,22 @@ class AutoVisitService:
     def reconcile_all(self) -> List[Dict[str, Any]]:
         """Run one full reconciliation pass across every configured route."""
         date = _date_cls.today().strftime("%Y-%m-%d")
+        # Heartbeat the moment the cron begins working so /health flips
+        # out of ``reconcile_stale`` immediately. Without this, health
+        # only updated at end-of-tick, leaving the indicator at
+        # "degraded" for the full 30-90s+ of a fresh-boot pass even
+        # though the cron was running fine. We also re-stamp inside
+        # the per-route loop so a long full-fleet tick (LLM phase
+        # enabled, 5+ minutes) never accumulates a lag larger than one
+        # route's processing time -- the 2x poll threshold in
+        # ``health.py`` is dimensioned for per-route, not per-tick.
+        self._last_reconcile_at = datetime.utcnow()
+        # Evict cache entries whose (route, date) pairs nobody has
+        # touched in ``auto_visit_session_ttl_seconds``. Cheap walk
+        # under the existing _sessions_lock; runs once per tick so
+        # ``_sessions`` never accumulates more than the active routes
+        # actually being reconciled plus a TTL-bounded tail.
+        self._evict_stale_sessions()
         out: List[Dict[str, Any]] = []
         for route in self._configured_routes():
             try:
@@ -161,6 +190,12 @@ class AutoVisitService:
                 logger.exception("Auto-visit tick failed for %s: %s", route, exc)
                 rep = TickReport(route_code=route, date=date, error=str(exc))
             out.append(rep.to_dict())
+            # Per-route heartbeat: a long tick (LLM phase enabled, 12
+            # routes x ~25s/route) used to leave health "stale" for
+            # minutes even though the cron was actively writing. With
+            # this stamp, lag tracks the gap between consecutive route
+            # completions -- always well under the 2x poll threshold.
+            self._last_reconcile_at = datetime.utcnow()
         if any(r.get("planned_visits") or r.get("unplanned_visits") for r in out):
             logger.info("Auto-visit tick summary: %s", out)
         else:
@@ -174,11 +209,67 @@ class AutoVisitService:
                 "Auto-visit tick heartbeat: %d routes processed, %d skipped",
                 len(out), skipped,
             )
-        # Stamp completion so /health can report freshness even when
-        # individual route reconciles errored (per-route failures are
-        # already logged above; the tick itself completed).
-        self._last_reconcile_at = datetime.utcnow()
         return out
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _route_header_signature(snapshot: Dict[str, Any]) -> Tuple[Any, ...]:
+        """Stable tuple over the summary fields persisted by the route
+        header upsert. Two ticks that produce the same tuple write the
+        same row -- so the second tick can skip the MERGE entirely.
+
+        Fields chosen to **exactly mirror** the bound values in
+        ``DbSaver._upsert_route_header`` -- one entry per UPDATE column
+        whose value comes from the snapshot. Columns the upsert sets to
+        a constant (``session_status='active'``, ``session_started_at``
+        on INSERT only, ``llm_route_analysis`` excluded from UPDATE)
+        don't need a signature entry because skipping the MERGE leaves
+        them at their last-written value (correct). If a new mutable
+        column is wired into ``_upsert_route_header``, the corresponding
+        snapshot key must be appended HERE -- otherwise the guard would
+        silently elide an UPDATE the supervisor needs to see.
+        """
+        return (
+            snapshot.get("plannedCustomers"),           # customers_planned
+            snapshot.get("plannedVisitedCustomers"),    # customers_visited
+            snapshot.get("totalRecommended"),           # planned_qty_recommended
+            snapshot.get("visitedRecommended"),         # visited_qty_recommended
+            snapshot.get("visitedActual"),              # visited_qty_actual
+            snapshot.get("visitedAchievement"),         # route_performance_score
+            # Drop-in counters live on customer rows, not the header,
+            # but they DO move ``visitedAchievement`` so they're
+            # captured transitively. Keep them in the tuple anyway so a
+            # plan change that adjusts drop-ins without moving the
+            # achievement still triggers a write.
+            snapshot.get("unplannedVisitedCustomers"),
+            snapshot.get("remainingCustomers"),
+            snapshot.get("status"),
+        )
+
+    def _evict_stale_sessions(self) -> None:
+        """Drop ``_sessions`` entries whose last-seen timestamp is older
+        than ``auto_visit_session_ttl_seconds``. Bounded memory growth
+        across multi-day operation; idempotent (a no-op when every
+        cached entry is fresh)."""
+        ttl = int(self._s.auto_visit_session_ttl_seconds)
+        if ttl <= 0:
+            return
+        cutoff = datetime.utcnow() - timedelta(seconds=ttl)
+        with self._sessions_lock:
+            stale = [
+                sid for sid, cache in self._sessions.items()
+                if cache.last_seen_at < cutoff
+            ]
+            for sid in stale:
+                self._sessions.pop(sid, None)
+        if stale:
+            logger.info(
+                "Auto-visit session cache eviction: dropped %d stale entries "
+                "(ttl=%ds)", len(stale), ttl,
+            )
 
     def reconcile_route(
         self,
@@ -236,7 +327,26 @@ class AutoVisitService:
         # formula, even on a fully-idempotent tick where Phases 1/2/3
         # all short-circuit. Without this, a route that completed
         # earlier in the day keeps stale counts forever.
-        self._db.refresh_route_header(session.to_dict())
+        #
+        # Signature guard: skip the upsert when the summary state is
+        # byte-identical to the last one we wrote for this (route,
+        # date). On idle routes (route done for the day, no new visits
+        # landing) this collapses the 60s tick into pure no-op --
+        # eliminates ~1440 wasted MERGE calls per route per day.
+        # ``None`` signature forces a write on the first tick after
+        # process boot so a restart always re-asserts the header once.
+        snapshot = session.to_dict()
+        sig = self._route_header_signature(snapshot)
+        with self._sessions_lock:
+            cache_for_sig = self._sessions.get(session.session_id)
+            prior_sig = cache_for_sig.last_header_signature if cache_for_sig else None
+        if sig != prior_sig:
+            self._db.refresh_route_header(snapshot)
+            with self._sessions_lock:
+                cache_for_sig = self._sessions.get(session.session_id)
+                if cache_for_sig is not None:
+                    cache_for_sig.last_header_signature = sig
+                    cache_for_sig.last_seen_at = datetime.utcnow()
 
         # ---- Phase 1: Data sync (parallel, cap=auto_visit_data_phase_workers) ----
         invoiced = self._live.get_route_sales(route_code, date) or []
@@ -547,10 +657,14 @@ class AutoVisitService:
              recommendations from recommended_order to scope the
              planned customer set.
         """
-        # 1. In-process cache.
+        # 1. In-process cache. Stamp ``last_seen_at`` so the TTL
+        # eviction sweep does not drop an active (route, date) entry
+        # under the operator's nose.
+        now = datetime.utcnow()
         with self._sessions_lock:
             for cache in self._sessions.values():
                 if cache.session.route_code == str(route_code) and cache.session.date == str(date):
+                    cache.last_seen_at = now
                     return cache.session
 
         # 2. Existing DB session for this (route, date).

@@ -481,7 +481,24 @@ def _fetch_actual_sold(
     if not getattr(s, "live_db_configured", False):
         return empty
 
-    sql = """
+    # Route-filter at the source. ``live_route_codes`` is the fleet our
+    # downstream consumers actually read -- the CSV mirror, every
+    # yf_sales_transactions SELECT in this repo, and every API surface
+    # already restrict to ``route_code IN (registry)``. Without this
+    # filter the YaumiLive scan returns ~348 routes and the MERGE
+    # writes all of them, inflating the daily transaction ~28x and
+    # widening the lock window for rows no consumer reads.
+    # Empty config preserves the legacy "no filter" behavior so a
+    # misconfiguration cannot silently drop rows; a populated registry
+    # is the production path.
+    routes = list(getattr(s, "live_route_codes", []) or [])
+    route_clause = ""
+    params: list = [str(start), str(end)]
+    if routes:
+        route_clause = f"AND RouteCode IN ({','.join(['?'] * len(routes))})"
+        params.extend(str(r) for r in routes)
+
+    sql = f"""
     SELECT
         CAST(TrxDate AS DATE) AS trx_date,
         RouteCode             AS route_code,
@@ -492,12 +509,13 @@ def _fetch_actual_sold(
       AND TrxType  = 'SalesInvoice'
       AND QuantityInPCs > 0
       AND CAST(TrxDate AS DATE) BETWEEN ? AND ?
+      {route_clause}
     GROUP BY CAST(TrxDate AS DATE), RouteCode, ItemCode;
     """
     try:
         with pyodbc.connect(s.live_connection_string(), autocommit=False) as conn:
             cur = conn.cursor()
-            cur.execute(sql, (str(start), str(end)))
+            cur.execute(sql, params)
             cols = [d[0] for d in cur.description]
             rows = cur.fetchall()
         df = pd.DataFrame.from_records(rows, columns=cols)
@@ -565,7 +583,17 @@ def _fetch_yaumi_loading(
         pd.Timestamp(start) - pd.Timedelta(days=lookback_days + 1)
     ).date()
 
-    closing_sql = """
+    # Route-filter both rep-side queries at the source, same reasoning
+    # as ``_fetch_actual_sold``: every consumer of yf_sales_transactions
+    # filters on the registry, so pulling closing/allocation for the
+    # other ~336 routes only inflates the upstream view scan and the
+    # downstream MERGE without changing what anyone reads.
+    routes = list(getattr(s, "live_route_codes", []) or [])
+    route_clause = ""
+    if routes:
+        route_clause = f"AND RouteCode IN ({','.join(['?'] * len(routes))})"
+
+    closing_sql = f"""
     SELECT
         CAST(TrxDate AS DATE)   AS trx_date,
         RouteCode               AS route_code,
@@ -573,9 +601,10 @@ def _fetch_yaumi_loading(
         SUM(ClosingQty)         AS closing
     FROM [YaumiLive].[dbo].[VW_GET_CLOSING_STOCK] WITH (NOLOCK)
     WHERE CAST(TrxDate AS DATE) BETWEEN ? AND ?
+      {route_clause}
     GROUP BY CAST(TrxDate AS DATE), RouteCode, ItemCode;
     """
-    alloc_sql = """
+    alloc_sql = f"""
     SELECT
         CAST(MovementDate AS DATE)         AS trx_date,
         RouteCode                          AS route_code,
@@ -583,16 +612,23 @@ def _fetch_yaumi_loading(
         SUM(AllocatedQuantityInPC)         AS alloc
     FROM [YaumiLive].[dbo].[VW_GET_LOAD_ALLOCATION_DETAILS] WITH (NOLOCK)
     WHERE CAST(MovementDate AS DATE) BETWEEN ? AND ?
+      {route_clause}
     GROUP BY CAST(MovementDate AS DATE), RouteCode, ItemCode;
     """
+
+    closing_params: list = [str(closing_start), str(end)]
+    alloc_params: list = [str(start), str(end)]
+    if routes:
+        closing_params.extend(str(r) for r in routes)
+        alloc_params.extend(str(r) for r in routes)
 
     try:
         with pyodbc.connect(s.live_connection_string(), autocommit=False) as conn:
             cur = conn.cursor()
-            cur.execute(closing_sql, (str(closing_start), str(end)))
+            cur.execute(closing_sql, closing_params)
             cols = [d[0] for d in cur.description]
             closing_df = pd.DataFrame.from_records(cur.fetchall(), columns=cols)
-            cur.execute(alloc_sql, (str(start), str(end)))
+            cur.execute(alloc_sql, alloc_params)
             cols = [d[0] for d in cur.description]
             alloc_df = pd.DataFrame.from_records(cur.fetchall(), columns=cols)
     except Exception as exc:

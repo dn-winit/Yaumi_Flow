@@ -694,6 +694,23 @@ class DbSaver:
                             f"  AND [{column}] IS NULL",
                             (str(content), clipped_sid, clipped_cust),
                         )
+                        # ``rowcount == 0`` is normal idempotency
+                        # (column already populated by a prior writer or
+                        # a previous tick), but it can also mean a
+                        # parallel writer beat us with possibly worse
+                        # content. Surface the no-op once per occurrence
+                        # so ops can correlate "I expected this LLM
+                        # output but never see it in the DB" with a
+                        # race rather than chasing phantom bugs in the
+                        # LLM client.
+                        rc = cursor.rowcount
+                        if rc is not None and rc == 0:
+                            logger.warning(
+                                "LLM column %s idempotent no-op (sid=%s "
+                                "cust=%s) -- column already populated; "
+                                "this write skipped %d chars",
+                                column, sid, customer_code, len(str(content)),
+                            )
                     conn.commit()
                 except Exception:
                     conn.rollback()
