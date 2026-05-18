@@ -11,6 +11,7 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from common.route_registry import get_route_codes as _get_route_codes
 from common.settings_base import read_allow_origins as _read_allow_origins
 
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
@@ -115,11 +116,12 @@ class Settings(BaseSettings):
     good_return_trx_type: str = Field(default="Good Return")
     sales_item_type: str = Field(default="OrderItem")
 
-    # Route codes
-    route_codes: list[str] = Field(default=[
-        "9105", "9108", "9114", "9115", "9126", "9142",
-        "9202", "9204", "9209", "9218", "9219", "9221",
-    ])
+    # Route codes -- sourced from the shared registry so data_import,
+    # recommended_order, and the verification scripts all run against
+    # the same fleet. Override via the ``YF_ROUTE_CODES`` env var (read
+    # by the registry) so adding or retiring a route is a one-line ops
+    # change, not a code edit in three files.
+    route_codes: list[str] = Field(default_factory=_get_route_codes)
 
     # Lookback defaults (for full refresh)
     customer_data_lookback_days: int = Field(default=365, ge=30)

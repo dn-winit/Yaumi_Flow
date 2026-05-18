@@ -282,8 +282,16 @@ _NO_DRIFT: dict[str, Any] = {
 # Drift result cache - avoids hammering YaumiLive on every UI page load.
 # The Step Functions drift job calls compute_drift_status with
 # ``bypass_cache=True``, so this TTL only applies to interactive API calls.
+#
+# Lock guards every read+TTL-check+write of the pair so two UI threads
+# arriving within the same TTL window cannot both pass the staleness
+# check and both run the (expensive) YaumiLive comparison; only the
+# first wins and the second returns the freshly-cached value. Also
+# eliminates the torn read where one thread sees the new ``_drift_cache``
+# under the old ``_drift_cache_ts`` (or vice versa).
 _drift_cache: dict[str, Any] = {}
 _drift_cache_ts: float = 0.0
+_drift_cache_lock = threading.Lock()
 
 def compute_drift_status(
     artifact_svc: Any,
@@ -309,12 +317,13 @@ def compute_drift_status(
     global _drift_cache, _drift_cache_ts
 
     s = settings or get_settings()
-    if (
-        not bypass_cache
-        and _drift_cache
-        and (time.time() - _drift_cache_ts) < s.drift_cache_ttl_seconds
-    ):
-        return dict(_drift_cache)
+    if not bypass_cache:
+        with _drift_cache_lock:
+            if (
+                _drift_cache
+                and (time.time() - _drift_cache_ts) < s.drift_cache_ttl_seconds
+            ):
+                return dict(_drift_cache)
 
     warn = s.drift_warn_threshold
     alert = s.drift_alert_threshold
@@ -380,7 +389,8 @@ def compute_drift_status(
             "recent_reconciled_accuracy": recent_reconciled,
             "rows_compared": rows_compared,
         }
-        _drift_cache, _drift_cache_ts = result, time.time()
+        with _drift_cache_lock:
+            _drift_cache, _drift_cache_ts = result, time.time()
         return result
 
     delta = round(recent_acc - baseline_acc, 2)
@@ -397,7 +407,8 @@ def compute_drift_status(
         "rows_compared": rows_compared,
     }
     DRIFT_PCT.set(float(delta) if delta is not None else 0.0)
-    _drift_cache, _drift_cache_ts = result, time.time()
+    with _drift_cache_lock:
+        _drift_cache, _drift_cache_ts = result, time.time()
     return result
 
 def _recent_window(settings: Settings) -> tuple[str, str]:

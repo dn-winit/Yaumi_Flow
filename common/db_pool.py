@@ -48,6 +48,23 @@ FATAL_DB_ERRORS = (
     pyodbc.IntegrityError,
 )
 
+
+def _is_deadlock(exc: BaseException) -> bool:
+    """Detect SQL Server deadlock-victim signals.
+
+    SQL Server picks a "victim" when two transactions deadlock and kills
+    it; the victim is the one that surfaces an error here. By definition
+    the conflict is already resolved when this raises, so the retry
+    should be FAST -- no exponential 1s waste. SQLSTATE 40001 is the
+    ANSI "serialization failure" code; error 1205 is the SQL Server
+    native code; the message text always contains "deadlock".
+    """
+    if not isinstance(exc, pyodbc.Error) or not exc.args:
+        return False
+    state = str(exc.args[0]) if exc.args else ""
+    msg = " ".join(str(a) for a in exc.args).lower()
+    return state == "40001" or "deadlock" in msg or " 1205 " in f" {msg} "
+
 class DbConnectionPool:
     """Semaphore-bounded connection acquirer for a single DSN.
 
@@ -149,22 +166,34 @@ def with_db_retry(
     *,
     attempts: int = 3,
     base_delay: float = 1.0,
+    deadlock_base_delay: float = 0.05,
+    deadlock_attempts: int = 5,
 ) -> Callable[..., T]:
     """Decorator: retry transient DB errors with exponential backoff.
 
-    Fatal errors (``FATAL_DB_ERRORS``) propagate immediately. The function's
-    first positional arg is unused by the decorator - the wrapped callable
-    can have any signature; only its DB exception behaviour is changed.
+    Two backoff schedules in one decorator:
 
-    Backoff: attempt N waits ``base_delay * (2 ** (N-1))`` seconds before
-    the next attempt. With defaults (3 attempts, 1s base): 1s, 2s, 4s
-    upper bound.
+    * Deadlocks (SQLSTATE 40001 / SQL Server error 1205) -- by the time
+      the victim sees the error the winning transaction has already
+      committed, so the retry should be FAST. Defaults to 50 ms / 100
+      ms / 200 ms / 400 ms / 800 ms (up to 5 attempts). Reader-writer
+      contention between the supervision UI poll and the auto_visit
+      cron lands here.
+    * Other transient errors (connection blip, statement timeout) --
+      slow exponential 1s / 2s / 4s, capped at ``attempts``. Bad SQL /
+      bad data (``FATAL_DB_ERRORS``) is never retried.
+
+    The function's first positional arg is unused by the decorator;
+    the wrapped callable can have any signature -- only its DB
+    exception behaviour is changed.
     """
 
     @wraps(fn)
     def _wrapper(*args: Any, **kwargs: Any) -> T:
         last_err: Optional[BaseException] = None
-        for attempt in range(1, attempts + 1):
+        deadlock_seen = 0
+        general_attempt = 0
+        while True:
             try:
                 return fn(*args, **kwargs)
             except FATAL_DB_ERRORS:
@@ -172,13 +201,24 @@ def with_db_retry(
                 raise
             except Exception as exc:
                 last_err = exc
-                if attempt >= attempts:
-                    break
-                wait = base_delay * (2 ** (attempt - 1))
-                logger.warning(
-                    "db_retry: attempt %d/%d failed (%s); sleeping %.1fs",
-                    attempt, attempts, exc, wait,
-                )
+                if _is_deadlock(exc):
+                    deadlock_seen += 1
+                    if deadlock_seen >= deadlock_attempts:
+                        break
+                    wait = deadlock_base_delay * (2 ** (deadlock_seen - 1))
+                    logger.warning(
+                        "db_retry deadlock %d/%d: %s; sleeping %.3fs",
+                        deadlock_seen, deadlock_attempts, exc, wait,
+                    )
+                else:
+                    general_attempt += 1
+                    if general_attempt >= attempts:
+                        break
+                    wait = base_delay * (2 ** (general_attempt - 1))
+                    logger.warning(
+                        "db_retry transient %d/%d: %s; sleeping %.1fs",
+                        general_attempt, attempts, exc, wait,
+                    )
                 time.sleep(wait)
         assert last_err is not None  # for type checker
         raise last_err

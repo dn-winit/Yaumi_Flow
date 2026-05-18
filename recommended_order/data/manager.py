@@ -184,8 +184,16 @@ class DataManager:
     # Getters
     # ------------------------------------------------------------------
 
+    # ``_load_from_shared_csvs`` swaps ``_demand_df`` / ``_customer_df``
+    # / ``_journey_df`` references under ``self._lock``. The getters
+    # take the SAME lock just long enough to snapshot the reference,
+    # then release before slicing -- so a concurrent refresh cannot
+    # leave a reader holding a half-swapped attribute. Once we own a
+    # local reference, the underlying frame is immutable for the slice
+    # (refresh produces NEW frames and rebinds, never mutates in place).
     def get_demand_data(self, route_code: Optional[str] = None) -> pd.DataFrame:
-        df = self._demand_df
+        with self._lock:
+            df = self._demand_df
         if df is None:
             return pd.DataFrame()
         if route_code:
@@ -193,7 +201,8 @@ class DataManager:
         return df
 
     def get_customer_data(self, route_code: Optional[str] = None) -> pd.DataFrame:
-        df = self._customer_df
+        with self._lock:
+            df = self._customer_df
         if df is None:
             return pd.DataFrame()
         if route_code:
@@ -205,7 +214,8 @@ class DataManager:
         route_code: Optional[str] = None,
         date: Optional[str] = None,
     ) -> pd.DataFrame:
-        df = self._journey_df
+        with self._lock:
+            df = self._journey_df
         if df is None:
             return pd.DataFrame()
         if route_code:

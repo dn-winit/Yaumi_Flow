@@ -36,7 +36,7 @@ import pyodbc
 # The bounded AIML pool lives in ``common.db_pool`` so every YaumiAIML
 # writer (this module, recommended_order/db_pusher, the demand-forecast
 # pusher) shares one semaphore-bounded connection cap.
-from common.db_pool import get_pool
+from common.db_pool import get_pool, with_db_retry
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -431,6 +431,7 @@ class DbSaver:
             )
             return {"success": False, "error": str(exc)}
 
+    @with_db_retry
     def load_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
         """Load a session by ``session_id`` directly.
 
@@ -465,6 +466,7 @@ class DbSaver:
             logger.error("DB load_session_by_id failed for %s: %s", session_id, exc)
             return None
 
+    @with_db_retry
     def load_session(self, route_code: str, date: str) -> Optional[Dict[str, Any]]:
         if not self.available:
             return None
@@ -522,6 +524,7 @@ class DbSaver:
     # idempotent upsert helpers, then UPDATE the single LLM column.
     # ------------------------------------------------------------------
 
+    @with_db_retry
     def _list_customer_codes_with(
         self, route_code: str, date: str, where_clause: str,
     ) -> set[str]:
@@ -708,6 +711,7 @@ class DbSaver:
             )
             return {"success": False, "error": str(exc)}
 
+    @with_db_retry
     def load_session_visits(
         self, route_code: str, date: str,
         *, include_redistributions: bool = True,
@@ -737,6 +741,16 @@ class DbSaver:
         """
         if not self.available:
             return None
+        # Transaction scope is held ONLY for the SQL fetches. The
+        # expensive Python-side ``_build_visits_payload`` (which can
+        # take ~3 s on a route with 30 visited customers when
+        # include_redistributions=True) runs OUTSIDE the connection so
+        # the cursor's shared locks are released the moment the last
+        # row is fetched. Without this split, the cron's
+        # ``upsert_visit`` writer competing for the same supervision
+        # rows used to wait up to a few seconds and got picked as
+        # deadlock victim under load. Now the contention window is the
+        # network read latency only -- tens of ms, not seconds.
         try:
             with self._open_conn() as conn:
                 cursor = conn.cursor()
@@ -770,21 +784,14 @@ class DbSaver:
                     return None
                 rh_cols = [d[0] for d in cursor.description]
                 route_header = dict(zip(rh_cols, rh_row))
-                # Canonical sid: see ``load_session`` for the rationale.
-                # Frontend does not actually key off the saved-visits
-                # session_id (it uses the one returned by /initialize),
-                # but emitting the canonical form keeps the wire one
-                # consistent identifier per (route, date).
-                sid = f"{route_code}_{date}"
 
                 custs, items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=True,
                 )
                 # The full canonical set + the per-visit redistribution
                 # replay are the costliest piece of the saved-visits
-                # build (~3 s for a route with 30 visited customers).
-                # They're only needed when a supervisor opens the
-                # per-customer drill-in. Polling callers pass
+                # build. They're only needed when a supervisor opens
+                # the per-customer drill-in. Polling callers pass
                 # ``include_redistributions=False`` so the periodic
                 # refresh stays cheap; drill-in hits the dedicated
                 # ``/session/redistribution/{sid}/{customer}`` endpoint.
@@ -803,13 +810,6 @@ class DbSaver:
                 briefings = self._fetch_planned_briefings(
                     cursor, route_code, date,
                 )
-                payload = self._build_visits_payload(
-                    sid, route_header, custs, items,
-                    all_custs=all_custs, all_items=all_items,
-                    include_redistributions=include_redistributions,
-                )
-                payload["briefings"] = briefings
-                return payload
         except Exception as exc:
             logger.error(
                 "DB load_session_visits failed for %s/%s: %s",
@@ -817,6 +817,22 @@ class DbSaver:
             )
             return None
 
+        # Connection closed; locks released. Replay engine runs in
+        # pure Python on the already-fetched rows -- no DB contention.
+        # Canonical sid: see ``load_session`` for the rationale. The
+        # frontend does not key off this sid (it uses the one returned
+        # by /initialize); emitting the canonical form keeps the wire
+        # one consistent identifier per (route, date).
+        sid = f"{route_code}_{date}"
+        payload = self._build_visits_payload(
+            sid, route_header, custs, items,
+            all_custs=all_custs, all_items=all_items,
+            include_redistributions=include_redistributions,
+        )
+        payload["briefings"] = briefings
+        return payload
+
+    @with_db_retry
     def load_redistribution_for_customer(
         self, route_code: str, date: str, customer_code: str,
     ) -> Optional[Dict[str, Any]]:
@@ -830,6 +846,9 @@ class DbSaver:
         """
         if not self.available:
             return None
+        # Same transaction-scope split as ``load_session_visits``: the
+        # SQL fetches hold shared locks; the replay runs in pure Python
+        # AFTER the connection closes so writers don't queue behind us.
         try:
             with self._open_conn() as conn:
                 cursor = conn.cursor()
@@ -850,20 +869,21 @@ class DbSaver:
                 all_custs, all_items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=False,
                 )
-            sid = f"{route_code}_{date}"
-            full = self._build_visits_payload(
-                sid, route_header, custs, items,
-                all_custs=all_custs, all_items=all_items,
-                include_redistributions=True,
-            )
-            visit = (full.get("visits") or {}).get(str(customer_code))
-            return visit.get("redistributions") if visit else None
         except Exception as exc:
             logger.error(
                 "DB load_redistribution_for_customer failed for %s/%s/%s: %s",
                 route_code, date, customer_code, exc,
             )
             return None
+
+        sid = f"{route_code}_{date}"
+        full = self._build_visits_payload(
+            sid, route_header, custs, items,
+            all_custs=all_custs, all_items=all_items,
+            include_redistributions=True,
+        )
+        visit = (full.get("visits") or {}).get(str(customer_code))
+        return visit.get("redistributions") if visit else None
 
     @staticmethod
     def _build_visits_payload(
@@ -1072,6 +1092,7 @@ class DbSaver:
             "visit_totals": visit_totals,
         }
 
+    @with_db_retry
     def check_exists(self, route_code: str, date: str) -> bool:
         if not self.available:
             return False

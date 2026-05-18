@@ -42,17 +42,22 @@ import pandas as pd
 import pyodbc
 from dotenv import load_dotenv
 
+# Make the project root importable so ``from common.route_registry``
+# resolves whether the script is run as ``python scripts/...py`` (where
+# Python's default path[0] is ``scripts/``) or via the runtime that
+# already cwd's to the repo root. Same shim every other script in this
+# folder uses.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+
 load_dotenv(Path(".env"))
 
-# Default route fleet -- matches ``demand_forecasting_pipeline.config.settings
-# .Settings.live_route_codes`` so both stay in sync. If ops adds a route there
-# and forgets here, this script under-covers the fleet; treating that as a
-# secondary concern because the daily cron + 30-day refresh both pull routes
-# from settings directly.
-DEFAULT_ROUTES = [
-    "9105", "9108", "9114", "9115", "9126", "9142",
-    "9202", "9204", "9209", "9218", "9219", "9221",
-]
+# Default route fleet -- sourced from the shared registry so this
+# script, the daily cron, and recommended_order all run against the
+# same list. Override via the ``YF_ROUTE_CODES`` env var (read by the
+# registry) without touching any code.
+from common.route_registry import get_route_codes as _get_route_codes  # noqa: E402
+
+DEFAULT_ROUTES = _get_route_codes()
 
 # Tolerances tuned to "real drift vs rounding floor". Tighter than the
 # original draft (5% / 2%) so a per-route 49-unit drift no longer hides.

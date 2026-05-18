@@ -36,10 +36,12 @@ SS = "http://localhost:8004/api/v1/supervision"
 RO = "http://localhost:8001/api/v1/recommended-order"
 DI = "http://localhost:8005/api/v1/data"
 
-ROUTES = (
-    "9105", "9108", "9114", "9115", "9126", "9142",
-    "9202", "9204", "9209", "9218", "9219", "9221",
-)
+# Fleet sourced from the shared registry so this backfill, the daily
+# cron, and the verification matrix all walk the same routes. Override
+# via the ``YF_ROUTE_CODES`` env var without code edits.
+from common.route_registry import get_route_codes as _get_route_codes  # noqa: E402
+
+ROUTES = tuple(_get_route_codes())
 
 
 def conn_str() -> str:

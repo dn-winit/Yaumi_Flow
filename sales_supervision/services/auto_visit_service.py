@@ -125,6 +125,14 @@ class AutoVisitService:
     ) -> None:
         self._s = settings or get_settings()
         self._sessions: Dict[str, _SessionCacheEntry] = {}  # session_id -> entry
+        # Guards every read and mutation of ``_sessions``. Reentrant so
+        # one tick's resolve -> upsert chain can re-enter without
+        # deadlocking. Without this, /session/initialize's
+        # ``invalidate_route`` iterating ``_sessions.items()`` while the
+        # 60s reconcile cron's ``_resolve_session`` was writing the same
+        # dict raised ``RuntimeError: dictionary changed size during
+        # iteration`` under load (browser tab open + cron tick = race).
+        self._sessions_lock = threading.RLock()
         self._mgr = session_manager
         self._live = live_actuals
         self._recs = recommended_order
@@ -249,7 +257,8 @@ class AutoVisitService:
         # Refreshes whenever new visits have landed since the last fire,
         # so the LATEST tick of the day always wins and the DB column
         # holds the end-of-day state by close of business.
-        cache = self._sessions[session.session_id]
+        with self._sessions_lock:
+            cache = self._sessions[session.session_id]
         current_visit_count = sum(
             1 for c in session.customers.values() if c.visited
         )
@@ -283,7 +292,8 @@ class AutoVisitService:
 
         Returns ``(planned_count, unplanned_count)``.
         """
-        cache = self._sessions[session.session_id]
+        with self._sessions_lock:
+            cache = self._sessions[session.session_id]
         lock = cache.lock
 
         targets: List[Tuple[str, str, Dict[str, int]]] = []
@@ -508,13 +518,14 @@ class AutoVisitService:
         rebuild branch, which calls ``hydrate_saved_visits`` to restore
         them.
         """
-        stale = [
-            sid for sid, cache in self._sessions.items()
-            if cache.session.route_code == str(route_code)
-            and cache.session.date == str(date)
-        ]
-        for sid in stale:
-            self._sessions.pop(sid, None)
+        with self._sessions_lock:
+            stale = [
+                sid for sid, cache in self._sessions.items()
+                if cache.session.route_code == str(route_code)
+                and cache.session.date == str(date)
+            ]
+            for sid in stale:
+                self._sessions.pop(sid, None)
 
     # ------------------------------------------------------------------
     # Session resolution
@@ -537,9 +548,10 @@ class AutoVisitService:
              planned customer set.
         """
         # 1. In-process cache.
-        for cache in self._sessions.values():
-            if cache.session.route_code == str(route_code) and cache.session.date == str(date):
-                return cache.session
+        with self._sessions_lock:
+            for cache in self._sessions.values():
+                if cache.session.route_code == str(route_code) and cache.session.date == str(date):
+                    return cache.session
 
         # 2. Existing DB session for this (route, date).
         existing = self._db.load_session(str(route_code), str(date))
@@ -547,7 +559,8 @@ class AutoVisitService:
             session = self._mgr.rebuild_session(existing)
             recs = self._recs.get_recommendations(route_code, date) or []
             self._merge_planned_customers(session, recs)
-            self._sessions[session.session_id] = _SessionCacheEntry(session=session)
+            with self._sessions_lock:
+                self._sessions[session.session_id] = _SessionCacheEntry(session=session)
             return session
 
         # 3. Fresh creation.
@@ -555,7 +568,8 @@ class AutoVisitService:
         if not recs:
             return None
         session = self._mgr.create_session(str(route_code), str(date), recs)
-        self._sessions[session.session_id] = _SessionCacheEntry(session=session)
+        with self._sessions_lock:
+            self._sessions[session.session_id] = _SessionCacheEntry(session=session)
         return session
 
     @staticmethod

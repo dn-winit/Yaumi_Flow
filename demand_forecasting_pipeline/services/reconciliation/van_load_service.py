@@ -346,24 +346,33 @@ class VanLoadService:
         path = self._s.shared_data_path(filename)
         if not path.exists():
             return pd.DataFrame()
-        stat = path.stat()
-        key = (stat.st_mtime_ns, stat.st_size)
+        # Stat-and-read both happen INSIDE ``_csv_lock``. The previous
+        # ordering (stat outside, read outside, write inside) had a
+        # classic TOCTOU window: data_import flips the CSV between the
+        # stat and the read, the reader gets the new bytes but caches
+        # them under the old stat key, and every later reader that
+        # observes a NEWER stat would re-read again. Worse, two
+        # concurrent readers could both do the (slow) parse on a cache
+        # miss. Holding the lock across the parse serialises miss-path
+        # readers; cache hits remain cheap (only the stat + dict lookup
+        # are taken under the lock).
         with self._csv_lock:
+            stat = path.stat()
+            key = (stat.st_mtime_ns, stat.st_size)
             cached = self._csv_cache.get(path)
             if cached and cached[0] == key:
                 return cached[1]
 
-        try:
-            df = pd.read_csv(path, low_memory=False)
-            if "TrxDate" in df.columns:
-                df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce").dt.normalize()
-        except Exception as exc:
-            logger.error("VanLoadService: failed to read %s: %s", path, exc)
-            return pd.DataFrame()
+            try:
+                df = pd.read_csv(path, low_memory=False)
+                if "TrxDate" in df.columns:
+                    df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce").dt.normalize()
+            except Exception as exc:
+                logger.error("VanLoadService: failed to read %s: %s", path, exc)
+                return pd.DataFrame()
 
-        with self._csv_lock:
             self._csv_cache[path] = (key, df)
-        return df
+            return df
 
     @staticmethod
     def _normalise_date(date: str) -> str:

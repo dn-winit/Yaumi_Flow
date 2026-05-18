@@ -17,6 +17,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 from typing import Optional
+from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
@@ -52,9 +53,17 @@ class AutoVisitScheduler:
         if self.running:
             return
         interval = max(int(self._s.auto_visit_poll_seconds), 30)
-        self._scheduler = BackgroundScheduler(
-            timezone=self._s.auto_visit_timezone, daemon=True,
-        )
+        # The scheduler's clock is anchored to ``auto_visit_timezone``
+        # (Asia/Dubai in production). We build ``next_run_time`` against
+        # that SAME zone so APScheduler does not silently re-interpret a
+        # naive wall-clock from the host's local timezone. On a host whose
+        # local time differs from the scheduler's zone (an IST dev box,
+        # a UTC container), a naive ``datetime.now()`` here was getting
+        # localised as Dubai -- pushing the very first tick hours into
+        # the future and making the cron look silently dead. This is the
+        # canonical fix for that class of cron drift.
+        tz = ZoneInfo(self._s.auto_visit_timezone)
+        self._scheduler = BackgroundScheduler(timezone=tz, daemon=True)
         self._scheduler.add_job(
             self._service.reconcile_all,
             trigger="interval",
@@ -69,7 +78,7 @@ class AutoVisitScheduler:
             max_instances=1,
             coalesce=True,
             misfire_grace_time=interval,
-            next_run_time=datetime.now(),
+            next_run_time=datetime.now(tz=tz),
         )
         self._scheduler.start()
         logger.info(

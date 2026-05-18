@@ -12,6 +12,7 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
+from common.route_registry import get_route_codes as _get_route_codes
 from common.settings_base import read_allow_origins as _read_allow_origins
 
 _MODULE_ROOT = Path(__file__).resolve().parent.parent
@@ -143,13 +144,10 @@ class Settings(BaseSettings):
     demand_forecasting_url: str = Field(default="", description="e.g. http://localhost:8002")
     reconciliation_preflight_timeout_seconds: float = Field(default=420.0, ge=10.0)
 
-    # Route codes (configurable, not hardcoded)
-    route_codes: list[str] = Field(
-        default=[
-            "9105", "9108", "9114", "9115", "9126", "9142",
-            "9202", "9204", "9209", "9218", "9219", "9221",
-        ]
-    )
+    # Route codes -- sourced from the shared registry so data_import,
+    # recommended_order, and the verification scripts all run against
+    # the same fleet. Override via the ``YF_ROUTE_CODES`` env var.
+    route_codes: list[str] = Field(default_factory=_get_route_codes)
 
     # Demand filter (applied to rows read from demand_forecast.csv)
     demand_probability_threshold: float = Field(default=0.99, ge=0.0, le=1.0)

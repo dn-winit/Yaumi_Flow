@@ -347,10 +347,28 @@ def refresh_reconciliation(
     # contradictory mirror. The scheduler logger already inspects
     # ``cascade.success`` separately; this just makes the wire payload
     # tell the same story.
-    cascade_skipped = bool(cascade.get("skipped"))
-    cascade_ok = cascade_skipped or bool(cascade.get("success"))
-    ro_skipped = bool(recommended_order_cascade.get("skipped"))
-    ro_ok = ro_skipped or bool(recommended_order_cascade.get("success"))
+    # Strict ``is True`` semantics so a misbehaving upstream returning a
+    # truthy-but-not-bool ``success`` field (string ``"true"``, numeric
+    # ``1``) cannot silently mark the cascade as healthy. ``skipped`` is
+    # the legitimate "env var not configured" branch -- worth a warning
+    # so operators see in the log that downstream consumers are running
+    # against an unrefreshed CSV mirror.
+    cascade_skipped = cascade.get("skipped") is True
+    cascade_ok = cascade_skipped or cascade.get("success") is True
+    ro_skipped = recommended_order_cascade.get("skipped") is True
+    ro_ok = ro_skipped or recommended_order_cascade.get("success") is True
+    if cascade_skipped:
+        logger.warning(
+            "data_import cascade SKIPPED (reason=%s); downstream CSV mirror "
+            "will lag the AIML DB until DF_DATA_IMPORT_URL is configured",
+            cascade.get("reason") or "unknown",
+        )
+    if ro_skipped:
+        logger.warning(
+            "recommended_order cascade SKIPPED (reason=%s); regenerated "
+            "recommendations will lag until RECOMMENDED_ORDER_URL is configured",
+            recommended_order_cascade.get("reason") or "unknown",
+        )
     payload: Dict[str, Any] = {
         "success": cascade_ok and ro_ok,
         "rows_updated": int(rows_updated),
