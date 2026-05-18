@@ -60,13 +60,22 @@ def client() -> httpx.Client:
     second attempt opens a fresh connection.
     """
     transport = httpx.HTTPTransport(retries=3)
-    # ``http2=False`` forces HTTP/1.1; combined with the default
-    # connection-pool limits we avoid a class of "Server disconnected"
-    # surface where a long previous test left the supervision server's
-    # keepalive expired. ``Connection: close`` per request is the brute-
-    # force alternative but would slow the whole suite measurably.
+    # ``http2=False`` forces HTTP/1.1. ``Connection: close`` on every
+    # request disables keep-alive entirely so a stale pooled
+    # connection from a previous test can never trip WinError 10054
+    # on the next call -- the cost is ~5-10ms of TCP handshake per
+    # request, negligible against the 100+ test suite total. The
+    # earlier ``transport=HTTPTransport(retries=3)`` setting helps
+    # for connect-time errors but doesn't cover mid-read disconnects,
+    # which is the actual failure mode under a busy supervision
+    # cron tick. Header is overridable per-call when a test needs
+    # to validate keep-alive behaviour explicitly.
     with httpx.Client(
-        timeout=30.0, follow_redirects=False, transport=transport, http2=False,
+        timeout=30.0,
+        follow_redirects=False,
+        transport=transport,
+        http2=False,
+        headers={"Connection": "close"},
     ) as c:
         yield c
 
