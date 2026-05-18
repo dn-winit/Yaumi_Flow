@@ -1197,6 +1197,22 @@ class EdaService:
             return {"available": False, "message": "DB not configured",
                     "items": [], "totals": {}}
 
+        # Strict ``TrxDate = date - 1`` for past_leftover. This is INTENTIONAL
+        # and matches the cron's effective semantic: the cron's
+        # ``forward_fill_closing`` only fills BETWEEN min and max observation
+        # per (route, item), and ``opening_today`` further restricts to the
+        # target window. Net effect: only items the rep tripped on within
+        # the last day or two carry a non-zero past_leftover. Items whose
+        # last closing is older than that are treated as "off the truck"
+        # by both surfaces, intentionally conservative (we don't assert
+        # phantom stock the rep may have returned silently).
+        #
+        # An earlier "most recent closing in 30-day window" approach was
+        # tried here -- it pulled past_leftover for every item with any
+        # observation in the lookback. That over-counted vs the cron by
+        # several hundred units per route per day, exposing items the
+        # cron deliberately drops. Reverted to the strict match so live
+        # and cron agree on the conservative interpretation.
         prior_sql = "DATEADD(day, -1, CAST(? AS DATE))"
         conn = None
         try:
