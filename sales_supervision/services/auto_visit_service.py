@@ -155,6 +155,17 @@ class AutoVisitService:
             out.append(rep.to_dict())
         if any(r.get("planned_visits") or r.get("unplanned_visits") for r in out):
             logger.info("Auto-visit tick summary: %s", out)
+        else:
+            # Heartbeat for ticks where nothing landed -- still proves
+            # the cron is alive and surfaces silent skips. Without this,
+            # a fully-skipped tick was invisible in the logs and an
+            # operator had no way to tell whether the scheduler was
+            # running at all.
+            skipped = sum(1 for r in out if r.get("error"))
+            logger.info(
+                "Auto-visit tick heartbeat: %d routes processed, %d skipped",
+                len(out), skipped,
+            )
         # Stamp completion so /health can report freshness even when
         # individual route reconciles errored (per-route failures are
         # already logged above; the tick itself completed).
@@ -199,6 +210,16 @@ class AutoVisitService:
         session = self._resolve_session(route_code, date)
         if session is None:
             report.error = "no recommendations available; cannot scope a session"
+            # Visible heartbeat so a route stuck on an empty-cache miss
+            # doesn't go silently dark for a whole shift. Logged at
+            # WARNING so a routinely-empty route (genuinely no plan
+            # today) is greppable but doesn't pollute INFO with noise.
+            logger.warning(
+                "Auto-visit skip route=%s date=%s -- no recommendations yet "
+                "(retrying next tick; check recommended_order data load if "
+                "this persists)",
+                route_code, date,
+            )
             return report
 
         # ---- Phase 0: Stamp the route header from current session state.

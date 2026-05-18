@@ -54,7 +54,15 @@ class RecommendedOrderClient:
                 return cached[1]
         recs = self._fetch(route_code, date)
         with self._lock:
-            self._cache[key] = (now, recs)
+            # Cache only POSITIVE results. Empty lists are typically
+            # transient (recommended_order CSV load racing supervision
+            # boot, a brand-new route, a network blip). Caching empty
+            # for the full ``recommendation_cache_seconds`` made auto-
+            # visit invisible to a route for 5 minutes after any
+            # transient miss; retrying every tick is what makes the
+            # system self-healing without operator intervention.
+            if recs:
+                self._cache[key] = (now, recs)
         return recs
 
     def _fetch(self, route_code: str, date: str) -> List[Dict[str, Any]]:
