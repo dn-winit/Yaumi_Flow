@@ -120,15 +120,24 @@ export default function CustomerVisit({
   const alsoBought = initialVisit?.alsoBought ?? [];
 
   // Redistribution replay is server-side-heavy (~3s per route for 30
-  // customers), so /session/saved no longer ships it inline. Fetch on
-  // demand the first time this customer's drill-in mounts; live
-  // ``/visit`` responses still carry the freshly-computed view inline
-  // and short-circuit the fetch.
+  // customers), so /session/saved no longer ships it inline -- the
+  // cheap poll response carries ``redistributions: {groups: []}`` as a
+  // schema placeholder, NOT as real data. Fetch on demand the first
+  // time this customer's drill-in mounts; live ``/visit`` responses
+  // still carry the freshly-computed view inline and short-circuit the
+  // fetch.
+  //
+  // Short-circuit predicate gates on ``groups.length > 0`` (not just
+  // truthiness of the object), because the empty placeholder from the
+  // saved-visits poll is truthy and used to wrongly bypass the drill-
+  // in fetch -- supervisor saw "No items redistributed" even when the
+  // server had real groups for that customer.
   const [redistributionView, setRedistributionView] = useState(
     initialVisit?.redistributions,
   );
+  const inlineGroupsCount = initialVisit?.redistributions?.groups?.length ?? 0;
   useEffect(() => {
-    if (initialVisit?.redistributions) {
+    if (inlineGroupsCount > 0 && initialVisit?.redistributions) {
       setRedistributionView(initialVisit.redistributions);
       return;
     }
@@ -143,7 +152,7 @@ export default function CustomerVisit({
       })
       .catch(() => {/* drill-in renders without the replay if it fails */});
     return () => { cancelled = true; };
-  }, [customerCode, routeCode, date, initialVisit?.redistributions]);
+  }, [customerCode, routeCode, date, inlineGroupsCount, initialVisit?.redistributions]);
   // Green-dot semantic: ``visited`` only when the customer actually
   // bought something -- either a planned item (totalActual > 0) or an
   // off-plan extra (alsoBought non-empty). A visit row with all-zero
