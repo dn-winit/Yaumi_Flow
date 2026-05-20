@@ -28,6 +28,7 @@ from typing import Any, Optional
 import httpx
 import pandas as pd
 
+from common.numeric import safe_float
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.observability import LIVE_FETCH_TIMEOUTS
 
@@ -260,13 +261,13 @@ class VanLoadService:
             for _, r in prev.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
                             r.get("CategoryCode"), r.get("CategoryName"))
-                e["past_leftover"] = float(r.ClosingQty or 0.0)
+                e["past_leftover"] = safe_float(r.ClosingQty)
 
             today_close = closing[(closing.RouteCode.astype(str) == rcode)
                                   & (closing.TrxDate == target)]
             for _, r in today_close.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"))
-                e["end_closing"] = float(r.ClosingQty or 0.0)
+                e["end_closing"] = safe_float(r.ClosingQty)
 
         if not alloc.empty:
             sub = alloc[(alloc.RouteCode.astype(str) == rcode)
@@ -274,7 +275,7 @@ class VanLoadService:
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
                             r.get("CategoryCode"), r.get("CategoryName"))
-                e["today_allocation"] = float(r.AllocatedPC or 0.0)
+                e["today_allocation"] = safe_float(r.AllocatedPC)
 
         if not sales.empty:
             sub = sales[(sales.RouteCode.astype(str) == rcode)
@@ -282,7 +283,7 @@ class VanLoadService:
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
                             None, r.get("CategoryName"))
-                e["sold_qty"] = float(r.TotalQuantity or 0.0)
+                e["sold_qty"] = safe_float(r.TotalQuantity)
 
         if not returns.empty:
             sub = returns[(returns.RouteCode.astype(str) == rcode)
@@ -290,8 +291,8 @@ class VanLoadService:
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
                             r.get("CategoryCode"), r.get("CategoryName"))
-                e["bad_return_qty"]  = float(r.BadReturnQty or 0.0)
-                e["good_return_qty"] = float(r.GoodReturnQty or 0.0)
+                e["bad_return_qty"]  = safe_float(r.BadReturnQty)
+                e["good_return_qty"] = safe_float(r.GoodReturnQty)
 
         for e in items.values():
             e["van_load"] = e["past_leftover"] + e["today_allocation"]

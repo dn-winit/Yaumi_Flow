@@ -86,6 +86,11 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler | N
         coalesce=True,
         max_instances=1,
     )
+    # Audit every fire to yf_scheduler_log so "did this cron run on
+    # time?" is answerable from one DB row, independent of stdout.
+    from common.scheduler_audit import attach_audit
+    attach_audit(_scheduler, "data_import",
+                 settings.aiml_db.connection_string())
     _scheduler.start()
     logger.info(
         "Scheduler started -- incremental import at %02d:%02d (%s)",

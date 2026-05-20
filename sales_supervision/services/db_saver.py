@@ -37,6 +37,7 @@ import pyodbc
 # writer (this module, recommended_order/db_pusher, the demand-forecast
 # pusher) shares one semaphore-bounded connection cap.
 from common.db_pool import get_pool, with_db_retry
+from common.numeric import safe_float as _to_float, safe_int as _to_int
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -210,28 +211,6 @@ _STATUS_ACTIVE = "active"
 # and arrive as strings or floats. These helpers guarantee the shape the
 # schema requires, so a single bad row never aborts the whole executemany.
 # ---------------------------------------------------------------------------
-
-def _to_int(value: Any, default: int = 0) -> int:
-    """Best-effort int cast. Truncates floats (so 5.7 -> 5), maps None / NaN
-    / unparseable strings to ``default``."""
-    if value is None:
-        return default
-    try:
-        return int(float(value))
-    except (TypeError, ValueError):
-        return default
-
-
-def _to_float(value: Any, default: float = 0.0) -> float:
-    if value is None:
-        return default
-    try:
-        f = float(value)
-        # NaN survives float() -- treat as missing.
-        return f if f == f else default  # noqa: PLR0124 -- NaN check
-    except (TypeError, ValueError):
-        return default
-
 
 # Every percent / score column in the schema is DECIMAL(8,2), so a
 # single clamp helper covers them all. ``DECIMAL(8,2)`` accepts up to
@@ -870,6 +849,14 @@ class DbSaver:
                 briefings = self._fetch_planned_briefings(
                     cursor, route_code, date,
                 )
+                # Current recommendation snapshot, used downstream to
+                # dedupe alsoBought against the live plan -- an item
+                # that became recommended AFTER the visit was recorded
+                # must not surface in both the planned table and the
+                # alsoBought chip strip.
+                current_plan = self._fetch_current_plan_items(
+                    cursor, route_code, date,
+                )
         except Exception as exc:
             logger.error(
                 "DB load_session_visits failed for %s/%s: %s",
@@ -888,6 +875,7 @@ class DbSaver:
             sid, route_header, custs, items,
             all_custs=all_custs, all_items=all_items,
             include_redistributions=include_redistributions,
+            current_plan=current_plan,
         )
         payload["briefings"] = briefings
         return payload
@@ -929,6 +917,9 @@ class DbSaver:
                 all_custs, all_items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=False,
                 )
+                current_plan = self._fetch_current_plan_items(
+                    cursor, route_code, date,
+                )
         except Exception as exc:
             logger.error(
                 "DB load_redistribution_for_customer failed for %s/%s/%s: %s",
@@ -941,6 +932,7 @@ class DbSaver:
             sid, route_header, custs, items,
             all_custs=all_custs, all_items=all_items,
             include_redistributions=True,
+            current_plan=current_plan,
         )
         visit = (full.get("visits") or {}).get(str(customer_code))
         return visit.get("redistributions") if visit else None
@@ -952,6 +944,7 @@ class DbSaver:
         all_custs: Optional[List[Dict]] = None,
         all_items: Optional[List[Dict]] = None,
         include_redistributions: bool = True,
+        current_plan: Optional[Dict[str, "frozenset[str]"]] = None,
     ) -> Dict[str, Any]:
         """Translate stored rows into the visit-result shape the live
         UI consumes. Single source of truth for the column-to-JSON
@@ -973,6 +966,7 @@ class DbSaver:
         # ``alsoBought`` chip strip the live /visit response surfaces.
         actuals_by_cust: Dict[str, Dict[str, int]] = {}
         also_bought_by_cust: Dict[str, List[Dict[str, Any]]] = {}
+        _current_plan: Dict[str, "frozenset[str]"] = current_plan or {}
         for it in items:
             cc = str(it.get("customer_code", ""))
             if not cc:
@@ -983,7 +977,21 @@ class DbSaver:
             qty_act = int(it.get("actual_qty") or 0)
             actuals_by_cust.setdefault(cc, {})[ic] = qty_act
             rec_qty = int(it.get("original_recommended_qty") or 0)
-            if rec_qty == 0 and qty_act > 0:
+            # alsoBought == off-plan at visit time AND off-plan now.
+            # The ``_current_plan`` check layers the live recommendation
+            # state on top of the visit-time snapshot so an item that
+            # became recommended after the visit was recorded does not
+            # appear in BOTH the planned table (sourced from current
+            # rec_orders) and the alsoBought chips (sourced from
+            # supervision_items). When ``current_plan`` is empty (legacy
+            # callers, or no recommendations row exists for the
+            # customer) the membership check is vacuously false and the
+            # original visit-time filter applies unchanged.
+            if (
+                rec_qty == 0
+                and qty_act > 0
+                and ic not in _current_plan.get(cc, frozenset())
+            ):
                 also_bought_by_cust.setdefault(cc, []).append({
                     "item_code": ic,
                     "qty": qty_act,
@@ -1504,6 +1512,40 @@ class DbSaver:
                 continue
             briefings[str(code)] = str(briefing)
         return briefings
+
+    def _fetch_current_plan_items(
+        self, cursor: Any, route_code: str, date: str,
+    ) -> Dict[str, frozenset]:
+        """Snapshot of the CURRENT recommendation set for this (route,
+        date), keyed by ``customer_code -> frozenset(item_code)``.
+
+        Used to dedupe ``alsoBought`` against the live plan: an item
+        that was off-plan when the rep marked the visit but has since
+        been added to the recommendation (typical when an inter-day
+        regeneration runs after the supervision session was created)
+        must not appear in BOTH the planned table (sourced from current
+        recs) and the alsoBought chips (sourced from the visit-time
+        snapshot in supervision_items). The dedupe layers the current
+        plan on top so the supervisor sees one consistent classification
+        per item.
+
+        Bounded query: ~items-per-customer x customers-per-route rows
+        (~500 for a typical route). Reads in the same transaction as
+        the supervision rows so locks coalesce; the cursor's shared
+        locks already span the route's data, so the marginal cost is
+        the network round-trip only.
+        """
+        sql = (
+            f"SELECT customer_code, item_code FROM {self._s.recommendations_table} "
+            f"WHERE trx_date = ? AND route_code = ?"
+        )
+        cursor.execute(sql, (date, route_code))
+        result: Dict[str, set] = {}
+        for code, item in cursor.fetchall():
+            if not code or not item:
+                continue
+            result.setdefault(str(code), set()).add(str(item))
+        return {k: frozenset(v) for k, v in result.items()}
 
     # ------------------------------------------------------------------
     # Reconstruct session from DB rows

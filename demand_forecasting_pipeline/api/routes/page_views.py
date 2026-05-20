@@ -40,6 +40,7 @@ from demand_forecasting_pipeline.api.schemas import (
 from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
 from common.db_pool import get_pool
+from common.numeric import safe_float as _to_float
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     _concentrated_buyers_index,
     _journey_index,
@@ -100,17 +101,6 @@ def _guard_masked_items(route_code: str, date: str) -> frozenset[str]:
 # ----------------------------------------------------------------------
 # Helpers (route-local, not shared -- page-view-shaping concerns only)
 # ----------------------------------------------------------------------
-
-
-def _to_float(x: object) -> float:
-    """Coerce to float, treating None / NaN / non-numeric as 0.0."""
-    try:
-        v = float(x)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return 0.0
-    if math.isnan(v) or math.isinf(v):
-        return 0.0
-    return v
 
 
 def _opt_float(x: object) -> Optional[float]:

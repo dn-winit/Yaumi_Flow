@@ -15,6 +15,7 @@ from typing import Any, Dict
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
 
+from common.numeric import safe_float
 from demand_forecasting_pipeline.api.dependencies import (
     get_artifact_service,
     get_bias_service,
@@ -133,7 +134,7 @@ def recommend(
         # row access by column name avoids the renaming entirely.
         fcst_lookup = {
             str(row["ItemCode"]): {
-                "predicted": float(row[pred_col] or 0.0),
+                "predicted": safe_float(row[pred_col]),
                 "demand_class": (row[cls_col] if cls_col else None),
                 "item_name": (str(row[name_col] or "") if name_col else ""),
             }

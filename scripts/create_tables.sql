@@ -578,3 +578,29 @@ BEGIN
         forecast_dormant BIT NULL;
 END
 GO
+
+-- yf_scheduler_log: one row per cron fire (success or failure) across
+-- every BackgroundScheduler in every service. Written by an APScheduler
+-- event listener attached via ``common.scheduler_audit.attach_audit``.
+-- This is the single source of truth for "did this cron run on time?"
+-- -- independent of stdout, log files, or process restarts.
+-- Schema is intentionally narrow: per-job side-effect counts already
+-- live in each service's own structured logs; this table answers the
+-- fire-timing question and nothing else.
+IF OBJECT_ID('dbo.yf_scheduler_log', 'U') IS NULL
+BEGIN
+    CREATE TABLE [dbo].[yf_scheduler_log] (
+        id              BIGINT IDENTITY(1,1) NOT NULL PRIMARY KEY,
+        service         VARCHAR(50)   NOT NULL,   -- "data_import" / "demand_forecasting" / "recommended_order"
+        job_id          VARCHAR(100)  NOT NULL,   -- APScheduler job id
+        fired_at        DATETIME2(3)  NOT NULL,   -- scheduled_run_time, the slot the cron *should* have hit
+        status          VARCHAR(20)   NOT NULL,   -- 'success' | 'failed'
+        error_message   NVARCHAR(2000) NULL,      -- repr(exc) on failure, NULL on success
+        recorded_at     DATETIME2(3)  NOT NULL
+            CONSTRAINT DF_yf_scheduler_log_recorded_at DEFAULT SYSDATETIME(),
+        CONSTRAINT CK_yf_scheduler_log_status CHECK (status IN ('success','failed'))
+    );
+    CREATE INDEX IX_yf_scheduler_log_service_fired
+        ON [dbo].[yf_scheduler_log] (service, fired_at DESC);
+END
+GO

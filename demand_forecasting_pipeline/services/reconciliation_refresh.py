@@ -38,6 +38,7 @@ import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import FATAL_DB_ERRORS, get_pool
+from common.numeric import safe_float
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     enrich_with_load,
     forward_fill_closing,
@@ -232,7 +233,7 @@ def refresh_reconciliation(
             for r in engine_actuals_df.itertuples(index=False):
                 key = (str(r.route_code), str(r.item_code),
                        pd.Timestamp(r.trx_date).normalize())
-                engine_actuals[key] = float(r.actual_sold or 0.0)
+                engine_actuals[key] = safe_float(r.actual_sold)
             engine_latest_actual = pd.Timestamp(
                 engine_actuals_df["trx_date"].max(),
             ).normalize()
@@ -1132,6 +1133,10 @@ def start_reconciliation_scheduler(
         coalesce=True,
         max_instances=1,
     )
+    # Audit every fire to yf_scheduler_log so "did this cron run on
+    # time?" is answerable from one DB row, independent of stdout.
+    from common.scheduler_audit import attach_audit
+    attach_audit(scheduler, "demand_forecasting", s.db.connection_string())
     scheduler.start()
     log.info(
         "reconciliation_scheduler_started cron=%02d:%02d tz=%s",

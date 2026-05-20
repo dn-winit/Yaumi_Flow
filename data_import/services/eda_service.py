@@ -22,6 +22,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pyodbc
 
+from common.numeric import safe_float, safe_int
 from data_import.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -1105,7 +1106,7 @@ class EdaService:
                 continue
             name = (r[1] or "").strip() if r[1] is not None else ""
             item = str(r[2] or "").strip()
-            qty = int(float(r[3] or 0))
+            qty = safe_int(r[3])
             if qty <= 0 or not item:
                 continue
             entry = by_cust.setdefault(code, {"customer_code": code, "customer_name": name, "items": []})
@@ -1160,7 +1161,7 @@ class EdaService:
                     logger.warning("Live conn.close() failed: %s", close_exc)
 
         items = [
-            {"item_code": str(r[0]).strip(), "qty": int(float(r[1] or 0))}
+            {"item_code": str(r[0]).strip(), "qty": safe_int(r[1])}
             for r in rows
             if r[0] is not None
         ]
@@ -1306,19 +1307,19 @@ class EdaService:
 
         for r in past:
             e = _ensure(r[0], r[1] or "", r[2] or "", r[3] or "")
-            e["past_leftover"] = float(r[4] or 0.0)
+            e["past_leftover"] = safe_float(r[4])
         for r in alloc:
             e = _ensure(r[0], r[1] or "", r[2] or "", r[3] or "")
-            e["today_allocation"] = float(r[4] or 0.0)
+            e["today_allocation"] = safe_float(r[4])
         for r in mov:
             e = _ensure(r[0], r[1] or "", r[2] or "", r[3] or "")
-            e["sold_qty"]        = float(r[4] or 0.0)
-            e["bad_return_qty"]  = float(r[5] or 0.0)
-            e["good_return_qty"] = float(r[6] or 0.0)
+            e["sold_qty"]        = safe_float(r[4])
+            e["bad_return_qty"]  = safe_float(r[5])
+            e["good_return_qty"] = safe_float(r[6])
         for r in today_close:
             ic = str(r[0] or "").strip()
             if ic in items:
-                items[ic]["end_closing"] = float(r[1] or 0.0)
+                items[ic]["end_closing"] = safe_float(r[1])
 
         for e in items.values():
             e["van_load"] = e["past_leftover"] + e["today_allocation"]

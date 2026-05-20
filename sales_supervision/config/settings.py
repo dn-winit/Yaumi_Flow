@@ -151,6 +151,16 @@ class Settings(BaseSettings):
     route_summary_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_route_summary]")
     customer_summary_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_customer_summary]")
     item_details_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_item_details]")
+    # Source-of-truth recommendation table -- queried only to dedupe
+    # ``alsoBought`` against the CURRENT plan when the visit's snapshot
+    # was captured against an older recommendation generation. The table
+    # lives in the same DB as the supervision tables; bare name resolves
+    # via the configured SS_DB_DATABASE. Env override available for
+    # deployments that prefix the table or use a different schema.
+    recommendations_table: str = Field(
+        default="yf_recommended_orders",
+        description="Current-plan source for alsoBought dedupe (default: yf_recommended_orders).",
+    )
 
     @field_validator("log_level")
     @classmethod
