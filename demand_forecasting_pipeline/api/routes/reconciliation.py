@@ -54,6 +54,16 @@ def manual_refresh(
                     "default is 1 (today + yesterday). Wider values "
                     "back-fill past dates.",
     ),
+    force: bool = Query(
+        True,
+        description="When False, the call short-circuits if another "
+                    "caller already ran a successful refresh within "
+                    "CRON_SKIP_IF_RECENT_SECONDS -- same dedup window "
+                    "the 03:30 backstop cron uses. Default True keeps "
+                    "manual ops triggers behaving as a hard refresh; "
+                    "pass force=false when scripting periodic catch-up "
+                    "calls so two close-together pings collapse to one.",
+    ),
 ) -> Dict[str, Any]:
     """Manually run the reconciliation refresh -- same code path the
     daily cron uses. Writes to yf_sales_transactions for past + today.
@@ -62,6 +72,7 @@ def manual_refresh(
     return refresh_reconciliation(
         horizon_days_behind=int(horizon_days_behind),
         settings=get_settings(),
+        force=bool(force),
     )
 
 @router.get("/van-load", response_model=VanLoadResponse)

@@ -285,6 +285,26 @@ class Settings(BaseSettings):
     van_load_max_cache_entries: int = Field(default=500, ge=1)
     van_load_csv_cache_ttl_seconds: int = Field(default=300, ge=0)
     van_load_live_cache_ttl_seconds: int = Field(default=60, ge=0)
+    # Short TTL for csv-fallback responses (live endpoint unreachable).
+    # Keeps the stale-fallback envelope small so the moment data_import
+    # recovers, the next read switches back to live. Setting too low
+    # adds redundant fetches; too high lets a transient outage poison
+    # the cache for the full csv TTL window. 10s is the empirical
+    # sweet spot -- one rep-UI tick.
+    van_load_csv_fallback_cache_ttl_seconds: int = Field(default=10, ge=0,
+        description="TTL for csv-fallback responses; short by design so "
+                    "the fallback doesn't persist past a live-endpoint recovery.")
+
+    # Refusal threshold for stale demand-forecast inputs. The
+    # reconciliation cron refuses to refresh against a model whose
+    # newest forecast row is older than this many days -- a stale
+    # model produces stale carry diagnostics, and silently propagating
+    # them to the UI is worse than serving the previous day's view.
+    # Env-overridable so a deliberate week-off retraining cadence
+    # doesn't trip the guard.
+    forecast_stale_threshold_days: int = Field(default=14, ge=1, le=180,
+        description="Refuse to reconcile if MAX(yf_demand_forecast.trx_date) "
+                    "is older than this many days vs today.")
 
     # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var read by
     # every service. Wildcard ``*`` is never used with credentials

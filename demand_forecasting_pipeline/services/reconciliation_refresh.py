@@ -37,7 +37,7 @@ import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-from common.db_pool import FATAL_DB_ERRORS, get_pool
+from common.db_pool import FATAL_DB_ERRORS, get_pool, with_db_retry
 from common.numeric import safe_float
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     enrich_with_load,
@@ -205,6 +205,35 @@ def refresh_reconciliation(
             return {"success": True, "rows_updated": 0, "window": window,
                     "duration_seconds": 0.0, "message": "mirror empty"}
         df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce")
+
+        # Stale-forecast guard: refuse to reconcile against a model
+        # whose newest forecast row is more than ``forecast_stale_threshold_days``
+        # old vs today. A stale model produces stale diagnostics
+        # (expected_demand, bands, dormancy flag, bias correction)
+        # which then propagate to the UI as if they were current.
+        # Failing loudly here is strictly better than silently writing
+        # those stale rows under today's trx_date. Threshold is env-
+        # overridable via ``DF_FORECAST_STALE_THRESHOLD_DAYS`` so a
+        # deliberate weekly-retrain cadence doesn't trip the guard.
+        max_forecast_date = df["TrxDate"].max()
+        if pd.notna(max_forecast_date):
+            stale_days = (pd.Timestamp(now.date()) - max_forecast_date.normalize()).days
+            threshold = int(getattr(s, "forecast_stale_threshold_days", 14))
+            if stale_days > threshold:
+                logger.error(
+                    "reconciliation_refresh_refused_stale_forecast: "
+                    "newest forecast row %s is %dd old (threshold=%dd). "
+                    "Train the model before refreshing.",
+                    max_forecast_date.date(), stale_days, threshold,
+                )
+                return {
+                    "success": False,
+                    "error_code": "forecast_stale",
+                    "error": (f"yf_demand_forecast newest row {max_forecast_date.date()} "
+                              f"is {stale_days}d old (threshold {threshold}d); "
+                              "refresh aborted to avoid propagating stale diagnostics"),
+                    "window": window,
+                }
 
         # 2. Slice to past + today BEFORE enrich. The carry chain needs full
         #    history per (route, item), so we pass everything <= today (not
@@ -386,11 +415,11 @@ def refresh_reconciliation(
         # CSV mirror lags the DB for up to 24h.
         _REFRESH_LOCK.release()
 
-    # 9. Cascade the new CSV mirror (sales_transactions dataset). The
-    #    cascade helper invalidates the VanLoadService cache BEFORE the
-    #    POST so concurrent readers can't observe a pre-refresh slot
-    #    during the round-trip; on cascade failure the cache stays cold
-    #    and the next read re-populates from the last-known-good CSV.
+    # 9. Cascade the new CSV mirror (sales_transactions dataset).
+    #    The cascade helper invalidates the VanLoadService cache ONLY
+    #    on a fully successful POST -- on failure the cache stays warm
+    #    with last-known-good data instead of going cold and forcing
+    #    every reader to repopulate from a potentially stale CSV.
     cascade_lookback = max(int(horizon_days_behind) + 2, 7)
     cascade = _cascade_data_import_refresh(
         s,
@@ -785,12 +814,20 @@ def _fetch_yaumi_loading(
 # UPSERT into yf_sales_transactions
 # ---------------------------------------------------------------------------
 
+@with_db_retry
 def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
     """Stage -> MERGE write_df into yf_sales_transactions.
 
     UPSERT semantics: WHEN MATCHED THEN UPDATE, WHEN NOT MATCHED THEN
     INSERT. The cron's first call of the day creates today's rows; the
     second call updates them with fresh actuals.
+
+    Wrapped in ``with_db_retry`` so a SQL Server deadlock-victim 1205
+    on the MERGE (collision with a concurrent supervision reader
+    holding a key-range lock on yf_sales_transactions) backs off
+    50ms / 100ms / 200ms / 400ms / 800ms instead of failing the entire
+    refresh. Fatal errors (bad SQL, schema mismatch) still raise
+    immediately -- they wouldn't get better by retrying.
     """
     if write_df.empty:
         return 0
@@ -1002,26 +1039,24 @@ def _cascade_data_import_refresh(
     """POST data_import to re-mirror the named dataset (sales_transactions
     after this refactor; demand_forecast for legacy back-compat).
 
-    Order of operations (race-free):
-      1. Invalidate the VanLoadService cache. From here on, any concurrent
-         read repopulates from disk -- worst case it re-reads the old CSV
-         once more, but the next read after data_import flips the mtime
-         picks up the fresh content automatically.
-      2. POST the cascade. May take 1-10s.
-      3. On a clean transport failure, sleep ``_CASCADE_RETRY_DELAY_SECONDS``
+    Order of operations:
+      1. POST the cascade. May take 1-10s.
+      2. On a clean transport failure, sleep ``_CASCADE_RETRY_DELAY_SECONDS``
          and retry exactly once. Bounded so a real outage surfaces fast.
-      4. Return success / failure to the caller.
-
-    On cascade failure the cache stays cold -- next read repopulates
-    from whatever the CSV currently is (last known good if data_import
-    hadn't started overwriting yet, or partial mid-write content; either
-    way it converges once data_import recovers).
+      3. Invalidate the VanLoadService cache ONLY on success. The fresh
+         CSV mtime then drives the cache-key change so the next read
+         picks up the new content. Earlier code invalidated BEFORE the
+         POST, which on cascade failure left the cache cold AND the CSV
+         stale -- forcing every subsequent reader to repopulate the
+         cache from stale CSV for the full TTL. Now: cascade failure
+         leaves the cache warm with last-known-good data; recovery
+         flips the CSV mtime, which busts the per-file cache key, and
+         the next refresh's success invalidation picks up the new
+         payload.
     """
     base = (getattr(s, "data_import_url", None) or "").rstrip("/")
     if not base:
         return {"skipped": True, "reason": "data_import_url not configured"}
-
-    _invalidate_van_load_cache()
 
     result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days)
     if not result.get("success"):
@@ -1031,13 +1066,17 @@ def _cascade_data_import_refresh(
             dataset, result.get("error"), _CASCADE_RETRY_DELAY_SECONDS,
         )
         time.sleep(_CASCADE_RETRY_DELAY_SECONDS)
-        _invalidate_van_load_cache()
         result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days)
         if not result.get("success"):
             logger.error(
                 "reconciliation cascade refresh failed after retry for %s: %s",
                 dataset, result.get("error"),
             )
+
+    # Invalidate the van-load cache ONLY on a fully successful cascade
+    # -- see docstring above for why pre-emptive invalidation was wrong.
+    if result.get("success"):
+        _invalidate_van_load_cache()
 
     return {"skipped": False, **result}
 

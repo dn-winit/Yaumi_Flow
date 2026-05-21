@@ -53,6 +53,15 @@ class VanLoadService:
         self._max_cache_entries: int = int(self._s.van_load_max_cache_entries)
         self._csv_cache_ttl_seconds: int = int(self._s.van_load_csv_cache_ttl_seconds)
         self._live_cache_ttl_seconds: int = int(self._s.van_load_live_cache_ttl_seconds)
+        # Short TTL for csv-fallback responses (live endpoint timed out
+        # or unreachable). Keeps the stale-fallback envelope small so
+        # the next read after the live endpoint recovers picks up
+        # fresh data within seconds, rather than serving the fallback
+        # for the full csv TTL window.
+        self._csv_fallback_cache_ttl_seconds: int = int(
+            getattr(self._s, "van_load_csv_fallback_cache_ttl_seconds",
+                    self._live_cache_ttl_seconds),
+        )
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, tuple[float, dict[str, Any]]] = OrderedDict()
         self._csv_lock = threading.Lock()
@@ -64,13 +73,31 @@ class VanLoadService:
 
     def get(self, route_code: str, date: str) -> dict[str, Any]:
         date_n = self._normalise_date(date)
-        ttl = (self._live_cache_ttl_seconds if self._is_today_or_future(date_n)
-               else self._csv_cache_ttl_seconds)
+        # TTL is decided AFTER the fetch from the response's ``source``
+        # field so a csv-fallback response (live endpoint unreachable)
+        # is cached for a short window only -- the moment data_import
+        # comes back, the next read switches back to live without
+        # waiting out the full CSV TTL.
         return self._cached(
             f"{route_code}::{date_n}",
             lambda: self._fetch(route_code, date_n),
-            ttl_seconds=ttl,
+            ttl_for_response=lambda v: self._ttl_for(v, date_n),
         )
+
+    def _ttl_for(self, value: dict[str, Any], date_n: str) -> int:
+        """Pick the right cache TTL based on the source of the fetched
+        payload. Source classification:
+          * 'csv_fallback' -- live endpoint failed/timed out. Short TTL
+            so we re-attempt live promptly on next read.
+          * 'live'         -- fresh from data_import. Live TTL.
+          * 'csv'          -- historical date, no live source. CSV TTL.
+        """
+        source = (value or {}).get("source")
+        if source == "csv_fallback":
+            return self._csv_fallback_cache_ttl_seconds
+        if self._is_today_or_future(date_n):
+            return self._live_cache_ttl_seconds
+        return self._csv_cache_ttl_seconds
 
     def past_performance(
         self,
@@ -158,17 +185,27 @@ class VanLoadService:
         # Try live first for today (or a forward-looking query). If the
         # data_import endpoint isn't reachable, fall back to CSV so the
         # service never goes blank on a transient network issue.
-        if self._is_today_or_future(date) and self._s.data_import_configured:
+        attempted_live = (
+            self._is_today_or_future(date) and self._s.data_import_configured
+        )
+        if attempted_live:
             live = self._fetch_live(route_code, date)
             if live.get("available"):
                 live["source"] = "live"
                 return live
             logger.warning("VanLoadService: live fetch failed, falling back to CSV: %s",
                            live.get("message"))
-        # ``source`` is always set so the API surface can show whether the
-        # response reflects live data_import results or a stale CSV mirror.
+        # The CSV fetcher tags its own response as ``source="csv"``; we
+        # override to ``"csv_fallback"`` ONLY when the response is the
+        # result of a failed live attempt (today/future date + live
+        # endpoint unreachable). This distinction matters for the cache
+        # TTL: a genuine historical CSV read is stable for the full
+        # csv TTL; a fallback CSV is volatile -- as soon as data_import
+        # recovers, the next read should switch back to live. Without
+        # this differentiation both would share the same long TTL.
         out = self._fetch_from_csv(route_code, date)
-        out.setdefault("source", "csv_fallback")
+        if attempted_live:
+            out["source"] = "csv_fallback"
         return out
 
     def _fetch_live(self, route_code: str, date: str) -> dict[str, Any]:
@@ -387,16 +424,35 @@ class VanLoadService:
             return False
         return d >= _date_cls.today()
 
-    def _cached(self, key: str, loader, *, ttl_seconds: int) -> dict[str, Any]:
+    def _cached(
+        self,
+        key: str,
+        loader,
+        *,
+        ttl_for_response,
+    ) -> dict[str, Any]:
+        """LRU + per-entry TTL cache.
+
+        The TTL is decided AFTER the loader returns, via
+        ``ttl_for_response(value)`` -- so a csv-fallback response can
+        get a much shorter TTL than a live one, eliminating the window
+        where the same (route, date) flips between sources without the
+        cache picking up the change.
+
+        Each entry stores ``(written_at, value, ttl_seconds)`` so the
+        per-key TTL travels with the entry; the LRU bound is still
+        enforced by ``_max_cache_entries``.
+        """
         now = time.time()
         with self._lock:
             entry = self._cache.get(key)
-            if entry and (now - entry[0]) < ttl_seconds:
+            if entry and (now - entry[0]) < entry[2]:
                 self._cache.move_to_end(key)
                 return entry[1]
         value = loader()
+        ttl = int(ttl_for_response(value))
         with self._lock:
-            self._cache[key] = (now, value)
+            self._cache[key] = (now, value, ttl)
             self._cache.move_to_end(key)
             while len(self._cache) > self._max_cache_entries:
                 self._cache.popitem(last=False)
