@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import tempfile
 import threading
@@ -642,7 +643,12 @@ def check_and_retrain(
             if st in ("success", "failed"):
                 entry: dict[str, Any] = {
                     "date": _auto_retrain_pending.get("started_at", _utcnow().isoformat()),
-                    "trigger": "scheduled",
+                    # ``trigger`` is carried over from the originating
+                    # tick: "schedule" (time-based cadence) or "drift"
+                    # (drift-accelerated). Defaults to "scheduled" for
+                    # legacy rows persisted by older code -- so reading
+                    # mixed history never crashes a UI summary.
+                    "trigger": _auto_retrain_pending.get("trigger", "scheduled"),
                     "accuracy_before": _auto_retrain_pending.get("accuracy_before"),
                     "accuracy_after": None,
                     "duration_seconds": train_status.get("duration_seconds", 0),
@@ -679,8 +685,89 @@ def check_and_retrain(
             # Still running -- do nothing this tick
             return
 
-    # 2. Check if enabled and due
-    if not config.is_due():
+    # 2. Decide whether to retrain. Two independent triggers:
+    #    (a) Time floor -- enabled AND time-based cadence has elapsed.
+    #    (b) Drift accelerator -- recent accuracy has dropped past the
+    #        alert threshold AND the cooldown gate is open.
+    # Either firing is enough; if both are true, the time-based trigger
+    # wins for audit purposes (it's the primary path). The cooldown
+    # prevents wobble around the alert threshold from causing a retrain
+    # storm; it is computed dynamically below from the operator-chosen
+    # ``frequency_days`` so it scales with the selected cadence.
+    time_due = config.is_due()
+    trigger: Optional[str] = "schedule" if time_due else None
+    if not time_due and getattr(s, "retrain_on_drift_alert_enabled", True):
+        drift = compute_drift_status(artifact_service, settings=s)
+        # ``compute_drift_status`` emits one of three labels:
+        #   "stable"      -- accuracy delta within ``drift_warn_threshold``
+        #   "drifting"    -- delta between warn and alert thresholds
+        #   "significant" -- delta exceeds ``drift_alert_threshold`` (this
+        #                    is the firing condition for the accelerator)
+        if (drift or {}).get("status") == "significant":
+            # Adaptive cooldown: scales with the operator's chosen
+            # ``frequency_days`` so the accelerator stays proportional
+            # to the selected cadence. A 7-day operator gets a ~2-day
+            # cooldown; a 21-day operator gets ~5 days; a 30-day
+            # operator gets ~8 days. Floor at ``retrain_cooldown_min_days``
+            # so the cooldown is never zero. Read ``frequency_days``
+            # from the persisted config (operator-controlled via UI),
+            # NOT from settings, so a runtime UI change takes effect on
+            # the next tick without a service restart.
+            cfg_now = config.get() or {}
+            freq_days = int(cfg_now.get(
+                "frequency_days",
+                getattr(s, "retrain_default_frequency_days", 14),
+            ))
+            # ``math.ceil`` (not round/floor) for the cooldown:
+            #   * matches the codebase's convention for safety/
+            #     conservative thresholds (see page_views.py inventory
+            #     loading: math.ceil on units_to_load + opening_stock).
+            #   * avoids Python's banker's rounding for X.5 inputs
+            #     (round(0.5)=0, round(1.5)=2, round(2.5)=2 -- not
+            #     monotonic in a way an operator would expect).
+            #   * symmetric with ``gap_days_observed`` below, which is
+            #     ``timedelta.days`` (floor by definition). Combining
+            #     floor-on-elapsed with ceil-on-threshold gives a
+            #     strictly conservative gate -- the comparison
+            #     ``gap_days_observed >= cooldown_days`` only opens
+            #     after at least ceil(freq*fraction) FULL elapsed days.
+            cooldown_days = max(
+                int(getattr(s, "retrain_cooldown_min_days", 1)),
+                math.ceil(freq_days * float(
+                    getattr(s, "retrain_cooldown_fraction", 0.25)
+                )),
+            )
+            last_iso = cfg_now.get("last_auto_retrain")
+            gap_ok = True
+            gap_days_observed: Optional[int] = None
+            if last_iso:
+                try:
+                    last_dt = datetime.fromisoformat(str(last_iso))
+                    if last_dt.tzinfo is None:
+                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                    gap_days_observed = (_utcnow() - last_dt).days
+                    gap_ok = gap_days_observed >= cooldown_days
+                except (ValueError, TypeError):
+                    gap_ok = True  # unparseable -> treat as cold start
+            if gap_ok:
+                trigger = "drift"
+                logger.warning(
+                    "auto_retrain: drift-accelerated trigger "
+                    "(delta=%s%%, recent=%s%%, baseline=%s%%, "
+                    "frequency=%dd, cooldown=%dd)",
+                    drift.get("delta"),
+                    drift.get("recent_accuracy"),
+                    drift.get("baseline_accuracy"),
+                    freq_days, cooldown_days,
+                )
+            else:
+                logger.info(
+                    "auto_retrain: drift alert seen but within cooldown "
+                    "(observed_gap=%sd, cooldown=%dd, frequency=%dd); "
+                    "deferring",
+                    gap_days_observed, cooldown_days, freq_days,
+                )
+    if trigger is None:
         return
 
     # 3. Check if pipeline is already running
@@ -720,7 +807,10 @@ def check_and_retrain(
         logger.warning("Could not get pre-retrain accuracy: %s", exc)
 
     # 5. Start training
-    logger.info("Auto-retrain: starting scheduled training (accuracy_before=%.1f%%)", accuracy_before or 0)
+    logger.info(
+        "Auto-retrain: starting training (trigger=%s accuracy_before=%.1f%%)",
+        trigger, accuracy_before or 0,
+    )
     result = pipeline_service.run_training()
 
     if result.get("success"):
@@ -728,6 +818,7 @@ def check_and_retrain(
             _auto_retrain_pending = {
                 "started_at": _utcnow().isoformat(),
                 "accuracy_before": accuracy_before,
+                "trigger": trigger,
             }
     else:
         logger.warning("Auto-retrain: failed to start training: %s", result.get("message"))

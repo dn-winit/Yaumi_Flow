@@ -656,6 +656,40 @@ class Settings(BaseSettings):
     baseline_history_window: int = Field(default=30, ge=3, le=365)
     baseline_min_history: int = Field(default=5, ge=2)
 
+    # Drift-accelerated auto-retrain.
+    # When ``retrain_on_drift_alert_enabled`` is True, the auto-retrain
+    # tick fires a retrain BEFORE the time-based ``frequency_days``
+    # cadence if compute_drift_status reports status="significant"
+    # (recent accuracy below baseline by ``drift_alert_threshold``).
+    #
+    # The cooldown between drift-accelerated retrains is computed
+    # DYNAMICALLY from the operator-selected ``frequency_days`` so the
+    # accelerator scales with the chosen cadence:
+    #
+    #   cooldown_days = max(retrain_cooldown_min_days,
+    #                       round(frequency_days * retrain_cooldown_fraction))
+    #
+    # Examples at the default 0.25 fraction:
+    #   frequency=7   -> cooldown=2  (~ a quarter of a week)
+    #   frequency=14  -> cooldown=4
+    #   frequency=21  -> cooldown=5
+    #   frequency=30  -> cooldown=8
+    #
+    # This avoids the hardcoded mismatch where an operator who picked
+    # a 21-day cadence would still see drift accelerators firing every
+    # 2 days. Both knobs are env-overridable; defaults work for any
+    # frequency the UI exposes.
+    retrain_on_drift_alert_enabled: bool = Field(default=True)
+    retrain_cooldown_fraction: float = Field(default=0.25, ge=0.0, le=1.0,
+        description="Cooldown after a retrain, as a fraction of the "
+                    "operator's chosen frequency_days. Drift "
+                    "accelerator is suppressed until this many days "
+                    "(rounded) have elapsed.")
+    retrain_cooldown_min_days: int = Field(default=1, ge=1, le=30,
+        description="Absolute floor on the drift-accelerator cooldown. "
+                    "Even at frequency_days=1, the accelerator cannot "
+                    "fire more than once per this many days.")
+
     # DB push (target table for demand predictions)
     db: DbSettings = Field(default_factory=DbSettings)
     demand_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_demand_forecast]")
