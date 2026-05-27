@@ -98,8 +98,12 @@ def data_summary(importer: DataImporter = Depends(get_importer)):
 @router.get("/health", response_model=HealthResponse)
 def health(importer: DataImporter = Depends(get_importer)):
     settings = get_settings()
+    # Non-blocking DB probe + file-existence-only status. The full status()
+    # (row counts, first/last date) belongs on ``/status``, not ``/health``;
+    # /health must answer in <100 ms on cold cache so external healthchecks
+    # don't churn the container restart loop.
     db_ok = importer.test_connection()
-    info = importer.status()
+    info = importer.status_quick()
     available = sum(1 for v in info.values() if v.get("exists", False))
     return HealthResponse(
         status="healthy" if db_ok else "degraded",

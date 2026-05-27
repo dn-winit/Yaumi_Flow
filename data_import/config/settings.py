@@ -36,6 +36,11 @@ class _BaseDbSettings(BaseSettings):
     # Bulk import keeps the full connection_timeout above.
     live_connection_timeout: int = Field(default=10, ge=1)
     live_query_timeout: int = Field(default=15, ge=1)
+    # Even tighter budget for the /health DB liveness probe. The probe just
+    # answers "can we connect right now or not"; nothing useful happens by
+    # waiting 10s for an unreachable host. Default 3s keeps health checks
+    # snappy even when YaumiLive is gone.
+    health_probe_timeout: int = Field(default=3, ge=1, le=30)
     retry_attempts: int = Field(default=3, ge=1)
     retry_delay: int = Field(default=2, ge=1)
 

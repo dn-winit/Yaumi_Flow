@@ -87,11 +87,28 @@ class DatabaseClient:
 
     def test_connection(self, db: str = "live") -> Tuple[bool, str]:
         """Liveness probe -- returns ``(ok, reason)`` so health endpoints
-        can distinguish unreachable from credentials-wrong."""
+        can distinguish unreachable from credentials-wrong.
+
+        Uses ``health_probe_timeout`` (default 3s) regardless of the configured
+        connect timeout. The probe is purely a binary "can we reach the DB
+        right now?"; waiting 10s+ on an unreachable host just makes ``/health``
+        time out for every caller without adding information.
+        """
+        cfg = self._aiml if db == "aiml" else self._live
+        probe_timeout = int(getattr(cfg, "health_probe_timeout", 3))
         try:
-            conn = self._connect(db, live_query=True)
-            conn.cursor().execute("SELECT 1")
-            conn.close()
+            # Build the live connection string but override the login timeout
+            # via pyodbc.connect(timeout=) -- pyodbc honours the smaller of the
+            # connection-string ``Connection Timeout`` and this kwarg.
+            try:
+                cs = cfg.connection_string(live=True)  # type: ignore[call-arg]
+            except TypeError:
+                cs = cfg.connection_string()
+            conn = pyodbc.connect(cs, autocommit=True, timeout=probe_timeout)
+            try:
+                conn.cursor().execute("SELECT 1")
+            finally:
+                conn.close()
             return True, "ok"
         except pyodbc.InterfaceError as exc:
             logger.error("DB credentials invalid (%s): %s", db, exc)

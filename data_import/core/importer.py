@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import os
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -43,13 +44,23 @@ _DATASETS = {
 class DataImporter:
     """Fetches data from DB and saves to local CSV with incremental support."""
 
-    _CONN_PROBE_TTL_SECONDS = 30  # avoid hitting the DB on every status/health poll
+    # Positive probes (DB reachable) cached longer; negative probes shorter so
+    # a recovered DB is detected quickly. Both keep ``/health`` non-blocking
+    # once the first probe has answered.
+    _CONN_PROBE_TTL_OK_SECONDS = 30
+    _CONN_PROBE_TTL_FAIL_SECONDS = 10
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
         self._db = DatabaseClient(self._s)
         self._qb = QueryBuilder(self._s)
+        # (timestamp, ok) of the most recent probe.
         self._conn_probe: tuple[float, bool] | None = None
+        # Re-entrancy guard: while one caller is doing the actual pyodbc.connect,
+        # other concurrent /health callers return the previous cached value
+        # (or False on cold start) instead of all racing the same DB.
+        self._conn_probe_lock = threading.Lock()
+        self._conn_probe_inflight = False
         # dataset -> ((path, mtime_ns, size), status_entry)
         self._status_cache: Dict[str, tuple[tuple[str, int, int], Dict[str, Any]]] = {}
 
@@ -318,7 +329,7 @@ class DataImporter:
 
     def status(self) -> Dict[str, Any]:
         """Return current state of all local data files. Memoised on
-        (path, mtime, size) so a stable endpoint is O(1)."""
+        (path, mtime, size) so a stable endpoint is O(1) once warm."""
         info: Dict[str, Any] = {}
         cache = self._status_cache
         for dataset, (file_attr, date_col, _, _, _, _) in _DATASETS.items():
@@ -350,16 +361,76 @@ class DataImporter:
             info[dataset] = entry
         return info
 
+    def status_quick(self) -> Dict[str, Any]:
+        """Fast file-existence summary for ``/health``. Skips the
+        ``pd.read_csv`` row-count step that ``status()`` runs on cold
+        cache; the per-dataset count of a 5y CSV is irrelevant to the
+        binary "is the mirror present?" question health asks. O(N_datasets)
+        ``Path.exists()`` calls only.
+        """
+        info: Dict[str, Any] = {}
+        for dataset, (file_attr, _, _, _, _, _) in _DATASETS.items():
+            file_path = self._s.data_path(getattr(self._s, file_attr))
+            info[dataset] = {"exists": file_path.exists()}
+        return info
+
     def test_connection(self) -> bool:
-        """Cached DB liveness probe (avoids per-request DB connect)."""
+        """Non-blocking DB liveness probe.
+
+        ``/health`` calls return the most recent cached probe result instantly
+        and trigger a background refresh when the cache is stale. The first
+        ever call (cache empty) returns ``False`` and kicks off the probe in
+        the background -- this trades "first response is provably wrong on a
+        healthy DB" for "/health never blocks on DNS / TCP / login timeouts".
+
+        Probe-side timeout is bounded by ``health_probe_timeout`` (default 3s)
+        on the pyodbc connect; even a dead DB resolves the cache within a few
+        seconds of the first call.
+        """
+        cached = self._conn_probe
         now = time.time()
-        if self._conn_probe and (now - self._conn_probe[0]) < self._CONN_PROBE_TTL_SECONDS:
-            return self._conn_probe[1]
-        # Only the boolean is cached; client logs the reason for ops.
-        result = self._db.test_connection()
-        ok = bool(result[0]) if isinstance(result, tuple) else bool(result)
-        self._conn_probe = (now, ok)
-        return ok
+
+        if cached is None:
+            # Cold start: schedule the probe, answer "unreachable" honestly
+            # (we don't know yet) without blocking the caller.
+            self._kick_off_probe()
+            return False
+
+        age = now - cached[0]
+        ttl = (
+            self._CONN_PROBE_TTL_OK_SECONDS if cached[1]
+            else self._CONN_PROBE_TTL_FAIL_SECONDS
+        )
+        if age >= ttl:
+            # Stale: refresh in background, return the still-cached value.
+            self._kick_off_probe()
+        return cached[1]
+
+    def _kick_off_probe(self) -> None:
+        """Start a background DB probe iff one isn't already running.
+
+        Concurrent ``/health`` calls coalesce to a single probe; the worker
+        updates ``_conn_probe`` on completion. Daemon thread so it never
+        delays process shutdown.
+        """
+        with self._conn_probe_lock:
+            if self._conn_probe_inflight:
+                return
+            self._conn_probe_inflight = True
+
+        def _run() -> None:
+            try:
+                result = self._db.test_connection()
+                ok = bool(result[0]) if isinstance(result, tuple) else bool(result)
+                self._conn_probe = (time.time(), ok)
+            except Exception as exc:  # defensive: never let the worker raise
+                logger.warning("db_probe worker failed: %s", exc)
+                self._conn_probe = (time.time(), False)
+            finally:
+                with self._conn_probe_lock:
+                    self._conn_probe_inflight = False
+
+        threading.Thread(target=_run, name="db-probe", daemon=True).start()
 
     # ------------------------------------------------------------------
     # Internal
