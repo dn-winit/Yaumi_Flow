@@ -3,12 +3,7 @@ import type { AnalysisResponse, CacheStatsResponse } from "@/types/analytics";
 
 const c = () => getClient("analytics");
 
-/**
- * Frontend surface for the LLM analytics service. Mirrors the
- * server-side route list: customer / route / pre-visit analyses plus
- * cache management. Every call goes through the LLM, so all use the
- * `heavy` timeout.
- */
+/** LLM analytics surface; every call hits the LLM so all use the `heavy` timeout. */
 export const analyticsApi = {
   analyzeCustomer: (data: Record<string, unknown>) =>
     c().post<AnalysisResponse>("/analyze/customer", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),

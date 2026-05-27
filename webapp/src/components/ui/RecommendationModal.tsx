@@ -21,8 +21,7 @@ interface Props {
 }
 
 function cycleHint(cycle: number | null, daysSince: number | null): string {
-  // Plain English -- avoid jargon like "past cycle", short forms like
-  // "d", and any other phrasing a route supervisor would have to decode.
+  // Plain English (no "past cycle" / "d" abbreviations).
   if (cycle == null || cycle <= 0 || daysSince == null) return "";
   const overdue = daysSince - cycle;
   if (overdue > cycle * 0.25) {
@@ -35,8 +34,7 @@ function cycleHint(cycle: number | null, daysSince: number | null): string {
 }
 
 function sourceLabel(source: string): { label: string; tone: "info" | "success" | "warning" | "neutral" } {
-  // Plain-language label for the engine's generator lane, matched to
-  // the canonical strings emitted by core/explain.py.
+  // Maps the canonical strings from core/explain.py to plain English.
   const s = source.toLowerCase();
   if (s === "history")      return { label: "From this customer's history",          tone: "success" };
   if (s === "peer")         return { label: "From similar customers' purchases",     tone: "info" };
@@ -66,10 +64,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
   const whyQuantity = str(row.WhyQuantity);
   const source = str(row.Source);
 
-  // PurchaseCount == 0 means the customer never bought this item. The
-  // customer-context fields are placeholder zeros in that case (peer /
-  // basket / seed candidates fill them only when history exists), so we
-  // render an em-dash instead of "0 days ago" / "Every 0 days".
+  // PurchaseCount==0 -> never bought; render em-dash instead of "0 days ago" / "Every 0 days".
   const purchaseCount = num(row.PurchaseCount);
   const isFirstTime = purchaseCount == null || purchaseCount === 0;
 
@@ -89,11 +84,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           }}
         />
 
-        {/* Section 1: the headline numbers. Source chip on the right is
-            the one piece of provenance kept on this section -- it tells
-            the supervisor which signal lane picked this customer in
-            plain English. No tier badge: "MUST_STOCK" etc are internal
-            labels that confuse rather than help. */}
+        {/* Section 1: headline numbers; source chip = the generator lane in plain English. */}
         <div>
           <SectionTitle
             right={
@@ -121,11 +112,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           </div>
         </div>
 
-        {/* Section 2: Customer pattern -- mirrors the forecast modal's
-            "How we got there" section. 3 anchoring stats from the
-            customer's own history. First-time recommendations replace the
-            grid with a single line so we never render "0 days ago" /
-            "Every 0 days" as if they were facts. */}
+        {/* Section 2: customer pattern; first-time recs swap in placeholder copy. */}
         <div>
           <SectionTitle>Customer pattern</SectionTitle>
           {isFirstTime ? (
@@ -167,12 +154,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
           )}
         </div>
 
-        {/* Section 3: the only "why" section -- two prose sentences the
-            engine writes per row: one explains the item choice, the other
-            explains the quantity. Numbered the Section 4 bullet list used
-            to render is gone -- it pulled from the same Signals array
-            that already feeds these two sentences, so it duplicated the
-            story without adding new information. */}
+        {/* Section 3: prose-only "why" -- two engine-written sentences (item + quantity). */}
         {hasNarrative && (
           <div>
             <SectionTitle>Why we suggested it</SectionTitle>

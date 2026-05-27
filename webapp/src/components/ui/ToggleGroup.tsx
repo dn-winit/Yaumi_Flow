@@ -1,7 +1,6 @@
 import type { ReactNode } from "react";
 
-/** Single option for a ToggleGroup. ``value`` is the discriminator the
- *  parent compares against; ``label`` is what renders. */
+/** ToggleGroup option; value = discriminator, label = render. */
 export interface ToggleOption<T extends string> {
   value: T;
   label: ReactNode;
@@ -15,14 +14,7 @@ interface Props<T extends string> {
   ariaLabel?: string;
 }
 
-/**
- * Pill-style segmented toggle used in chart card headers. Generic over
- * the option type so each call site keeps its own union (e.g.
- * ``"revenue" | "quantity"`` vs ``"van_load" | "leftovers"``). Style is
- * the single source of truth across the app -- DashboardDailyTrend,
- * AccuracyDrawer, and anything that adopts a header toggle render the
- * exact same look + behaviour.
- */
+/** Pill-style segmented toggle; generic over the option type. */
 export default function ToggleGroup<T extends string>({
   options,
   value,

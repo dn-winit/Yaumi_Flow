@@ -19,11 +19,7 @@ import {
   TOOLTIP_PROPS,
 } from "./theme";
 
-// Density thresholds for adaptive dot rendering. Above the upper bound the
-// line stands alone (a dot at every working day in a month makes the trend
-// noisy); below it dots stay because each point carries individual weight.
-// Tuned to ~14 working days = ½ month so a "two weeks" view shows markers
-// while a "30 days" view stays clean.
+// Hide dots above ~14 points (≈ half a month) so dense lines stay clean; sparse ones keep markers.
 const _DOT_DENSITY_HIDE_AT = 14;
 const _DOT_RADIUS = 3;
 const _ACTIVE_DOT_RADIUS = 5;
@@ -43,18 +39,11 @@ interface LineChartProps {
   title?: string;
   /** Optional helper text rendered just below the title, inside the card. */
   subtitle?: string;
-  /** Optional element rendered on the right side of the header (intended
-   *  for toggles, filter chips, etc.). Matches the Card ``actions`` slot. */
+  /** Right-side header slot for toggles/chips; matches Card.actions. */
   actions?: ReactNode;
   emptyMessage?: string;
   loading?: boolean;
-  /**
-   * Minimum horizontal width allocated per data point. When the chart
-   * width exceeds the container, the wrapper scrolls horizontally so
-   * every tick stays legible. Default 80px is wide enough for a
-   * `dd-mm-yyyy` label at the standard axis font size without crowding
-   * adjacent labels.
-   */
+  /** Minimum px per data point; wrapper scrolls when overflow. */
   pxPerPoint?: number;
 }
 
@@ -70,9 +59,7 @@ export default function LineChart({
   loading = false,
   pxPerPoint = 80,
 }: LineChartProps) {
-  // Title/subtitle pair sits in one stacked block on the left; optional
-  // ``actions`` slot (toggle pills etc.) sits on the right, mirroring the
-  // Card component and BarChart so the three are visually interchangeable.
+  // Title/subtitle on the left, actions on the right; mirrors Card + BarChart.
   const header = (title || subtitle || actions) ? (
     <div className="mb-4 flex items-start justify-between gap-3">
       <div>
@@ -110,10 +97,7 @@ export default function LineChart({
                 margin={{ top: 5, right: 20, left: 0, bottom: 12 }}
               >
                 <CartesianGrid {...GRID_PROPS} />
-                {/* interval=0 + minTickGap=0 forces every working day
-                    to render. The wrapper's overflow-x-auto + minWidth
-                    guarantees each label has its own column, so labels
-                    never collide. */}
+                {/* interval=0 + scroll wrapper -> every label gets its own column. */}
                 <XAxis
                   dataKey={xKey}
                   tickFormatter={fmtAxisDate}
@@ -127,11 +111,7 @@ export default function LineChart({
                 {series.length > 1 && <Legend wrapperStyle={{ fontSize: "0.875rem" }} />}
                 {series.map((s, idx) => {
                   const stroke = s.color ?? CHART_PALETTE[idx % CHART_PALETTE.length];
-                  // Adaptive dot: count this series' actual datapoints (skip
-                  // nulls/undefined that pad gaps in sparse windows). When
-                  // the line is dense, dots add noise; when sparse, they
-                  // anchor the eye on the few real datapoints. Active-dot
-                  // (hover) always renders so tooltips stay discoverable.
+                  // Adaptive dot: count this series' real points; hide when dense.
                   const populated = data.reduce(
                     (n, row) => n + (row[s.key] != null ? 1 : 0),
                     0,

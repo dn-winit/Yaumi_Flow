@@ -1,30 +1,10 @@
-"""
-Recommendation engine -- candidate-generator architecture.
+"""Recommendation engine: candidate-generator architecture.
 
-Sprint-1 redesign:
-    1. Calibrate thresholds from route data (`core/calibration.py`).
-    2. Per-customer: run generators in order (history, peer cross-sell,
-       basket complement, reactivation, seed). Each generator returns a
-       list of ``Candidate`` objects with its own scoring lane.
-    3. Merge + rank across lanes.
-    4. Apply van-load constraints (unchanged).
-
-Sprint-3 robustness:
-    * **Circuit breaker** per generator -- one throwing generator never fails
-      a route; we log and continue with the rest.
-    * **Lookalike cache** (LRU + TTL) -- per-route matrix/similarity blocks
-      are expensive; repeated generations for the same route reuse them.
-      Previously unbounded.
-    * **Per-generator metrics** emitted per-route: single-line key=value log
-      + CSV sink + in-memory snapshot read by ``/health``.
-    * **Thread-safe cache mutations** via a dedicated lock.
-    * **Peer degeneracy guard** -- micro-routes (< ``peer_min_active_customers``
-      customers) skip peer generator with a route-level log line.
-    * **Feedback multipliers** are applied to per-source candidate priority
-      scores when ``SafetyClamps.feedback_enabled`` is True.
-
-Explainability is carried end-to-end on each Candidate via ``Signals``
-(list[dict]), ``WhyItem``, ``WhyQuantity`` and ``Confidence``.
+Pipeline: calibrate -> per-customer generators (history, peer cross-sell,
+basket complement, reactivation, seed) -> merge + rank -> van-load
+constraints. Each generator runs behind a per-route circuit breaker so
+one failure doesn't poison a route. Explainability rides end-to-end via
+Candidate.Signals / WhyItem / WhyQuantity / Confidence.
 """
 
 from __future__ import annotations
@@ -78,16 +58,13 @@ class RecommendationEngine:
         self._priority = PriorityCalculator()
         self._quantity = QuantityCalculator(self._c.clamps)
         self._corpus_median_customers: Optional[float] = None
-        # Corpus-wide distributions of each calibration field, used as the
-        # reference for ``_sanity_clamp`` in calibration.py. Set by the API
-        # layer once per generation pass.
+        # Corpus-wide distributions per calibration field; reference for
+        # ``_sanity_clamp`` in calibration.py.
         self._corpus_field_values: Optional[Dict[str, List[float]]] = None
-        # Per-source feedback multipliers keyed by route_code.
+        # Per-source feedback multipliers + confidence, keyed by route_code.
         self._feedback_adjustments: Dict[str, Dict[str, float]] = {}
-        # Sprint-4: per-source confidence in the multiplier (same keying).
         self._feedback_confidence: Dict[str, Dict[str, float]] = {}
-        # LRU + TTL cache for the per-route lookalike context (matrix +
-        # similarities). Key = (route_code, csv_mtime, window_days).
+        # LRU+TTL lookalike cache keyed (route_code, csv_mtime, window_days).
         self._lookalike_cache: "OrderedDict[Tuple[str, float, int], Tuple[float, Dict[str, Any]]]" = OrderedDict()
         self._cache_lock = threading.Lock()
 
@@ -142,14 +119,8 @@ class RecommendationEngine:
         t0 = time.time()
         target_dt = pd.to_datetime(target_date).normalize()
 
-        # As-of cutoff: when planning the visit for ``target_date``, the
-        # only history we may use is what was known BEFORE that day. Sales
-        # already booked on the target date itself are the *answer*, not
-        # the input -- counting them as "just-bought" history collapses the
-        # purchase cycle and starves the customer of recommendations
-        # (DaysSinceLastPurchase=0, cycle=0 -> only peer/basket items
-        # survive). Strictly less-than the target date keeps the engine
-        # forecasting forward instead of describing the past.
+        # As-of cutoff: history must be strictly before target_date or the
+        # purchase cycle collapses (DaysSince=0, cycle=0 starves history lane).
         if "TrxDate" in customer_df.columns and not customer_df.empty:
             cdf_dates = pd.to_datetime(customer_df["TrxDate"], errors="coerce")
             customer_df = customer_df[cdf_dates < target_dt].copy()
@@ -169,10 +140,9 @@ class RecommendationEngine:
         )
         cycle_calc = CycleCalculator(calibration.recency_half_life_days)
 
-        # 2. Route-level pre-compute (done ONCE per route)
-        # Basket-size tier thresholds are computed over the FULL filtered
-        # frame, not just today's planned customers, so a customer's tier
-        # reflects intrinsic behaviour rather than today's group composition.
+        # 2. Route-level pre-compute (ONCE per route). Basket-size tier
+        # thresholds use the full filtered frame so tier reflects intrinsic
+        # behaviour, not today's group composition.
         basket_p25, basket_p75 = self._basket_thresholds(customer_df)
         histories = self._precompute(
             customer_df,
@@ -184,9 +154,7 @@ class RecommendationEngine:
         )
         top_van_items = self._top_van_items(van_items, self._c.clamps.seed_top_k)
 
-        # Edge case (Sprint-3, Theme C.4): micro-route / degenerate peer input.
-        # Peer similarity on < N customers is numerical noise; we skip the peer
-        # generator entirely for tiny routes and emit a route-level log line.
+        # Skip peer generator on micro-routes (similarity is numerical noise).
         active_customers = int(customer_df["CustomerCode"].nunique()) if not customer_df.empty else 0
         peer_enabled = active_customers >= self._c.clamps.peer_min_active_customers
         if not peer_enabled:
@@ -318,9 +286,8 @@ class RecommendationEngine:
             else:
                 counts["active"] += 1
 
-            # Sprint-3/4: feedback multipliers applied to priority scores
-            # *before* the dedupe-by-item step in merge_and_rank -- a
-            # strong-source candidate wins over a weak-source one.
+            # Apply feedback multipliers BEFORE merge_and_rank's dedupe so
+            # strong-source candidates beat weak-source ones for the same item.
             if adjustments:
                 apply_adjustments_to_candidates(
                     all_cands, adjustments, confidence=adjust_conf,
@@ -328,7 +295,7 @@ class RecommendationEngine:
 
             ranked = merge_and_rank(all_cands)
             kept_rows = self._rows(ranked, customer, target_dt, route_code, item_names, customer_names, calibration)
-            # Attribute kept rows back to their originating source for metrics.
+            # Attribute kept rows back to their source for metrics.
             for r in kept_rows:
                 src = r.get("Source", "")
                 if src in gen_stats:
@@ -442,13 +409,9 @@ class RecommendationEngine:
         calibration: RouteCalibration,
     ) -> Dict[str, Any]:
         c = self._c.clamps
-        # Key by (route, csv_mtime, window_days, target_dt). target_dt is
-        # part of the key because the engine filters customer_df to
-        # ``TrxDate < target_dt`` upstream — different target dates produce
-        # different filtered frames even when the source CSV hasn't changed.
-        # Without target_dt in the key we'd serve tomorrow's similarity
-        # matrix for today's request (or vice versa) as long as
-        # customer_data.csv didn't get re-imported between the two.
+        # target_dt is part of the key because the upstream as-of filter
+        # makes different target dates produce different similarity matrices
+        # even when the source CSV hasn't changed.
         from recommended_order.core.calibration import _csv_mtime as _mt
         key = (route_code, _mt(), c.calibration_window_days, target_dt.date().isoformat())
         now = time.time()
@@ -457,8 +420,7 @@ class RecommendationEngine:
             if entry is not None and now - entry[0] <= c.cache_ttl_seconds:
                 self._lookalike_cache.move_to_end(key)
                 return entry[1]
-            # Stale or missing -- drop if present, rebuild outside the lock to
-            # avoid blocking concurrent requests for other routes.
+            # Rebuild outside the lock so other routes don't block.
             if entry is not None:
                 self._lookalike_cache.pop(key, None)
         ctx = self._lookalike_context(customer_df, target_dt, calibration)
@@ -523,25 +485,15 @@ class RecommendationEngine:
     def _top_van_items(van_items: Dict[str, int], k: int) -> List[Tuple[str, int]]:
         if k <= 0 or not van_items:
             return []
-        # Edge case (Sprint-3, Theme C.2): stockouts.
-        # An item with van_qty == 0 or negative must not reach the engine.
-        # ``dm.get_van_items`` already filters non-positive quantities; this
-        # second guard is defence-in-depth so a direct caller can't slip one
-        # through.
+        # Defence-in-depth stockout guard (dm.get_van_items already filters).
         ranked = sorted(van_items.items(), key=lambda kv: (-int(kv[1] or 0), kv[0]))
         return [(code, int(qty)) for code, qty in ranked[:k] if int(qty or 0) > 0]
 
     @staticmethod
     def _basket_thresholds(customer_df: pd.DataFrame) -> Tuple[float, float]:
-        """Route-wide P25/P75 of per-customer avg basket size (units per visit).
-
-        Used to bucket customers into HEAVY / MEDIUM / LIGHT tiers so the
-        priority blend leans appropriately: a hypermarket buying 80 units a
-        visit cares about quantity depth; a corner store buying 6 units cares
-        about timing. Computed over the *full* route history (not just today's
-        journey customers) so a customer's tier is intrinsic to their
-        behaviour, not relative to whoever happens to be on today's plan.
-        """
+        """Route-wide P25/P75 of per-customer avg basket size; buckets
+        customers into HEAVY/MEDIUM/LIGHT tiers. Uses full route history so
+        the tier is intrinsic, not relative to today's journey set."""
         if customer_df.empty or "TotalQuantity" not in customer_df.columns:
             return 0.0, 0.0
         per_visit = (
@@ -560,20 +512,9 @@ class RecommendationEngine:
         fallback_gate: float,
         fallback_half_life: float,
     ) -> Dict[str, Any]:
-        """Per-customer behavioural profile.
-
-        Three signals derived from this customer's own history (with documented
-        fallbacks to route calibration when sample is too thin):
-
-        * ``tier`` -- HEAVY / MEDIUM / LIGHT band by avg basket size. Drives
-          the timing-vs-quantity weight blend in PriorityCalculator.
-        * ``completion_gate`` -- ``1 - 1/median_overall_cycle``, clamped.
-          A fast-cycling customer (median 2d) gates at ~0.5 (recommend at 50%
-          due); a patient customer (median 14d) gates at ~0.93. Replaces the
-          one-size-fits-all route gate.
-        * ``half_life_days`` -- recency decay tuned to *this customer's*
-          visit cadence (3 x median customer-cycle). Frequent visitors get a
-          tighter half-life so last-week purchases dominate qty calc.
+        """Per-customer profile: tier (basket-size band), personal
+        completion_gate (from median cycle), and recency half-life (3x
+        median cycle). Falls back to route calibration when sample is thin.
         """
         # --- Tier (via avg basket size) ---
         if cust_history.empty or "TotalQuantity" not in cust_history.columns:
@@ -601,10 +542,8 @@ class RecommendationEngine:
                 median_cycle = float(np.median(gaps))
                 if median_cycle > 1.0:
                     raw_gate = 1.0 - (1.0 / median_cycle)
-                    # Bound to the same envelope the route gate respects so
-                    # a freak super-frequent customer can't be gated at 0.99
-                    # (which starves them of recs) and a sparse one can't
-                    # collapse to 0 (which floods).
+                    # Bound to the route-gate envelope so freak fast/slow
+                    # customers don't starve or flood.
                     completion_gate = max(0.4, min(0.95, raw_gate))
                     half_life_days = max(1.0, 3.0 * median_cycle)
 

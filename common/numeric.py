@@ -1,44 +1,21 @@
-"""Shared numeric coercion helpers.
+"""Shared numeric coercion + presentation rounding helpers.
 
-Production code repeatedly needs to convert "something that came from a
-DataFrame cell, a DB row, or a JSON field" into a clean numeric value.
-The naive idiom ``float(x or 0.0)`` looks safe but silently breaks when
-``x`` is a pandas NaN -- NaN is *truthy* in Python, so the ``or`` branch
-is never taken and the NaN survives into JSON as ``null``. Downstream
-aggregators that do ``total += value`` then poison their running sums.
-
-``safe_float`` is the single coercion point that neutralises:
-  * ``None``                       -> ``default``
-  * pandas NaN, ``float('nan')``   -> ``default`` (NaN check via ``v != v``)
-  * positive / negative infinity   -> ``default`` (JSON does not represent these)
-  * empty / non-numeric strings    -> ``default`` (``ValueError`` swallowed)
-
-It is intentionally tolerant: every CSV column, DB row, and JSON cell
-flows through it without raising. The cost is one branch and one NaN
-check per call -- negligible against the ~1ms-per-call work that
-follows in the per-route aggregators that use it.
-
-Why a shared module: ``data_import.services.eda_service`` and
-``demand_forecasting_pipeline.services.reconciliation.van_load_service``
-both materialise per-item dicts from the same CSV mirrors. A divergence
-between their coercion rules means the same source row can produce
-different ``van_load`` values depending on which service rendered it,
-which silently breaks the cross-view carry identities the reconciliation
-verifier checks. Centralising the rule here keeps them in lock-step.
+Two responsibilities: (1) ``safe_float`` / ``safe_int`` neutralise
+NaN/None/inf from noisy upstream data, (2) ``pack_qty`` / ``currency`` /
+``pct`` / ``prob`` are the SINGLE rounding policy at the API->client
+boundary so tile / table / chart sums reconcile by construction. All
+are NaN/None-safe and JSON-serialisable.
 """
 from __future__ import annotations
 
+import math
 from typing import Any
 
 
 def safe_float(value: Any, default: float = 0.0) -> float:
-    """Coerce ``value`` to a finite float, returning ``default`` for
-    anything that can't be represented as one (None, NaN, inf,
-    non-numeric strings).
-
-    Use this instead of ``float(x or 0.0)`` whenever ``x`` may be a
-    pandas NaN -- NaN is truthy, so the ``or`` short-circuit never
-    fires and NaN propagates downstream.
+    """Coerce ``value`` to a finite float; return ``default`` for None,
+    NaN, inf, or non-numeric strings. Prefer over ``float(x or 0.0)``
+    because pandas NaN is truthy and bypasses the ``or`` short-circuit.
     """
     if value is None:
         return default
@@ -53,7 +30,38 @@ def safe_float(value: Any, default: float = 0.0) -> float:
 
 
 def safe_int(value: Any, default: int = 0) -> int:
-    """Integer counterpart of ``safe_float``. Floats with fractional
-    parts truncate toward zero (matches ``int(x)`` semantics)."""
+    """Integer counterpart of ``safe_float`` (truncates toward zero)."""
     f = safe_float(value, default=float(default))
     return int(f)
+
+
+# Presentation rounding: apply each helper exactly ONCE per value at the
+# API output layer so per-row, per-day and headline aggregates reconcile.
+
+def pack_qty(value: Any) -> int:
+    """Quantity as whole truck packs (ceil-up integer; 0 if non-positive).
+    Apply cell-by-cell so ``tile_total == sum(table_column)`` by construction;
+    do not re-apply to aggregates.
+    """
+    f = safe_float(value, default=0.0)
+    if f <= 0.0:
+        return 0
+    return int(math.ceil(f))
+
+
+def currency(value: Any, digits: int = 2) -> float:
+    """AED amount rounded to ``digits`` decimals (default 2). Aggregate raw
+    floats internally; apply once to the final aggregate for display."""
+    return round(safe_float(value, default=0.0), digits)
+
+
+def pct(value: Any, digits: int = 1) -> float:
+    """Percentage already on the 0-100 scale, rounded to ``digits`` (default 1).
+    Does NOT multiply by 100."""
+    return round(safe_float(value, default=0.0), digits)
+
+
+def prob(value: Any) -> float:
+    """Probability in [0, 1] rounded to 2dp (engine's ``p_demand`` display).
+    NaN clamps to 0.0."""
+    return round(safe_float(value, default=0.0), 2)

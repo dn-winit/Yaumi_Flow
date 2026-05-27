@@ -1,14 +1,6 @@
-"""HTTP client to the recommended_order service.
+"""HTTP client to recommended_order; short-TTL cache feeds the auto-visit reconciler.
 
-The auto-visit reconciler needs the day's plan (per-customer recommended
-items) so it can scope a session and score visits against the right
-baseline. Recommendations live in ``recommended_order``; we fetch them
-on demand with a short-TTL cache so a 5-minute reconcile cycle on 12
-routes doesn't fan out into 12 cold HTTP calls every tick.
-
-Fail-soft contract: any upstream failure returns ``[]`` so the
-reconciler skips the route for this tick rather than crashing the
-whole loop.
+Fail-soft: upstream failures return []; reconciler skips the route for that tick.
 """
 from __future__ import annotations
 
@@ -38,13 +30,7 @@ class RecommendedOrderClient:
         return f"{self._s.recommended_order_url.rstrip('/')}/api/v1/recommended-order"
 
     def get_recommendations(self, route_code: str, date: str) -> List[Dict[str, Any]]:
-        """Return ``[{CustomerCode, ItemCode, RecommendedQuantity, ...}, ...]``.
-
-        Empty list = no recommendations stored for that route+date OR
-        an upstream error (logged once per tick). Cached for
-        ``recommendation_cache_seconds`` so a route polled every 5
-        minutes only triggers one upstream call per cache window.
-        """
+        """Return per-(customer, item) recommendation rows; cached for recommendation_cache_seconds."""
         key = (str(route_code), str(date))
         ttl = float(self._s.recommendation_cache_seconds)
         now = time.time()
@@ -54,13 +40,7 @@ class RecommendedOrderClient:
                 return cached[1]
         recs = self._fetch(route_code, date)
         with self._lock:
-            # Cache only POSITIVE results. Empty lists are typically
-            # transient (recommended_order CSV load racing supervision
-            # boot, a brand-new route, a network blip). Caching empty
-            # for the full ``recommendation_cache_seconds`` made auto-
-            # visit invisible to a route for 5 minutes after any
-            # transient miss; retrying every tick is what makes the
-            # system self-healing without operator intervention.
+            # Only cache positive results; empty lists usually mean transient upstream issues.
             if recs:
                 self._cache[key] = (now, recs)
         return recs

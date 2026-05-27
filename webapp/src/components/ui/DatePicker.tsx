@@ -8,26 +8,12 @@ interface DatePickerProps {
   onChange: (value: string) => void;
   label?: string;
   className?: string;
-  /** Inclusive lower / upper bound, both ISO `YYYY-MM-DD`. Pass through to
-   *  the native input so the OS calendar greys out forbidden dates -- much
-   *  better UX than rejecting the value after the user picks it. */
+  /** Inclusive ISO bounds; the native input greys forbidden dates. */
   min?: string;
   max?: string;
 }
 
-/**
- * Calendar-driven date input.
- *
- * The native `<input type="date">` provides the calendar widget (its
- * value attribute is always ISO `YYYY-MM-DD`, regardless of OS locale)
- * but its rendered text varies by browser locale. We hide that native
- * surface and overlay our own `dd-mm-yyyy` chip on top so the user
- * always sees the same format the rest of the app uses, while still
- * getting the OS calendar pop-up on click. Clicking the chip / icon
- * focuses the hidden input and calls `showPicker()` on browsers that
- * support it, so a single click anywhere in the field opens the
- * calendar.
- */
+/** Calendar input; hides the locale-dependent native chip and overlays dd-mm-yyyy. */
 export default function DatePicker({
   value,
   onChange,
@@ -41,10 +27,7 @@ export default function DatePicker({
   const openPicker = () => {
     const el = inputRef.current;
     if (!el) return;
-    // showPicker() is the supported way to open the OS calendar
-    // programmatically (Chrome 99+, Edge, Safari 17+). When unavailable
-    // we fall back to focus(), which still triggers the popup on
-    // user-initiated clicks in every modern browser.
+    // showPicker(): Chrome 99+/Safari 17+; fall back to focus() elsewhere.
     if (typeof el.showPicker === "function") {
       try {
         el.showPicker();
@@ -75,9 +58,7 @@ export default function DatePicker({
           max={max}
           onChange={(e) => {
             const next = e.target.value;
-            // Native picker only fires onChange with a full ISO date or
-            // an empty string (when the user clears it). We ignore the
-            // clear since every caller expects a non-empty date.
+            // Ignore the empty/clear case; every caller expects a non-empty date.
             if (next && next !== value) onChange(next);
           }}
           aria-label={label ?? "Select date"}

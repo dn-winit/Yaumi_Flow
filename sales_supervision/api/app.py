@@ -5,7 +5,11 @@ FastAPI application factory.
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from contextlib import asynccontextmanager
+from datetime import datetime
+from zoneinfo import ZoneInfo
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -18,9 +22,7 @@ from sales_supervision.config.settings import Settings, get_settings
 
 
 def _probe_data_import(settings: Settings, log: logging.Logger) -> None:
-    """One-shot probe of the data_import service. Non-fatal -- the app
-    still boots if the URL is unreachable; we just want a loud signal
-    instead of silent zero-actuals later."""
+    """Non-fatal startup probe of data_import; warns loudly so silent zero-actuals don't sneak in."""
     url = (settings.data_import_url or "").rstrip("/")
     if not url:
         log.warning("data_import_url unset; live actuals will be empty")
@@ -64,23 +66,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             settings.auto_visit_poll_seconds,
         )
 
-        # Probe data_import on startup. Live actuals (and therefore
-        # rep-vs-recommendation scoring) silently degrade to zeros when
-        # this URL is unreachable -- a loud WARN here flags ops before
-        # supervisors see ghost-perfect tiles.
+        # Loud-warn on unreachable data_import so supervisors don't see ghost-perfect tiles.
         _probe_data_import(settings, _logger)
 
-        # Auto-visit reconciler -- mirrors live YaumiLive invoices into
-        # yf_supervision_* every ``auto_visit_poll_seconds``. Browser-
-        # independent: works with or without the supervisor's UI open.
+        # Auto-visit reconciler: mirrors YaumiLive into yf_supervision_* independent of the browser.
+        # Leader election: under ``workers>1`` only one worker runs the reconciler;
+        # followers boot the API but skip the scheduler (no concurrent SERIALIZABLE writes).
         scheduler = None
         if settings.auto_visit_enabled:
-            from sales_supervision.api.dependencies import get_auto_visit_service
-            from sales_supervision.services.auto_visit_scheduler import AutoVisitScheduler
-            scheduler = AutoVisitScheduler(
-                get_auto_visit_service(), settings=settings,
-            )
-            scheduler.start()
+            from common.leader_election import try_acquire_leader_lock
+            if try_acquire_leader_lock(settings.scheduler_lock_path):
+                from sales_supervision.api.dependencies import get_auto_visit_service
+                from sales_supervision.services.auto_visit_scheduler import AutoVisitScheduler
+                scheduler = AutoVisitScheduler(
+                    get_auto_visit_service(), settings=settings,
+                )
+                scheduler.start()
+            else:
+                _logger.info("auto-visit reconciler skipped: another worker holds the leader lease")
+
+        # Saved-visits warm-up on a daemon thread; first /session/saved hit returns ~1ms instead of 1-3s.
+        if settings.saved_visits_warmup_enabled:
+
+            def _warm_saved_visits() -> None:
+                try:
+                    from sales_supervision.api.dependencies import (
+                        get_auto_visit_service,
+                        get_db_saver,
+                    )
+                    db_saver = get_db_saver()
+                    if not db_saver.available:
+                        return
+                    routes = []
+                    avs = get_auto_visit_service()
+                    if avs is not None:
+                        routes = list(avs._configured_routes())
+                    if not routes:
+                        return
+                    today = datetime.now(
+                        tz=ZoneInfo(settings.auto_visit_timezone),
+                    ).strftime("%Y-%m-%d")
+                    t0 = time.perf_counter()
+                    warmed = 0
+                    for route in routes:
+                        try:
+                            db_saver.load_session_visits(
+                                route, today,
+                                include_redistributions=False,
+                            )
+                            warmed += 1
+                        except Exception:
+                            continue
+                    _logger.info(
+                        "saved_visits_warmup_complete routes=%d/%d "
+                        "duration_ms=%.1f ttl_seconds=%.1f",
+                        warmed, len(routes),
+                        (time.perf_counter() - t0) * 1000.0,
+                        settings.effective_saved_visits_cache_ttl,
+                    )
+                except Exception as exc:  # pragma: no cover -- defensive
+                    _logger.warning(
+                        "saved_visits_warmup_skipped error=%s type=%s",
+                        exc, type(exc).__name__,
+                    )
+
+            threading.Thread(
+                target=_warm_saved_visits,
+                name="ss-saved-warmup",
+                daemon=True,
+            ).start()
 
         try:
             yield

@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import Modal from "@/components/ui/Modal";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
 import Badge from "@/components/ui/Badge";
 import { useAnalyzeRoute } from "@/hooks/useAnalytics";
-import { supervisionApi } from "@/api/supervision";
 import AnalysisList from "./AnalysisList";
 
 export interface RouteAnalysisContext {
@@ -16,9 +15,7 @@ export interface RouteAnalysisContext {
   totalActual: number;
   totalRecommended: number;
   actualCustomerCodes: string[];
-  // Previously-saved structured route review (JSON string). When
-  // supplied, the modal renders this directly instead of re-calling
-  // the LLM.
+  // Saved route review JSON; when present, modal skips a fresh LLM call.
   initialAnalysis?: string | null;
 }
 
@@ -31,8 +28,7 @@ interface Props {
 export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
   const { execute, result, loading, error } = useAnalyzeRoute();
 
-  // Hydrate from a saved JSON payload when present so re-opening the
-  // modal shows the same review without a second LLM call.
+  // Hydrate from saved JSON so re-open skips a fresh LLM call.
   const hydrated = useMemo<Record<string, unknown> | null>(() => {
     if (!ctx?.initialAnalysis) return null;
     try {
@@ -42,8 +38,6 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
       return null;
     }
   }, [ctx?.initialAnalysis]);
-
-  const [persistedKey, setPersistedKey] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open || !ctx) return;
@@ -60,22 +54,9 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, ctx?.routeCode, ctx?.date, hydrated]);
 
-  // Persist a freshly-generated review once per session so a re-open
-  // hydrates from saved storage instead of re-calling the LLM.
-  //
-  // Gated on ``success: true`` so degraded payloads (rate limit, empty
-  // input, retries exhausted) never freeze the DB column with a stale
-  // placeholder.
-  useEffect(() => {
-    if (!open || !ctx || !result?.data || !result.success) return;
-    const key = ctx.sessionId;
-    if (!key || persistedKey === key) return;
-    void supervisionApi
-      .saveRouteAnalysis(ctx.sessionId, JSON.stringify(result.data))
-      .catch(() => {/* fire-and-forget; logged server-side */});
-    setPersistedKey(key);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ctx?.sessionId, result?.data, result?.success]);
+  // No server persistence -- analyses are generated on-demand each time
+  // the modal opens. The previous saveRouteAnalysis call wrote to a column
+  // we no longer maintain.
 
   const a = (hydrated ?? result?.data ?? {}) as Record<string, unknown>;
   const list = (key: string): string[] => {

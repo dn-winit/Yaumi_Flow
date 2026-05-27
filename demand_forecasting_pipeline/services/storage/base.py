@@ -1,7 +1,4 @@
-"""
-Abstract storage interface.
-Both file and database backends implement this contract.
-"""
+"""Abstract storage interface; file and DB backends implement this contract."""
 
 from __future__ import annotations
 
@@ -22,11 +19,7 @@ ARTIFACT_KEYS = (
     "pair_classes",
     "pair_explainability",
     "data_quality",
-    # Auxiliary artifacts -- written by the pipelines, consumed by
-    # inference / API. Registering them here lets them flow through the
-    # same atomic write/read path, surface in /health/ready artifact
-    # checks, and be cleaned up by ``_reset_artifact_dirs`` like every
-    # other tracked artifact.
+    # Auxiliary artifacts; registering here routes them through atomic write/read + health.
     "outlier_bounds",
     "conformal_offsets",
     "pair_coverage",
@@ -79,13 +72,7 @@ class StorageBackend(ABC):
 
     @abstractmethod
     def source_path(self, key: str) -> Optional[Path]:
-        """Return the on-disk path the read path will consult for ``key``.
-
-        Used by callers that want to mtime-key an in-memory cache on top
-        of the storage layer: a single ``stat()`` on the returned path
-        is the freshness signal, with no need to re-read the underlying
-        file when nothing has changed on disk. Returns ``None`` when the
-        key has no path representation (e.g. an unknown key)."""
+        """On-disk path for ``key`` so callers can mtime-cache; None for unknown keys."""
 
     # ------------------------------------------------------------------
     # Name

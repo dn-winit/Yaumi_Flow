@@ -1,35 +1,10 @@
-"""
-Adaptive feedback loop (Sprint-4: closed-loop attribution).
+"""Closed-loop feedback attribution.
 
-The loop now has proper attribution. Instead of applying a single route-level
-multiplier to every source (Sprint-3), we:
-
-    1. Read all stored recommendation CSVs in the rolling window
-       (``SafetyClamps.feedback_window_days``) -- every row carries the
-       generator that produced it (``Source``) thanks to the Sprint-1 CSV
-       schema persistence.
-    2. Read every visit landed in the supervision tables
-       (``yf_supervision_customers`` + ``yf_supervision_items``) within
-       the same window. The DB is the single source of truth for actuals
-       -- supersedes the legacy ``session_*.json`` files (removed).
-    3. Inner-join on ``(route_code, date, customer_code, item_code)``. Rows
-       where the customer wasn't visited are dropped (a no-show is a routing
-       problem, not a recommendation failure).
-    4. Detect adversarial supervisor sessions (reject-rate > Nsigma from the
-       route's session-level distribution) and exclude them.
-    5. For each (route, source) pair compute a **shrinkage estimator**
-       (Empirical-Bayes flavour): the route's hit rate is blended with the
-       corpus hit rate for that source using prior strength k derived from
-       the corpus median sample count. Cold start -> multiplier = 1.0;
-       strong signal -> multiplier mostly reflects route reality.
-    6. EMA-smooth against the previous run's multipliers persisted in
-       ``data/feedback_multipliers.json`` (thread-safe, atomic write).
-
-All thresholds (k divisor, EMA alpha, multiplier range, adversarial zscore,
-window bounds, bad-source floor) live in ``SafetyClamps``.
-
-Cold-start safe: the file may not exist and every route may have zero
-attributed samples -- everything collapses to multiplier 1.0, confidence 0.0.
+Per-(route, source) multipliers computed from stored rec CSVs joined to
+supervision visits over the rolling ``feedback_window_days``. Adversarial
+sessions (reject-rate > Nsigma) are excluded; EB shrinkage blends route
+hit rate with corpus baseline; EMA-smoothed against persisted run state.
+Cold-start safe (collapses to multiplier 1.0, confidence 0.0).
 """
 
 from __future__ import annotations
@@ -53,16 +28,11 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-# All sources we emit multipliers for. Any extras seen in data are carried
-# transparently, but these three are always present (filled with 1.0 when
-# no signal exists) so callers needn't special-case missing keys.
+# Sources always present in the multipliers map (filled with 1.0 when no signal).
 KNOWN_SOURCES = ("history", "peer", "basket", "reactivation", "seed")
 
 
-# ===========================================================================
-# Persistence of per-(route, source) multipliers across runs
-# ===========================================================================
-
+# Persistence of per-(route, source) multipliers across runs.
 _PERSIST_LOCK = threading.Lock()
 
 
@@ -73,11 +43,8 @@ def _persist_path(shared_data_dir: str, clamps: SafetyClamps) -> Path:
 def load_persisted_multipliers(
     shared_data_dir: str, clamps: SafetyClamps,
 ) -> Dict[str, Dict[str, Dict[str, float]]]:
-    """Load ``feedback_multipliers.json``.
-
-    Schema: ``{route: {source: {"multiplier": float, "n": int, "confidence": float}}}``.
-    Missing/unreadable file -> empty dict (cold start).
-    """
+    """Load ``feedback_multipliers.json`` ({route: {source: {multiplier,
+    n, confidence}}}); missing/unreadable -> empty dict (cold start)."""
     path = _persist_path(shared_data_dir, clamps)
     if not path.exists():
         return {}
@@ -162,13 +129,8 @@ def _load_recs_in_window(
 def _load_sessions_in_window(
     db_loader: Optional["SessionDbLoader"], window_days: int, today: datetime,
 ) -> pd.DataFrame:
-    """Read every supervision visit whose date is within the window into
-    a long frame of item-level outcomes, sourced from the supervision
-    tables (single source of truth for actuals).
-
-    Cold-start / unreachable DB: returns an empty frame with the expected
-    columns; the rest of the pipeline collapses to multiplier=1.0.
-    """
+    """Per-item visit outcomes from supervision tables (DB-canonical).
+    Unreachable DB / cold start -> empty frame with expected columns."""
     cols = [
         "route_code", "date", "session_id",
         "customer_code", "item_code",
@@ -191,14 +153,9 @@ def _load_sessions_in_window(
 def _build_attribution(
     recs: pd.DataFrame, sessions: pd.DataFrame,
 ) -> pd.DataFrame:
-    """Inner-join stored recs with session outcomes so every row carries:
-    ``recommended_qty``, ``actual_qty`` (0 if not sold), ``source``,
-    ``confidence``, ``was_visited``.
-
-    Edge case (Sprint-4): item-code mismatch from type/whitespace quirks.
-    ``.astype(str).str.strip()`` on both sides before the join -- relying on
-    type discipline upstream is fragile.
-    """
+    """Inner-join stored recs with session outcomes; emits per-row
+    recommended_qty / actual_qty / source / confidence / was_visited.
+    Both sides stringify+strip join keys for robustness."""
     if recs.empty:
         return pd.DataFrame()
 
@@ -222,18 +179,14 @@ def _build_attribution(
     r = r[keep_cols].copy()
     for k in ("route_code", "date", "customer_code", "item_code", "source"):
         r[k] = r[k].astype(str).str.strip()
-    # Ceil to next whole unit -- match the quantity contract used end-to-
-    # end (engine outputs, van_load, supervision). ``.astype(int)`` alone
-    # would truncate, drifting feedback attribution from what the rep
-    # actually saw on the truck.
+    # Ceil to whole units to match the engine/van_load/supervision contract.
     r["recommended_qty"] = np.ceil(
         pd.to_numeric(r["recommended_qty"], errors="coerce").fillna(0)
     ).astype(int)
     r["confidence"] = pd.to_numeric(r["confidence"], errors="coerce").fillna(0.0)
 
     if sessions.empty:
-        # Brand-new / dormant routes: no sessions at all. Return an empty
-        # attribution frame; downstream code treats this as cold-start.
+        # Cold-start route: no sessions yet.
         return pd.DataFrame()
 
     s = sessions.copy()
@@ -249,9 +202,10 @@ def _build_attribution(
         .rename(columns={"visited": "was_visited"})
     )
 
-    # Per-(route, date, customer, item) actuals -- sum in case an item
-    # appears twice in the same session's items list.
-    items = s[s["visited"] & (s["item_code"] != "")].groupby(
+    # Per-(route,date,customer,item) actuals; sum across dup-item rows.
+    # ``visited`` may arrive as int 0/1 from the DB; coerce to bool before the
+    # boolean ``&`` so a mixed-dtype mask doesn't silently zero the filter.
+    items = s[s["visited"].astype(bool) & (s["item_code"] != "")].groupby(
         ["route_code", "date", "customer_code", "item_code"], as_index=False
     ).agg(actual_qty=("actual_qty", "sum"),
           was_sold=("was_sold", "max"),
@@ -284,21 +238,13 @@ def _build_attribution(
     return attr
 
 
-# ===========================================================================
-# Adversarial-session defence
-# ===========================================================================
+# Adversarial-session defence.
 
 def _filter_adversarial_sessions(
     attr: pd.DataFrame, clamps: SafetyClamps,
 ) -> pd.DataFrame:
-    """Drop sessions whose per-route reject-rate is > Nsigma from the route's
-    session-level distribution. Pure data-driven -- no hardcoded supervisor
-    blacklist.
-
-    Reject-rate per session = 1 - (items bought / items recommended) in that
-    session. A route with only one session has nothing to compare against and
-    is left alone.
-    """
+    """Drop sessions whose reject-rate > Nsigma from the route's distribution.
+    Routes with <3 sessions are left alone (no baseline to compare to)."""
     if attr.empty:
         return attr
     sess = attr.groupby(["route_code", "session_id"]).agg(
@@ -333,9 +279,7 @@ def _filter_adversarial_sessions(
     return merged[merged["_drop"].isna()].drop(columns=["_drop"])
 
 
-# ===========================================================================
-# Shrinkage estimator
-# ===========================================================================
+# Empirical-Bayes shrinkage estimator.
 
 def _shrinkage_multipliers(
     attr: pd.DataFrame,
@@ -343,12 +287,9 @@ def _shrinkage_multipliers(
     clamps: SafetyClamps,
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]],
            Dict[str, Dict[str, Dict[str, float]]]]:
-    """Return (adjustments, confidence, persist_payload).
-
-    * ``adjustments[route][source]`` -> float in [mult_min, mult_max].
-    * ``confidence[route][source]``  -> float in [0, 1] (min(1, n/k)).
-    * ``persist_payload``            -> JSON-serialisable dict for the file.
-    """
+    """Return ``(adjustments, confidence, persist_payload)``: multipliers
+    clamped to [mult_min, mult_max]; confidence = min(1, n/k); payload
+    is the JSON-serialisable persistence dict."""
     alpha = float(clamps.feedback_ema_alpha)
     mult_lo = float(clamps.feedback_multiplier_min)
     mult_hi = float(clamps.feedback_multiplier_max)
@@ -357,9 +298,7 @@ def _shrinkage_multipliers(
     confidence: Dict[str, Dict[str, float]] = {}
     payload: Dict[str, Dict[str, Dict[str, float]]] = {}
 
-    # Always carry previous entries forward for routes we see no new data
-    # on (so a quiet week doesn't destroy the prior signal). They decay
-    # toward 1.0 via EMA ONLY when a new observation lands.
+    # Carry previous entries forward; EMA decay only fires on new observations.
     for route, per_source in previous.items():
         adjustments.setdefault(route, {})
         confidence.setdefault(route, {})
@@ -374,9 +313,7 @@ def _shrinkage_multipliers(
             }
 
     if attr.empty:
-        # Cold start (edge case: brand-new route / dormant-60-days route):
-        # no attribution -> every source already defaults to multiplier=1.0
-        # upstream. We still return the persisted payload unchanged.
+        # Cold start: persist unchanged; defaults to 1.0 upstream.
         return adjustments, confidence, payload
 
     # Corpus-wide per-source stats (hit rate + qty acc + sample size).
@@ -421,7 +358,7 @@ def _shrinkage_multipliers(
         route_hit = float(row["hit_rate"])
         corp_hr = corpus_hit.get(src, route_hit)
         if corp_hr <= 0:
-            # Degenerate corpus -- can't compute a relative multiplier.
+            # Degenerate corpus -- no relative multiplier possible.
             raw_mult = 1.0
         else:
             shrunk = (n * route_hit + k * corp_hr) / (n + k)
@@ -445,9 +382,7 @@ def _shrinkage_multipliers(
     return adjustments, confidence, payload
 
 
-# ===========================================================================
-# Public entrypoint
-# ===========================================================================
+# Public entrypoint.
 
 def compute_feedback_adjustments(
     *,
@@ -457,25 +392,11 @@ def compute_feedback_adjustments(
     today: Optional[datetime] = None,
 ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
     """Full pipeline: read recs + supervision visits, attribute, filter
-    adversarial, compute shrinkage multipliers, EMA-smooth against previous
-    run, persist.
-
-    The persisted multipliers JSON lives alongside the per-route rec
-    snapshots under ``file_storage_dir`` -- it's recommended_order working
-    state, not part of the DB-mirror ``imports/`` tree.
-
-    Returns:
-        ``(adjustments, confidence)`` -- both keyed by route then source.
-        Empty dicts on cold start. Safe to call with no visits / no recs.
-
-    Honours ``SafetyClamps.feedback_enabled`` (caller usually checks too).
-    Window is clamped to [feedback_window_min_days, feedback_window_max_days].
+    adversarial, shrinkage-compute multipliers, EMA-smooth, persist.
+    Returns ``(adjustments, confidence)`` keyed [route][source]; empty on
+    cold start.
     """
-    # Naive UTC by design: callers compare ``today_dt`` against rec
-    # ``generated_at`` timestamps that are also naive UTC (see
-    # metrics.py). Keeping both sides naive avoids a "can't compare
-    # aware to naive" TypeError; switching to aware here would
-    # cascade through every downstream date-math site.
+    # Naive UTC: matches the timestamps callers compare against.
     today_dt = today or datetime.now(timezone.utc).replace(tzinfo=None)
     window = max(
         clamps.feedback_window_min_days,
@@ -507,9 +428,7 @@ def compute_feedback_adjustments(
     return adjustments, confidence
 
 
-# ===========================================================================
-# Score adjustment (applied at merge time in the engine)
-# ===========================================================================
+# Score adjustment (applied at merge time in the engine).
 
 def apply_adjustments_to_candidates(
     candidates: List[Any],
@@ -517,18 +436,11 @@ def apply_adjustments_to_candidates(
     *,
     confidence: Optional[Dict[str, float]] = None,
 ) -> List[Any]:
-    """Multiply each candidate's ``priority_score`` by its source multiplier.
-
-    When the multiplier != 1.0 we also append a ``feedback_adjusted`` signal
-    to the candidate's explanation (the plain-English string lives in
-    ``core/explain.py`` -- no string duplication here).
-
-    Mutates the Candidate objects in place and returns them for chaining.
-    """
+    """Multiply each candidate's ``priority_score`` by its source multiplier
+    and append a ``feedback_adjusted`` explanation signal. Mutates in place."""
     if not adjustments:
         return candidates
-    # Local import avoids a circular dep at module load (explain <- generators
-    # <- calibration -> feedback).
+    # Local import: circular with explain <- generators <- calibration.
     from recommended_order.core.explain import (
         KIND_FEEDBACK_ADJUSTED, Signal, detail_feedback_adjusted,
     )

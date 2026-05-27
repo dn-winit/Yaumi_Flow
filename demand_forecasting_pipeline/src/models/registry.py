@@ -1,7 +1,7 @@
 from .naive import NaiveForecaster
 from .moving_average import MovingAverageForecaster
 from .croston import CrostonForecaster, CrostonSBAForecaster
-from .ets import ETSForecaster
+from .ets import ETSForecaster, _HAS_SM
 from .linear import LinearForecaster
 from .random_forest import RandomForestForecaster
 from .gradient_boosting import GradientBoostingForecaster
@@ -26,11 +26,24 @@ REGISTRY = {
 }
 
 
+# Models whose import is wrapped in try/except inside the model module
+# (statsmodels for ETS, lightgbm for LightGBM, xgboost for XGBoost).
+# is_available must consult the matching availability flag so the
+# pipeline rejects an unavailable backend at config-load time rather
+# than raising mid-pipeline. sklearn-backed models (Linear, RF, GB,
+# TwoStage) import unconditionally and would fail at registry import
+# time if sklearn were missing -- that's already config-load.
+_AVAILABILITY: dict[str, bool] = {
+    "ets":               _HAS_SM,
+    "lightgbm":          _HAS_LGB,
+    "lightgbm_quantile": _HAS_LGB,
+    "xgboost":           _HAS_XGB,
+}
+
+
 def is_available(name):
-    if name in ("lightgbm", "lightgbm_quantile"):
-        return _HAS_LGB
-    if name == "xgboost":
-        return _HAS_XGB
+    if name in _AVAILABILITY:
+        return _AVAILABILITY[name]
     return name in REGISTRY
 
 

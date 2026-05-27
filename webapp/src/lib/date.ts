@@ -1,11 +1,4 @@
-/**
- * Date helpers -- always operate in the user's LOCAL timezone, never UTC.
- *
- * The whole UI displays dates as `dd-mm-yyyy`, but every transport value
- * (URL params, request bodies, React Query keys, backend responses) stays
- * in `yyyy-mm-dd`. These helpers are the only conversion surface, so a
- * future format change means editing one file.
- */
+/** Local-timezone date helpers. UI = dd-mm-yyyy; transport = yyyy-mm-dd. Single conversion surface. */
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const DMY_DATE_RE = /^(\d{1,2})[-/.](\d{1,2})[-/.](\d{4})$/;
@@ -25,11 +18,7 @@ export function todayIso(): string {
   return toLocalIsoDate();
 }
 
-/**
- * Whole calendar days elapsed since the given ISO date / datetime,
- * interpreted in local time. Returns ``null`` for unparseable input.
- * Single source of truth for "X days ago" calculations across pages.
- */
+/** Local-time calendar days elapsed; null for unparseable input. */
 export function daysSince(value: unknown): number | null {
   if (value == null || value === "") return null;
   const dt = value instanceof Date ? value : new Date(String(value));
@@ -48,11 +37,7 @@ export function addDays(dateIso: string, delta: number): string {
   return toLocalIsoDate(dt);
 }
 
-/**
- * Inclusive (start, end) date range ending today, derived from a calendar-day
- * count. Shared helper so any drawer that needs an "X days back through today"
- * window stops re-deriving it (and stops drifting when the math changes).
- */
+/** Inclusive (start, end) window ending today from a day-count; shared so math doesn't drift. */
 export function trailingWindow(days: number, today: string = todayIso()): {
   start_date: string;
   end_date: string;
@@ -63,15 +48,7 @@ export function trailingWindow(days: number, today: string = todayIso()): {
   };
 }
 
-/**
- * Default ``ReportingPeriod`` for any page that mounts without a user
- * selection: trailing 30 calendar days ending today.
- *
- * Pages that need a different default (e.g. AccuracyDrawer grading past
- * performance anchors on ``lastActiveDate`` from /eda/last-active-date,
- * not today) compute their own seed and pass it into ``useState``; this
- * helper is the floor everyone else can lean on.
- */
+/** Default ReportingPeriod: trailing 30 days ending today. */
 export function defaultReportingPeriod(today: string = todayIso()): {
   start_date: string;
   end_date: string;
@@ -79,11 +56,7 @@ export function defaultReportingPeriod(today: string = todayIso()): {
   return trailingWindow(30, today);
 }
 
-/**
- * Coerce any value the backend or a Date object may hand us into a
- * canonical `YYYY-MM-DD` string. Returns null for nullish/invalid input.
- * Accepts ISO date, ISO datetime ("...T..."), `Date`, or epoch number.
- */
+/** Coerce any input (ISO date/datetime, Date, epoch) to YYYY-MM-DD; null on invalid. */
 function toIsoDate(value: unknown): string | null {
   if (value == null || value === "") return null;
   if (value instanceof Date) {
@@ -107,32 +80,35 @@ export function isoToDmy(iso: string): string {
   return `${d}-${m}-${y}`;
 }
 
-/**
- * Display-format a value as `dd-mm-yyyy`. Accepts ISO date, ISO datetime,
- * `Date`, or epoch number. Returns an em dash for nullish or unparseable
- * input so the UI never renders "null"/"undefined"/"Invalid Date".
- */
+/** Format anything as dd-mm-yyyy; em-dash on null/invalid. */
 export function fmtDate(value: unknown): string {
   const iso = toIsoDate(value);
   return iso ? isoToDmy(iso) : MISSING;
 }
 
-/**
- * Display-format an ISO datetime as `dd-mm-yyyy HH:mm` in local time.
- * Used for pipeline timestamps and "last refreshed" labels.
- */
+/** Format ISO datetime as dd-mm-yyyy HH:mm in server TZ so audit ts match host logs. */
+const DISPLAY_TZ = "Asia/Kolkata";  // matches backend log_timezone default
+const DT_FORMATTER = new Intl.DateTimeFormat("en-GB", {
+  timeZone: DISPLAY_TZ,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+  hour: "2-digit",
+  minute: "2-digit",
+  hour12: false,
+});
+
 export function fmtDateTime(value: unknown): string {
   if (value == null || value === "") return MISSING;
   const dt = value instanceof Date ? value : new Date(value as string | number);
   if (Number.isNaN(dt.getTime())) return MISSING;
-  return `${fmtDate(dt)} ${pad2(dt.getHours())}:${pad2(dt.getMinutes())}`;
+  // Normalise en-GB "/" -> "-" to match the rest of the UI.
+  const parts = DT_FORMATTER.formatToParts(dt);
+  const get = (t: string) => parts.find((p) => p.type === t)?.value ?? "";
+  return `${get("day")}-${get("month")}-${get("year")} ${get("hour")}:${get("minute")}`;
 }
 
-/**
- * Parse a user-typed `dd-mm-yyyy` (also accepts `/` and `.` separators)
- * into canonical ISO `YYYY-MM-DD`. Returns null on invalid input so the
- * caller can revert / show an error.
- */
+/** Parse dd-mm-yyyy (and / or . separators) to YYYY-MM-DD; null on invalid. */
 export function parseDmy(input: string): string | null {
   const m = input.trim().match(DMY_DATE_RE);
   if (!m) return null;

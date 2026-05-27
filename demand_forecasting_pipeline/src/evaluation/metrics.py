@@ -153,6 +153,107 @@ def wape(y_true: np.ndarray, y_pred: np.ndarray, eps: float = _EPS) -> float | N
     return float(np.sum(np.abs(y_true[mask] - y_pred[mask])) / scored * 100.0)
 
 
+def mase(
+    y_true: np.ndarray,
+    y_pred: np.ndarray,
+    *,
+    y_train: Optional[np.ndarray] = None,
+    seasonal_period: int = 1,
+    eps: float = _EPS,
+) -> float | None:
+    """Mean Absolute Scaled Error (Hyndman & Koehler 2006).
+
+    Scale-free metric for time-series forecasts: the forecast's MAE is
+    divided by the MAE of the in-sample naive forecast at the given
+    seasonal period (1 = pure-naive, 7 = day-of-week naive, etc.).
+
+    MASE < 1  -> the model beats the naive baseline.
+    MASE = 1  -> the model is no better than naive.
+    MASE > 1  -> the model is worse than naive.
+
+    Why MASE matters here
+    ---------------------
+    For intermittent / lumpy demand classes (the SBC quadrants that
+    dominate FMCG sparse-SKU panels), MAE and WAPE both have known
+    pathologies: WAPE excludes zero-actual rows (the typical case),
+    MAE is not scale-free across SKUs of different volumes. MASE is
+    the canonical scale-free metric in the intermittent-demand
+    literature (Kourentzes 2014, Syntetos-Boylan benchmarks) and is
+    what an MNC ML platform peer reviewer expects to see for any
+    demand-forecasting system.
+
+    Inputs
+    ------
+    ``y_train`` -- in-sample (training-window) actuals used to compute
+    the naive-forecast denominator. When ``None``, the denominator is
+    computed from ``y_true`` itself (acceptable when y_true is long
+    enough; the standard MASE definition uses the training window).
+    ``seasonal_period=1`` is the right default for daily FMCG demand
+    where the dominant seasonality is captured by other features
+    (lag_7, day_of_week sin/cos). For weekly-seasonal series at daily
+    grain, callers can pass 7.
+
+    Returns ``None`` when the naive-forecast denominator is zero (e.g.,
+    a flat all-zero training window) -- in that case MASE is undefined
+    and the caller falls back to other metrics.
+    """
+    y_true = np.asarray(y_true, dtype=float)
+    y_pred = np.asarray(y_pred, dtype=float)
+    if y_true.size == 0:
+        return None
+    # Naive forecast denominator. Uses ``y_train`` if provided (the
+    # textbook MASE), otherwise ``y_true`` (acceptable substitute when
+    # the training history isn't available to the metric call site).
+    denom_series = np.asarray(
+        y_train if y_train is not None else y_true, dtype=float,
+    )
+    p = max(1, int(seasonal_period))
+    if denom_series.size <= p:
+        # Not enough history for a seasonal-naive baseline; the metric
+        # is mathematically undefined.
+        return None
+    naive_errors = np.abs(denom_series[p:] - denom_series[:-p])
+    denom = float(np.mean(naive_errors))
+    if denom < eps:
+        # Flat denominator series -- MASE is undefined. Don't divide.
+        return None
+    return float(np.mean(np.abs(y_true - y_pred)) / denom)
+
+
+def resolve_class_array(
+    df: "pd.DataFrame",
+    *,
+    column: str = "class",
+    fallback_column: str = "demand_class",
+) -> Optional[np.ndarray]:
+    """Return the per-row class array used by ``composite_summary`` or
+    ``None`` if the dataframe carries no class column.
+
+    The same coercion pattern (``df[col].astype(str).to_numpy()``) was
+    inlined at four call sites (training pipeline, accuracy_service,
+    forecast_kpi, drift detector). Centralising the lookup here:
+
+      * single owner of the column-name fallback (some artifacts use
+        ``class``, some DB-side rows use ``demand_class``),
+      * single owner of the str-coercion (avoids a NaN-in-class row
+        emitting ``"nan"`` vs ``None`` inconsistently across surfaces),
+      * makes composite_summary calls one line shorter at every site.
+
+    Returns ``None`` (not an empty array) when neither column exists so
+    composite_summary falls through to its DEFAULT_TOLERANCE path -- the
+    same behaviour every caller previously implemented inline.
+    """
+    # Lazy local import: this module is otherwise pandas-free, and
+    # importing pandas at module-load time would slow `import metrics`
+    # on cold paths (Prometheus collectors, CLI scoring tools).
+    import pandas as pd  # noqa: PLC0415  (intentional lazy import)
+
+    for col in (column, fallback_column):
+        if col and col in df.columns:
+            return df[col].astype(str).to_numpy()
+    return None
+
+
 def composite_summary(
     actual: np.ndarray,
     predicted: np.ndarray,
@@ -249,6 +350,11 @@ _FUNCS = {
     "smape": smape,
     "bias":  bias,
     "wape":  wape,
+    # MASE is callable from compute_all with the default
+    # ``seasonal_period=1`` and ``y_train=None`` (uses y_true as the
+    # denominator series). Callers who want a textbook MASE pass the
+    # training-window actuals via ``compute_all_with_train`` below.
+    "mase":  mase,
 }
 
 

@@ -1,6 +1,4 @@
-"""
-Van load constraint allocator -- priority-first allocation.
-"""
+"""Van load constraint allocator (priority-first)."""
 
 from __future__ import annotations
 
@@ -12,11 +10,8 @@ logger = logging.getLogger(__name__)
 
 
 def apply_van_load_constraints(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Allocate van load to recommendations by priority (highest first).
-    When an item's total recommended qty exceeds its van load,
-    high-priority customers get full qty first; lower-priority get remainder.
-    """
+    """Allocate van load to recommendations highest-priority-first; lower
+    priorities get the remainder when total demand exceeds van load."""
     if df.empty:
         return df
 

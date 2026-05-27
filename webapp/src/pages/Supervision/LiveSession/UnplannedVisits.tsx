@@ -9,29 +9,17 @@ import { useUnplannedVisits } from "@/hooks/useSupervision";
 import type { UnplannedVisitor } from "@/types/supervision";
 import RedistributionSection from "./RedistributionSection";
 
-/**
- * Read-only list of customers who invoiced on the session's route/date but
- * weren't on the journey plan. Mirrors the planned-tab tile + drill-in
- * pattern so both halves of the live session feel of-a-piece. Data is
- * polled via React Query -- see ``useUnplannedVisits``.
- */
+/** Read-only walk-in customers for the session route/date; polled via useUnplannedVisits. */
 export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
   const { data, loading, error, refetch, updatedAt } = useUnplannedVisits(sessionId);
   const [selectedCode, setSelectedCode] = useState<string | null>(null);
 
   const customers: UnplannedVisitor[] = data?.customers ?? [];
 
-  // Server-side error: the wire payload arrived but the supervision
-  // service couldn't enumerate drop-ins (bad sessionId, transient DB
-  // hiccup, etc.). The contract guarantees ``error`` is a non-empty
-  // string in that case and ``customers`` is empty, so we surface the
-  // message visibly rather than rendering a silent empty grid.
+  // success:false -> surface error instead of a silent empty grid.
   const serverError = data && data.success === false ? (data.error ?? "Walk-in visits unavailable.") : null;
 
-  // Tiles for the grid. ``unique_skus``, ``total_qty`` and
-  // ``live_visited`` are all server-supplied; the client just maps
-  // wire field names onto component prop names (a presentation
-  // adapter, no calculation).
+  // Pure presentation adapter; all numbers are server-supplied.
   const tiles: CustomerStat[] = customers.map((c) => ({
     customerCode: c.customer_code,
     customerName: c.customer_name ?? "",

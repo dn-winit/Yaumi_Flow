@@ -1,10 +1,22 @@
 {
   "enabled": false,
   "frequency_days": 14,
-  "last_auto_retrain": null,
+  "last_auto_retrain": "2026-05-25T10:11:43.602173+00:00",
   "next_scheduled": null,
   "auto_inference_after_train": true,
-  "history": [],
+  "history": [
+    {
+      "date": "2026-05-25T10:11:43.602173+00:00",
+      "trigger": "manual",
+      "accuracy_before": null,
+      "accuracy_after": 68.28,
+      "duration_seconds": 8336.1,
+      "status": "success",
+      "version_id": "v_2026-05-25T12-30-40-921Z",
+      "promotion_decision": "cold_start",
+      "promotion_reason": "no comparable champion score on record; promoting unconditionally"
+    }
+  ],
   "baseline_accuracy_pct": 72.65,
   "baseline_source": "initialized",
   "baseline_set_at": "2026-05-07T00:02:26.946772+00:00"

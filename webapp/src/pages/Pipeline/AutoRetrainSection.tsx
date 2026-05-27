@@ -13,6 +13,7 @@ import InfoBubble from "@/components/ui/InfoBubble";
 import SectionLabel from "@/components/ui/SectionLabel";
 import ForecastAccuracyExplanation from "@/components/ui/ForecastAccuracyExplanation";
 import type { Tone } from "@/lib/colorize";
+import type { RetrainHistoryEntry } from "@/types/forecast";
 
 /* ------------------------------------------------------------------ */
 /*  Toggle switch (pure CSS)                                           */
@@ -60,9 +61,7 @@ function Toggle({
 const FREQ_PRESETS = [7, 14, 21, 30];
 
 function freqOptions(currentDays: number) {
-  // Synthesize an option for the current value when ops sets a custom
-  // frequency outside the presets via env / direct JSON edit -- without
-  // this the Select would lie about the active schedule.
+  // Splice in the current value so an out-of-preset custom frequency renders honestly.
   const days = Array.from(new Set([...FREQ_PRESETS, currentDays])).sort((a, b) => a - b);
   return days.map((d) => ({ value: String(d), label: `Every ${d} days` }));
 }
@@ -77,6 +76,31 @@ function driftLabel(status: string): string {
   if (status === "significant") return "Significant drift";
   if (status === "drifting") return "Drifting";
   return "Stable";
+}
+
+/* Champion-challenger decision badge; em-dash on legacy/pre-gate rows.
+   Hover title carries the WHY (e.g. "regression 1.50pp exceeds tolerance"). */
+function renderDecisionBadge(h: RetrainHistoryEntry) {
+  const decision = h.promotion_decision ?? null;
+  if (h.status !== "success" || decision == null) {
+    return <span className="text-text-tertiary">—</span>;
+  }
+  const tone: Tone =
+    decision === "promote"    ? "success" :
+    decision === "cold_start" ? "info" :
+    decision === "reject"     ? "danger" :
+                                "neutral";
+  const label =
+    decision === "promote"    ? "Promoted" :
+    decision === "cold_start" ? "Cold start" :
+    decision === "reject"     ? "Rejected" :
+                                decision;
+  const title = h.promotion_reason ?? undefined;
+  return (
+    <span title={title}>
+      <Badge tone={tone}>{label}</Badge>
+    </span>
+  );
 }
 
 function timeAgo(iso: string | null): string {
@@ -158,12 +182,7 @@ export default function AutoRetrainSection() {
             )}
           </div>
 
-          {/* Recent vs baseline accuracy. ``recent_accuracy`` and
-              ``baseline_accuracy`` are scored under the same composite
-              function (raw model forecast vs actual) so the delta is
-              honest. ``recent_reconciled_accuracy`` is the operational
-              lens on the same window -- shown beneath as context, not
-              as the headline drift number. */}
+          {/* Recent vs baseline -- both raw forecast vs actual, so the delta is honest. */}
           <div>
             <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
               Recent accuracy
@@ -236,7 +255,8 @@ export default function AutoRetrainSection() {
                     <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Trigger</th>
                     <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Before</th>
                     <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">After</th>
-                    <th className="py-2 text-caption font-semibold text-text-tertiary">Status</th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Status</th>
+                    <th className="py-2 text-caption font-semibold text-text-tertiary">Decision</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -246,10 +266,14 @@ export default function AutoRetrainSection() {
                       <td className="py-2 pr-4 text-text-secondary capitalize">{h.trigger}</td>
                       <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_before)}</td>
                       <td className="py-2 pr-4 text-text-secondary">{fmtPct(h.accuracy_after)}</td>
-                      <td className="py-2">
+                      <td className="py-2 pr-4">
                         <Badge tone={h.status === "success" ? "success" : "danger"}>
                           {h.status === "success" ? "Success" : "Failed"}
                         </Badge>
+                      </td>
+                      <td className="py-2">
+                        {/* Distinguishes promoted vs rejected runs; reason on hover. */}
+                        {renderDecisionBadge(h)}
                       </td>
                     </tr>
                   ))}

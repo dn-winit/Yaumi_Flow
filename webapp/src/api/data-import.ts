@@ -16,8 +16,7 @@ import type { DataSummary } from "@/types/common";
 
 const c = () => getClient("dataImport");
 
-// Build query params from a DashboardFilters object. Empty arrays are
-// dropped so the URL stays clean ("no filter" === absent param).
+// Empty arrays dropped so "no filter" === absent param.
 function filterParams(f?: Partial<DashboardFilters>): Record<string, string[]> {
   const out: Record<string, string[]> = {};
   if (f?.warehouse_codes?.length) out.warehouse_codes = f.warehouse_codes;
@@ -62,9 +61,7 @@ export const dataImportApi = {
   getFilterDimensions: (filters?: Partial<DashboardFilters>) =>
     c()
       .get<FilterDimensions>("/eda/filter-dimensions", {
-        // Pass the full selection vector so the backend can return
-        // ``trimmed_selections`` -- the cleaned-up codes the FilterBar
-        // applies after an upstream change invalidates a downstream pick.
+        // Send full selection so backend can return trimmed_selections for the FilterBar.
         params: filterParams({
           warehouse_codes: filters?.warehouse_codes,
           route_codes: filters?.route_codes,

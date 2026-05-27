@@ -8,11 +8,7 @@ interface DrawerContextBarProps {
   extra?: React.ReactNode;
 }
 
-/**
- * Compact strip shown at the top of analytics drawers. Gives the supervisor a
- * one-line read of what the numbers below are filtered by -- route, item
- * selection, and the time window.
- */
+/** Top-of-drawer strip showing the active route/items/window scope. */
 export default function DrawerContextBar({
   routeCode,
   itemCodes,

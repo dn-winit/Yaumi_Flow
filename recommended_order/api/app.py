@@ -1,10 +1,9 @@
-"""
-FastAPI application factory.
-"""
+"""FastAPI application factory."""
 
 from __future__ import annotations
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -37,9 +36,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             _logger.error("Data load errors: %s", result["errors"])
 
         if settings.scheduler.enabled:
-            from recommended_order.scheduler.jobs import start_scheduler
-            start_scheduler(settings)
-            _logger.info("Scheduler started")
+            # Leader election: under ``workers>1`` only one worker per host
+            # fires the daily generation cron; followers boot the API but
+            # skip the scheduler (no concurrent SERIALIZABLE writes to
+            # ``yf_recommended_orders``).
+            from common.leader_election import try_acquire_leader_lock
+            if try_acquire_leader_lock(settings.scheduler.lock_path):
+                from recommended_order.scheduler.jobs import start_scheduler
+                start_scheduler(settings)
+                _logger.info("Scheduler started")
+            else:
+                _logger.info("recommended_order scheduler skipped: another worker holds the leader lease")
+
+        # Planning warm-up: pay the 10-12s cold reconcile in a daemon
+        # thread so the first /analytics/upcoming hit after restart is
+        # sub-300ms. Best-effort -- failures fall back to lazy cold path.
+        import threading
+
+        def _warm_planning() -> None:
+            try:
+                from recommended_order.api.dependencies import get_planning_service
+                t0 = time.perf_counter()
+                planning = get_planning_service()
+                planning.get_upcoming(days=7, route_code=None)
+                _logger.info(
+                    "planning_warmup_complete duration_ms=%.1f",
+                    (time.perf_counter() - t0) * 1000.0,
+                )
+            except Exception as exc:  # pragma: no cover -- defensive
+                _logger.warning(
+                    "planning_warmup_skipped error=%s type=%s",
+                    str(exc), type(exc).__name__,
+                )
+
+        threading.Thread(
+            target=_warm_planning,
+            name="ro-planning-warmup",
+            daemon=True,
+        ).start()
 
         yield  # app is running
 

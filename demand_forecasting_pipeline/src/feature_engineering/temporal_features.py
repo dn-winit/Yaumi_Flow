@@ -7,13 +7,30 @@ constants from being trained on when the panel is aggregated monthly.
 
 All components are opt-in via ``cfg.temporal.components``. Unknown names are
 skipped silently (caller decides the feature surface).
+
+Train/serve parity for ``periods_since_start``
+----------------------------------------------
+The trend feature is date-anchored at each pair's FIRST observation in
+the training data. If we recompute that anchor from the inference frame
+(which may not extend back to the pair's true origin), every pair
+silently resets its trend to 0 at the start of the inference window --
+a textbook train/serve skew bug. The fix is to persist the per-pair
+origin map at training time (``save_pair_origins``) and load it at
+inference (``load_pair_origins``). Cold-start fallback to inline
+groupby min is kept as a safety net for legacy callers that don't
+pass the artifact, but the production path is artifact-driven.
 """
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+from typing import Optional
+
 import numpy as np
 import pandas as pd
 
+from ..utils.io_utils import save_json
 from ._calendar import (
     is_daily,
     is_daily_or_weekly,
@@ -94,6 +111,80 @@ _COMPONENTS: dict[str, tuple] = {
 }
 
 
+def fit_pair_origins(
+    df: pd.DataFrame, group_keys: list[str], date_col: str,
+) -> pd.DataFrame:
+    """Compute the earliest date per pair. Returned as a DataFrame with
+    columns ``group_keys + ['pair_min_date']`` (date strings). Training
+    persists this so the trend feature stays date-anchored at the same
+    origin even if the inference frame doesn't reach back that far."""
+    if df.empty:
+        return pd.DataFrame(columns=list(group_keys) + ["pair_min_date"])
+    d = pd.to_datetime(df[date_col], errors="coerce")
+    sub = df.assign(_d=d).dropna(subset=["_d"])
+    origins = (
+        sub.groupby(group_keys, sort=False)["_d"].min().reset_index()
+        .rename(columns={"_d": "pair_min_date"})
+    )
+    origins["pair_min_date"] = origins["pair_min_date"].dt.strftime("%Y-%m-%d")
+    return origins
+
+
+def save_pair_origins(
+    path: str | Path, *, origins_df: pd.DataFrame, group_keys: list[str],
+) -> None:
+    """Persist ``origins_df`` to JSON. Atomic write via the shared
+    ``save_json`` helper so a killed training run never leaves
+    inference to read a torn artifact."""
+    p = Path(path)
+    if origins_df is None or origins_df.empty:
+        records: list[dict] = []
+    else:
+        cols = list(group_keys) + ["pair_min_date"]
+        sub = origins_df[cols].copy()
+        for k in group_keys:
+            sub[k] = sub[k].astype(str)
+        sub["pair_min_date"] = sub["pair_min_date"].astype(str)
+        records = sub.to_dict(orient="records")
+    payload = {
+        "schema_version": "1.0",
+        "group_keys": list(group_keys),
+        "origins": records,
+    }
+    save_json(payload, str(p))
+
+
+def load_pair_origins(
+    path: str | Path, *, expected_group_keys: list[str],
+) -> pd.DataFrame:
+    """Read the JSON artifact. Validates the persisted ``group_keys``
+    against the runtime list so a config rename surfaces loudly rather
+    than silently applying the wrong origin map."""
+    p = Path(path)
+    with open(p, "r", encoding="utf-8") as fh:
+        payload = json.load(fh)
+    saved = list(payload.get("group_keys") or [])
+    if saved != list(expected_group_keys):
+        raise ValueError(
+            f"pair_origins artifact group_keys={saved!r} do not match "
+            f"runtime {list(expected_group_keys)!r}; retrain to refresh"
+        )
+    records = payload.get("origins") or []
+    if not records:
+        return pd.DataFrame(columns=list(expected_group_keys) + ["pair_min_date"])
+    df = pd.DataFrame(records)
+    # ``astype("string")`` (pandas StringDtype), not ``astype(str)``
+    # (object/Python str), so the reloaded group_keys match the panel's
+    # dtype pinned to ``string`` via resolve_dtypes. Without this
+    # coercion the join works today via silent pandas coercion but
+    # would break under stricter merge rules.
+    for k in expected_group_keys:
+        df[k] = df[k].astype("string")
+    df["pair_min_date"] = pd.to_datetime(df["pair_min_date"], errors="coerce")
+    df = df.dropna(subset=["pair_min_date"])
+    return df[list(expected_group_keys) + ["pair_min_date"]]
+
+
 def add_temporal_features(
     df: pd.DataFrame,
     date_col: str,
@@ -101,10 +192,18 @@ def add_temporal_features(
     *,
     group_keys: list[str] | None = None,
     granularity: str = "D",
+    pair_origins: Optional[pd.DataFrame] = None,
 ) -> pd.DataFrame:
     """Emit temporal features listed in ``cfg['components']`` that are valid
     at the current granularity. Unknown / out-of-scope components are
-    silently skipped."""
+    silently skipped.
+
+    ``pair_origins`` (optional) is the persisted per-pair origin map
+    loaded from the training artifact. When supplied, the
+    ``periods_since_start`` feature anchors each pair's trend at the
+    persisted date instead of recomputing it from ``df`` -- guarantees
+    train/serve parity even when the inference frame doesn't extend
+    back to the pair's true origin."""
     df = df.copy()
     d = df[date_col]
     components = cfg.get("components", []) or []
@@ -140,15 +239,55 @@ def add_temporal_features(
     # "days since the pair's first observation". The divisor mirrors
     # ``period_offset`` granularity semantics so the feature stays
     # meaningful at any granularity.
+    #
+    # ``pair_origins`` precedence: if the caller supplied a persisted
+    # origin map (production inference path), use it so the trend value
+    # for date D is identical at train and serve time. Fall back to the
+    # inline groupby min ONLY when no map is supplied (training path
+    # itself, or a legacy caller). Pairs absent from the persisted map
+    # also fall back to inline min for that pair -- cold-start safety so
+    # a new pair landed since training doesn't crash the feature build.
     if _TREND_FEATURE in components and group_keys:
         granularity_unit = (granularity or "D").strip().upper()[0]
         period_days_map = {"D": 1, "W": 7, "M": 30, "Q": 90, "Y": 365}
         period_days = period_days_map.get(granularity_unit, 1)
         date_series = pd.to_datetime(df[date_col], errors="coerce")
-        pair_min = (
-            df.assign(_d=date_series)
-            .groupby(group_keys, sort=False)["_d"].transform("min")
-        )
+
+        if pair_origins is not None and not pair_origins.empty:
+            # Persisted-origin path. Merge on group_keys; rows whose
+            # pair is absent from the artifact get NaN, which we then
+            # fill from an inline per-pair min (cold-start fallback).
+            # No dtype coercion here -- the loader path
+            # (``load_pair_origins``) already pins group_keys to pandas
+            # StringDtype, and the panel's group_keys are also string
+            # via ``resolve_dtypes``. Re-coercing with ``astype(str)``
+            # would silently downgrade both sides to object dtype and
+            # break the StringDtype invariant the rest of the pipeline
+            # relies on.
+            origins = pair_origins.copy()
+            origins["pair_min_date"] = pd.to_datetime(
+                origins["pair_min_date"], errors="coerce",
+            )
+            merged = df.merge(
+                origins[group_keys + ["pair_min_date"]],
+                on=group_keys, how="left",
+            )
+            pair_min = merged["pair_min_date"]
+            # Cold-start: pair not in the persisted map. Use the inline
+            # min computed from the current frame for those pairs only.
+            cold = pair_min.isna()
+            if cold.any():
+                inline_min = (
+                    df.assign(_d=date_series)
+                      .groupby(group_keys, sort=False)["_d"].transform("min")
+                )
+                pair_min = pair_min.fillna(inline_min)
+        else:
+            pair_min = (
+                df.assign(_d=date_series)
+                  .groupby(group_keys, sort=False)["_d"].transform("min")
+            )
+
         days_since = (date_series - pair_min).dt.days
         df["periods_since_start"] = (
             (days_since // max(1, period_days)).fillna(0).astype(int)

@@ -87,13 +87,34 @@ class ETSForecaster(StatForecaster):
             return np.full(max(n, 1), fallback, dtype=float)
 
     def _lookup_fit(self, history: np.ndarray):
-        """Locate the pre-fit for this pair. Since ``history_`` is keyed by
-        pair and the base's ``predict`` passes exactly that stored array,
-        identity comparison hits the cache in O(number_of_pairs)."""
+        """Locate the pre-fit for this pair.
+
+        Uses identity (``is``) as the fast path -- the base class today
+        passes the same array object it stored at fit time, so identity
+        matches in O(1) per pair on the happy path. Falls back to
+        content equality (shape + ``np.array_equal``) so any future
+        ``.copy()`` / ``.astype(float)`` upstream doesn't silently break
+        the cache and let every pair fall back to the series mean (which
+        would falsely make the metrics report 'ETS competitive').
+
+        ``equal_nan=True`` is essential -- demand panels frequently
+        carry NaN for leading-edge rows (no prior observation), and
+        ``np.array_equal`` defaults to ``nan != nan`` which would
+        silently miss legitimate matches and degrade ETS to the mean
+        fallback for every pair with any NaN in its history."""
         if not getattr(self, "fit_cache_", None):
             return None
+        # Fast path -- identity match
         for keys, hist in self.history_.items():
             if hist is history:
+                return self.fit_cache_.get(keys)
+        # Slow path -- content match (handles upstream copies); NaN
+        # treated as equal so NaN-bearing histories match.
+        for keys, hist in self.history_.items():
+            if (
+                hist.shape == history.shape
+                and np.array_equal(hist, history, equal_nan=True)
+            ):
                 return self.fit_cache_.get(keys)
         return None
 

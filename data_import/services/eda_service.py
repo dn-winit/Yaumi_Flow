@@ -1,12 +1,8 @@
-"""
-EDA service -- aggregated overview of sales_recent.csv + customer overview from YaumiLive.
-Cached aggregates (5-min TTL) so repeated dashboard hits stay fast.
+"""EDA service -- aggregated sales_recent.csv views + YaumiLive cut-throughs.
 
-Forecast-vs-actual surfaces (forecast-rows, business-kpis) substitute the
-canonical reconciled van load for the raw model output, so every accuracy
-metric the UI shows reflects "did we load the right amount" rather than
-"did the abstract model predict correctly". Baseline / model-quality
-metrics still read raw values from the Pipeline page (different question).
+Forecast-vs-actual surfaces substitute the canonical reconciled van load
+for the raw model output so accuracy metrics reflect "did we load the
+right amount", not "did the abstract model predict correctly".
 """
 
 from __future__ import annotations
@@ -22,6 +18,7 @@ from typing import Any, Dict, List, Optional
 import pandas as pd
 import pyodbc
 
+from common.db_pool import get_pool
 from common.numeric import safe_float, safe_int
 from data_import.config.settings import Settings, get_settings
 
@@ -29,19 +26,14 @@ logger = logging.getLogger(__name__)
 
 
 def _envelope_available(value: Any) -> bool:
-    """Cache-predicate for live cut-through endpoints. Returns True only
-    when the envelope reports ``available: True`` so transient YaumiLive
-    failures (timeouts, connection drops) don't get pinned in the LRU
-    for the full TTL -- subsequent calls retry instead of replaying
-    a stale error."""
+    """Cache-predicate: only ``available: True`` envelopes are cached so
+    transient failures aren't pinned in the LRU for the full TTL."""
     return bool(isinstance(value, dict) and value.get("available"))
 
 
-# Reconciliation: imported once from the canonical helper. Single
-# implementation of "forecast row -> reconciled van load" lives in
-# demand_forecasting_pipeline/services/reconciliation/enrich.py and is
-# shared by every consumer (this service, predictions endpoint, accuracy
-# service, recommended_order). No local plumbing duplication.
+# Canonical "forecast row -> reconciled van load" lives in
+# demand_forecasting_pipeline/services/reconciliation/enrich.py; shared
+# across every consumer to avoid plumbing divergence.
 try:
     from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
 except Exception as _exc:
@@ -56,13 +48,8 @@ _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _validate_period(start_date: str, end_date: str) -> tuple[pd.Timestamp, pd.Timestamp]:
-    """Parse and validate a ``[start_date, end_date]`` reporting period.
-
-    Both bounds must be ISO ``YYYY-MM-DD`` and ``start_date <= end_date``.
-    Raises ``ValueError`` on malformed or inverted ranges -- callers
-    surface this through the existing ``available: False`` envelope so
-    the frontend renders a clean empty-state instead of a crash.
-    """
+    """Parse + validate a ``[start_date, end_date]`` ISO YYYY-MM-DD period;
+    raises ``ValueError`` on malformed / inverted ranges."""
     if not _DATE_RE.match(start_date) or not _DATE_RE.match(end_date):
         raise ValueError(f"reporting_period requires ISO YYYY-MM-DD, got [{start_date}, {end_date}]")
     start = pd.Timestamp(start_date).normalize()
@@ -73,28 +60,23 @@ def _validate_period(start_date: str, end_date: str) -> tuple[pd.Timestamp, pd.T
 
 
 def _period_key(start_date: str, end_date: str) -> str:
-    """Cache-key fragment for a reporting period. Validation lives in
-    ``_validate_period``; this is purely a deterministic string used by
-    the LRU cache to dedupe identical windows across callers."""
+    """Deterministic cache-key fragment for a reporting period."""
     return f"{start_date}::{end_date}"
 
 
 class EdaService:
-    """Aggregated EDA over sales_recent.csv + live customer overview from YaumiLive."""
+    """Aggregated EDA over sales_recent.csv + live YaumiLive cut-throughs."""
 
-    # 24h TTL is safe because the importer's scheduler explicitly invalidates
-    # the cache after each incremental pull (see data_import.scheduler).
-    _MAX_CACHE_ENTRIES = 2000  # safety cap so per-item keys can't grow unbounded
+    # 24h TTL is safe because importer.scheduler invalidates on each pull.
+    _MAX_CACHE_ENTRIES = 2000  # cap so per-item keys can't grow unbounded
 
     def __init__(self, settings: Optional[Settings] = None, ttl_seconds: int = 24 * 3600) -> None:
         self._s = settings or get_settings()
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
-        # Parsed-DataFrame memo, keyed by ``Path`` -> ``((path, mtime_ns, size), df)``.
-        # Separate from the aggregation cache so the LRU eviction policy
-        # never throws away the heavy parses to make room for cheap
-        # tile responses.
+        # Parsed-DataFrame memo kept separate from the aggregation cache so
+        # LRU eviction can't throw away heavy parses for cheap tile responses.
         self._df_memo: Dict[Path, tuple[tuple[str, int, int], pd.DataFrame]] = {}
 
     # ------------------------------------------------------------------
@@ -109,17 +91,10 @@ class EdaService:
         ttl: Optional[int] = None,
         cacheable=None,
     ) -> Any:
-        """LRU + TTL cache. Pass ``ttl=`` to override the default 24h
-        window (e.g. 60s for live cut-throughs that must stay fresh).
-        Single helper -- no second copy to keep in sync.
-
-        ``cacheable`` is an optional predicate run on the freshly-loaded
-        value; only truthy results are stored. Live cut-throughs pass a
-        predicate that rejects ``{available: False}`` envelopes so a
-        transient YaumiLive timeout doesn't get pinned for the full TTL
-        -- the supervision auto-reconciler walks the same key every 60s,
-        and a cached failure used to silently swallow every visit
-        arriving in that window."""
+        """LRU + TTL cache. ``ttl`` overrides default 24h (use 60s for live
+        cut-throughs). ``cacheable`` predicate filters values before
+        storing so transient failures aren't pinned (e.g. envelopes with
+        ``available: False`` are skipped)."""
         ttl_eff = self._ttl if ttl is None else int(ttl)
         now = time.time()
         with self._lock:
@@ -141,20 +116,12 @@ class EdaService:
             self._cache.clear()
             self._df_memo.clear()
 
-    # ------------------------------------------------------------------
-    # File-mtime keyed DataFrame memo
-    # ------------------------------------------------------------------
-    #
-    # Parsing the multi-MB CSVs on every dashboard request is the tile-load
-    # hotspot. The memo holds the parsed DataFrame keyed on the file's
-    # ``(mtime_ns, size)`` so the parse pays once per importer write and
-    # subsequent reads are lookups. The importer's atomic ``os.replace``
-    # bumps mtime, so a fresh CSV transparently invalidates the memo
-    # without any explicit ``invalidate()`` call.
+    # File-mtime keyed DataFrame memo: parse pays once per importer write,
+    # subsequent reads are lookups (atomic os.replace bumps mtime so a
+    # fresh CSV invalidates the memo without explicit busting).
 
     def _load_df_memo(self, path: Path, loader) -> pd.DataFrame:
-        """Caller has already confirmed ``path`` exists -- the memo trusts
-        that check rather than repeating the syscall on every hit."""
+        """Caller has already confirmed ``path`` exists."""
         stat = path.stat()
         sig = (str(path), stat.st_mtime_ns, stat.st_size)
         with self._lock:
@@ -166,15 +133,9 @@ class EdaService:
             self._df_memo[path] = (sig, df)
         return df
 
-    # ------------------------------------------------------------------
-    # Shared dashboard-filter layer
-    # ------------------------------------------------------------------
-    #
-    # Every dashboard endpoint that reads sales_recent.csv goes through this
-    # same helper so the filter semantics are identical across tiles, charts,
-    # and the cascading dimensions endpoint. Filters are passed as lists of
-    # codes (warehouse, route, item) or names (category -- sales_recent only
-    # carries CategoryName). An empty list means "no filter at this level."
+    # Shared dashboard-filter layer; identical semantics across every
+    # surface. Empty list = no filter at that level. Category uses Name
+    # because sales_recent only carries CategoryName.
 
     @staticmethod
     def _apply_sales_filters(
@@ -203,9 +164,7 @@ class EdaService:
         category_codes: List[str],
         item_codes: List[str],
     ) -> str:
-        """Deterministic cache-key fragment for a filter combination.
-        Sorted so different orderings of the same selection share a cache slot.
-        """
+        """Deterministic cache-key fragment; sorted so reorderings share a slot."""
         def part(name: str, vals: List[str]) -> str:
             return f"{name}={'|'.join(sorted(set(map(str, vals))))}" if vals else f"{name}="
         return ";".join([
@@ -222,18 +181,10 @@ class EdaService:
         category_codes: List[str],
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Return the cascading filter options for the dashboard FilterBar.
-
-        Each downstream dimension is the set of unique values present in the
-        sales slice that already matches every upstream selection. Items are
-        filtered by all three upstream levels so the deepest dropdown stays
-        scoped tightly even when the user makes multiple picks above it.
-
-        ``trimmed_selections`` is the same input vector with any codes that
-        no longer exist in the cascaded option sets dropped. The frontend
-        applies it verbatim, so a stale code never lingers and silently
-        filters results to nothing.
-        """
+        """Cascading filter options for the dashboard FilterBar; each
+        downstream dimension is scoped by upstream selections.
+        ``trimmed_selections`` drops codes absent from the cascaded sets so
+        FE applies the cleaned vector verbatim."""
         item_codes = item_codes or []
         key = "filter_dims::" + self._filter_key(
             warehouse_codes, route_codes, category_codes, []
@@ -242,7 +193,7 @@ class EdaService:
             warehouse_codes, route_codes, category_codes,
         ))
         # Cached payload is shared across requests with different item
-        # selections, so trim outside the cache and return a fresh dict.
+        # selections; trim outside the cache and return a fresh dict.
         warehouses_set = {str(o["code"]) for o in result.get("warehouses") or []}
         routes_set = {str(o["code"]) for o in result.get("routes") or []}
         categories_set = {str(o["code"]) for o in result.get("categories") or []}
@@ -266,8 +217,7 @@ class EdaService:
         if df.empty:
             return {"warehouses": [], "routes": [], "categories": [], "items": []}
 
-        # Warehouses: every distinct warehouse in the full slice (the master
-        # set -- selecting one warehouse doesn't shrink its own dropdown).
+        # Warehouses: master set; selecting one doesn't shrink its dropdown.
         warehouses = (
             df[["WarehouseCode", "WarehouseName"]]
             .dropna()
@@ -276,11 +226,9 @@ class EdaService:
             .to_dict("records")
         )
 
-        # Routes: filtered by warehouse selection. RouteCode is the only
-        # identifier in sales_recent; we surface it as both code and name so
-        # the UI can render "9105" without a fallback path. Each route also
-        # carries its parent warehouse so the VanLoad route grid can group
-        # cards by warehouse without a second API call.
+        # Routes: scoped by warehouse; RouteCode doubles as name; each
+        # carries its parent warehouse so the VanLoad grid can group without
+        # a second call.
         scoped = self._apply_sales_filters(df, warehouse_codes, [], [], [])
         route_warehouse = (
             scoped[["RouteCode", "WarehouseCode", "WarehouseName"]]
@@ -298,8 +246,7 @@ class EdaService:
             for row in route_warehouse.itertuples(index=False)
         ]
 
-        # Categories: filtered by warehouse + route. sales_recent only carries
-        # CategoryName so name doubles as the identifier.
+        # Categories: scoped by warehouse+route; name doubles as identifier.
         scoped = self._apply_sales_filters(df, warehouse_codes, route_codes, [], [])
         cat_vals = sorted(
             scoped["CategoryName"].dropna().astype(str).str.strip().replace("", pd.NA).dropna().unique()
@@ -334,11 +281,8 @@ class EdaService:
     # ------------------------------------------------------------------
 
     def get_item_prices(self) -> Dict[str, float]:
-        """Return {ItemCode: avg unit price} from customer_data.csv.
-
-        Single source of truth for item pricing across the app; cached like
-        every other derivation so repeat callers don't re-read the CSV.
-        """
+        """Return {ItemCode: avg unit price} from customer_data.csv;
+        single source of truth for item pricing, cached like other derivations."""
         return self._cached("item_prices", self._compute_item_prices)
 
     def _compute_item_prices(self) -> Dict[str, float]:
@@ -354,23 +298,11 @@ class EdaService:
         grouped = df.groupby("ItemCode")["AvgUnitPrice"].mean()
         return {str(k): round(float(v), 2) for k, v in grouped.items()}
 
-    # ------------------------------------------------------------------
-    # Last active date -- the most recent calendar day with sales activity
-    # in sales_recent.csv. Drawers use this to seed defaults that always
-    # land on a date the data actually covers (so the user never opens a
-    # drawer onto an empty weekend). The value is purely a query against
-    # the local CSV mirror; no calendar assumptions about which days are
-    # working days, holidays, etc.
-    # ------------------------------------------------------------------
+    # Last active date: most recent day with sales activity in
+    # sales_recent.csv; drawers seed defaults from this to avoid empty-state.
 
     def get_last_active_date(self) -> Dict[str, Any]:
-        """Most recent date in sales_recent.csv (route-agnostic).
-
-        Cached for the full LRU TTL. The mtime-keyed DataFrame memo
-        invalidates the underlying parse the moment the importer rewrites
-        the CSV, so a fresh import (data_import cron) propagates without
-        explicit cache busting here.
-        """
+        """Most recent date in sales_recent.csv (route-agnostic)."""
         return self._cached("last_active_date", self._compute_last_active_date)
 
     def _compute_last_active_date(self) -> Dict[str, Any]:
@@ -424,15 +356,9 @@ class EdaService:
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """Sales aggregates for the ``[start_date, end_date]`` window,
-        optionally scoped to the dashboard FilterBar selection.
-
-        The daily chart axis pads to every calendar day in the window so
-        a weekend / holiday inside the range shows as a zero bar, not as
-        a missing tick. Both leaderboards (top routes, categories) are
-        sorted by REVENUE so the response order matches the card titles
-        the dashboard shows -- no silent re-sort on the frontend.
-        """
+        """Sales aggregates for ``[start_date, end_date]``, optionally
+        FilterBar-scoped. Daily axis pads every calendar day (zero bars
+        on holidays). Leaderboards sorted by revenue to match UI titles."""
         try:
             start, end = _validate_period(start_date, end_date)
         except ValueError as exc:
@@ -461,9 +387,8 @@ class EdaService:
         total_qty = float(df["TotalQuantity"].sum())
         total_rev = float(df["revenue"].sum())
 
-        # Reindex daily series to every calendar day in [start, end] so
-        # the chart axis renders contiguously regardless of scope. Days
-        # with no activity show as zeros, not as gaps.
+        # Reindex daily to every day in [start, end] so the chart axis
+        # is contiguous (zero bars on inactive days).
         full_dates = pd.date_range(start, end, freq="D").normalize()
         daily = (
             df.groupby(df["TrxDate"].dt.normalize())
@@ -505,10 +430,8 @@ class EdaService:
                 "unique_categories": int(df["CategoryName"].nunique()),
                 "first_date": df["TrxDate"].min().strftime("%Y-%m-%d"),
                 "last_date": df["TrxDate"].max().strftime("%Y-%m-%d"),
-                # Count of distinct dates inside the window that had activity
-                # (after scope filters). Lets the UI distinguish "30-day
-                # window, 22 days had sales" from "30-day window, all days
-                # active" without recomputing from the daily_trend array.
+                # Distinct active dates (post-filter); lets UI separate
+                # "22 active days" from "all 30 active" without recomputing.
                 "working_days": int(df["TrxDate"].dt.normalize().nunique()),
             },
             "daily_trend": daily.to_dict("records"),
@@ -569,11 +492,8 @@ class EdaService:
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        # Validate up front -- the message contract here must match the
-        # sister ``/eda/sales`` endpoint exactly so a bad input gives
-        # the same explanation on every dashboard surface (inverted range
-        # is "inverted", not the generic "no rows in scope" that the
-        # downstream merge would otherwise emit).
+        # Validate up front so the bad-input message matches /eda/sales
+        # exactly across dashboard surfaces.
         try:
             _validate_period(start_date, end_date)
         except ValueError as exc:
@@ -586,17 +506,9 @@ class EdaService:
         key = f"business_kpis::{_period_key(start_date, end_date)}::" + self._filter_key(w, r, c, i)
         return self._cached(key, lambda: self._compute_business_kpis(start_date, end_date, w, r, c, i))
 
-    # ------------------------------------------------------------------
-    # Demand-forecast loader -- the van-load source. Predicted = what we
-    # told the van to load; ActualQty is included for some rows but we
-    # join against customer_data for fresher actuals + per-period prices.
-    # ------------------------------------------------------------------
-
-    # DemandClass + Lower/UpperBound flow through so the L4 quantile
-    # layer of ``enrich_with_load`` activates for dashboard tiles too.
-    # Without these the dashboard's reconciled values would silently
-    # diverge from the cron's: same engine, different inputs, different
-    # ``recommended_load`` for the same row.
+    # Demand-forecast loader; DemandClass + bounds flow through so
+    # enrich_with_load's L4 quantile layer activates for dashboard tiles
+    # too (else reconciled values silently diverge from the cron).
     _FORECAST_COLUMNS = [
         "TrxDate", "RouteCode", "ItemCode", "DataSplit", "Predicted", "DemandClass",
         "LowerBound", "UpperBound",
@@ -611,8 +523,7 @@ class EdaService:
 
     @classmethod
     def _parse_forecast_csv(cls, path: Path) -> pd.DataFrame:
-        # Pad missing columns so older snapshots without DemandClass /
-        # bounds still load (dashboard degrades to V5_b cleanly).
+        # Pad missing columns so older snapshots still load.
         try:
             df = pd.read_csv(path, low_memory=False, usecols=cls._FORECAST_COLUMNS)
         except ValueError:
@@ -630,11 +541,8 @@ class EdaService:
         df["UpperBound"] = pd.to_numeric(df["UpperBound"], errors="coerce").fillna(0)
         return df.dropna(subset=["TrxDate"])
 
-    # ------------------------------------------------------------------
-    # Shared (sales ⋈ forecast) merge -- consumed by both /eda/business-kpis
-    # and /eda/forecast-rows. Single compute path so the two endpoints can
-    # never disagree on what "this scope, this period" means.
-    # ------------------------------------------------------------------
+    # Shared (sales join forecast) merge consumed by /eda/business-kpis
+    # and /eda/forecast-rows so they can't disagree on scope/period.
 
     def _actual_vs_forecast_merge(
         self,
@@ -645,14 +553,9 @@ class EdaService:
         category_codes: List[str],
         item_codes: List[str],
     ) -> Optional[Dict[str, Any]]:
-        """Cached entry to the shared (sales ⋈ forecast) merge.
-
-        ``business-kpis`` and ``forecast-rows`` both call this; they used
-        to recompute the heavy join independently and only cached their
-        own output. With the cache here, an identical FilterBar scope
-        across the two endpoints (which is the common dashboard case)
-        amortises the merge to a single compute.
-        """
+        """Cached entry to the shared (sales join forecast) merge; amortises
+        the heavy join across business-kpis and forecast-rows for the common
+        dashboard case of matching scopes."""
         key = f"av_merge::{_period_key(start_date, end_date)}::" + self._filter_key(
             warehouse_codes, route_codes, category_codes, item_codes,
         )
@@ -672,16 +575,10 @@ class EdaService:
         category_codes: List[str],
         item_codes: List[str],
     ) -> Optional[Dict[str, Any]]:
-        """Build the per-(date, route, item) merge of past forecasts vs
-        actual sales over ``[start_date, end_date]``. Returns None when
-        there is nothing in scope; otherwise a dict with:
-
-            sales         -- filtered + date-restricted sales rows
-            merged        -- forecast OUTER-JOIN sold, with price fallback
-            anchor        -- max active date inside the window
-            working_days  -- count of active dates inside the window
-            covered_routes / covered_days -- forecast scope counters
-        """
+        """Per-(date, route, item) merge of past forecasts vs actual
+        sales over ``[start_date, end_date]``; returns None if nothing in
+        scope, else dict(sales, merged, forecast, anchor, working_days,
+        covered_routes, covered_days)."""
         try:
             start, end = _validate_period(start_date, end_date)
         except ValueError:
@@ -704,8 +601,8 @@ class EdaService:
         sales["ItemCode"] = sales["ItemCode"].astype(str).str.strip()
         anchor = sales["TrxDate"].max()
 
-        # Aggregate sales to (date, route, item); pull ItemName along so
-        # downstream consumers (drawer rows) don't need a second lookup.
+        # Aggregate sales to (date, route, item); pull ItemName along
+        # so drawer rows don't need a second lookup.
         sold = (
             sales.groupby(["TrxDate", "RouteCode", "ItemCode"], as_index=False)
             .agg(
@@ -721,24 +618,9 @@ class EdaService:
         scope_items = set(sales["ItemCode"].unique())
         forecast = self._load_forecast_df()
         if not forecast.empty:
-            # Past-window comparison surfaces a real predicted-vs-actual
-            # for each historical date. Both splits qualify, both are
-            # real model predictions:
-            #   * Test          -- the model's clean held-out backtest
-            #                      slice from the most recent training
-            #                      run (predictions on rows the model
-            #                      never saw during fitting).
-            #   * Forecast      -- production forward-horizon rows that
-            #                      data_import has accumulated locally
-            #                      across past inference runs; for any
-            #                      date now in the past, that row was
-            #                      a real ahead-of-time prediction made
-            #                      before the day arrived.
-            # The forward horizon (today + forecast_horizon days) is
-            # naturally excluded: ``active_set`` only contains dates that
-            # have actual sales, so future-dated Forecast rows can never
-            # match. When the same (date, route, item) appears in both
-            # splits, Test wins -- cleaner provenance for the metric.
+            # Both Test (clean held-out) and Forecast (accumulated past
+            # forward-horizon rows) qualify as real ahead-of-time
+            # predictions; Test wins on duplicate keys for cleaner provenance.
             forecast = forecast[forecast["Predicted"] > 0]
             forecast = forecast[forecast["TrxDate"].dt.normalize().isin(active_set)]
             forecast = forecast[forecast["RouteCode"].isin(scope_routes)]
@@ -755,9 +637,7 @@ class EdaService:
         if not forecast.empty:
             forecast["TrxDate"] = forecast["TrxDate"].dt.normalize()
             # Preserve LowerBound/UpperBound through the groupby so
-            # ``enrich_with_load`` keeps the L4 quantile layer active --
-            # otherwise the dashboard's reconciled van load silently
-            # diverges from the cron's for the same logical cell.
+            # enrich_with_load's L4 quantile layer stays active.
             agg_kwargs = {
                 "predicted":    ("Predicted",   "sum"),
                 "demand_class": ("DemandClass", "first"),
@@ -780,8 +660,8 @@ class EdaService:
             covered_routes = 0
             covered_days = 0
 
-        # Outer-join so a forecast with no sale (lost) AND a sale without
-        # forecast (uncovered demand) both surface in `merged`.
+        # Outer-join so both "forecast with no sale" (lost) and "sale with
+        # no forecast" (uncovered demand) surface.
         merged = forecast.merge(
             sold[["TrxDate", "RouteCode", "ItemCode", "actual_qty", "price", "ItemName"]],
             on=["TrxDate", "RouteCode", "ItemCode"], how="outer",
@@ -820,18 +700,10 @@ class EdaService:
         category_codes: List[str],
         item_codes: List[str],
     ) -> Dict[str, Any]:
-        """Four headline metrics for the executive dashboard:
-
-            1. total_revenue   -- AED sold in the period (sales_recent)
-            2. total_volume    -- total units sold + transaction count
-            3. unique_items    -- count of distinct SKUs that sold
-            4. lost_opportunity -- AED of forecast that didn't sell
-                                  (Sigma max(0, predicted - actual) x price)
-
-        All four are derived from the shared (sales merge forecast) helper --
-        the same helper that powers the Past-analysis drawer, so the
-        numbers can never drift between the two surfaces.
-        """
+        """Four headline KPIs: total_revenue, total_volume, unique_items,
+        lost_opportunity (Sigma max(0, predicted-actual) * price). All
+        derive from the shared (sales join forecast) merge so dashboard
+        and drawer can't drift."""
         ctx = self._actual_vs_forecast_merge(
             start_date, end_date, warehouse_codes, route_codes, category_codes, item_codes,
         )
@@ -872,10 +744,8 @@ class EdaService:
             avg_daily_coverage_pct: Optional[float] = None
             daily_avg_lost: Optional[float] = None
         else:
-            # Lost-opportunity uses the reconciled van load -- we want to
-            # know how much of the recommendation didn't sell, not how
-            # much the raw model over-shot. Falls back silently to the
-            # raw ``predicted`` when the engine is unavailable.
+            # Lost-opportunity uses the reconciled van load (how much of
+            # the recommendation didn't sell); falls back to raw predicted.
             if enrich_with_load is not None:
                 merged = enrich_with_load(merged, predicted_col="predicted")
             load_col = (
@@ -885,12 +755,11 @@ class EdaService:
             lost_qty_series = (merged[load_col] - merged["actual_qty"]).clip(lower=0)
             lost_amount = float((lost_qty_series * merged["price"]).sum())
             lost_units = float(lost_qty_series.sum())
-            # Distinct SKUs that contributed any lost units -- not row count.
+            # Distinct SKUs contributing lost units (not row count).
             items_lost = int(merged.loc[lost_qty_series > 0, "ItemCode"].nunique())
 
-            # Per-(day, route) coverage: of items each route actually sold
-            # on each scored day, what fraction were on that day's
-            # forecast for that route. Average across (day, route) cells.
+            # Per-(day, route) coverage: fraction of sold items that were
+            # on that day's forecast for that route; averaged across cells.
             sold_items_by_day_route = (
                 sales.groupby(["TrxDate", "RouteCode"])["ItemCode"]
                 .apply(lambda s: set(s.unique()))
@@ -922,9 +791,9 @@ class EdaService:
             "start_date": start_date,
             "end_date":   end_date,
             "anchor_date": anchor.strftime("%Y-%m-%d"),
-            # Denominator for tiles 1/2/3 averages (active sales dates).
+            # Tiles 1/2/3 denominator: active sales dates.
             "working_days": working_days,
-            # Denominator for tile 4's average (forecast-scored dates).
+            # Tile 4 denominator: forecast-scored dates.
             "covered_routes": covered_routes,
             "covered_days": covered_days,
             "total_revenue": {
@@ -1029,13 +898,9 @@ class EdaService:
     # ------------------------------------------------------------------
 
     def get_live_customer_sales(self, route_code: str, date: str, customer_code: str) -> Dict[str, Any]:
-        """Return ``{items: [{item_code, qty}], fetched_at, route, date, customer}``
-        by querying VW_GET_SALES_DETAILS live for a single (route, date, customer).
-
-        Cached for 60 s so rapid-fire visit clicks don't hammer the live DB.
-        Matches the aggregation used everywhere else: positive QuantityInPCs,
-        ItemType = OrderItem, TrxType = SalesInvoice.
-        """
+        """Live items+qty for one (route, date, customer) from
+        VW_GET_SALES_DETAILS (positive PCs, OrderItem, SalesInvoice).
+        60s cached so rapid-fire visit clicks don't hammer the DB."""
         key = f"live_sales::{route_code}::{date}::{customer_code}"
         return self._cached(
             key,
@@ -1045,11 +910,8 @@ class EdaService:
         )
 
     def get_live_route_sales(self, route_code: str, date: str) -> Dict[str, Any]:
-        """Return every ``(customer_code, customer_name, item_code, qty)`` sold on
-        the given route/date. Live query against YaumiLive, 60-s cached.
-
-        Same filter chain as :meth:`get_live_customer_sales` to guarantee the
-        two endpoints never disagree on totals."""
+        """Live (customer, item, qty) tuples sold on (route, date); same
+        filter chain as ``get_live_customer_sales`` to guarantee parity."""
         key = f"live_route_sales::{route_code}::{date}"
         return self._cached(
             key,
@@ -1075,28 +937,27 @@ class EdaService:
               AND CAST(TrxDate AS DATE) = ?
             GROUP BY CustomerCode, ItemCode
         """
-        conn = None
+        # Pool-bound live read: bypasses YaumiLive's per-connection session cap
+        # when many dashboard tiles burst concurrently. Earlier raw pyodbc.connect
+        # opened a fresh socket per request; under a 12-route UI fan-out that
+        # surfaced as 08001 connect errors.
         try:
-            conn = pyodbc.connect(
-                self._s.db.connection_string(live=True), autocommit=False,
-                timeout=self._s.db.live_connection_timeout,
+            pool = get_pool(
+                self._s.db.connection_string(live=True),
+                connect_timeout=int(self._s.db.live_connection_timeout),
+                query_timeout=int(self._s.db.live_query_timeout),
+                autocommit=True,
             )
-            conn.timeout = self._s.db.live_query_timeout
-            cursor = conn.cursor()
-            cursor.execute(sql, (
-                self._s.sales_item_type, self._s.sales_invoice_trx_type,
-                str(route_code), date,
-            ))
-            rows = cursor.fetchall()
+            with pool.acquire() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (
+                    self._s.sales_item_type, self._s.sales_invoice_trx_type,
+                    str(route_code), date,
+                ))
+                rows = cursor.fetchall()
         except Exception as exc:
             logger.error("Live route-sales query failed: %s", exc)
             return {"available": False, "message": str(exc), "customers": []}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception as close_exc:
-                    logger.warning("Live conn.close() failed: %s", close_exc)
 
         # Pivot to one entry per customer with nested items.
         by_cust: Dict[str, Dict[str, Any]] = {}
@@ -1137,28 +998,23 @@ class EdaService:
               AND CAST(TrxDate AS DATE) = ?
             GROUP BY ItemCode
         """
-        conn = None
         try:
-            conn = pyodbc.connect(
-                self._s.db.connection_string(live=True), autocommit=False,
-                timeout=self._s.db.live_connection_timeout,
+            pool = get_pool(
+                self._s.db.connection_string(live=True),
+                connect_timeout=int(self._s.db.live_connection_timeout),
+                query_timeout=int(self._s.db.live_query_timeout),
+                autocommit=True,
             )
-            conn.timeout = self._s.db.live_query_timeout
-            cursor = conn.cursor()
-            cursor.execute(sql, (
-                self._s.sales_item_type, self._s.sales_invoice_trx_type,
-                str(route_code), str(customer_code), date,
-            ))
-            rows = cursor.fetchall()
+            with pool.acquire() as conn:
+                cursor = conn.cursor()
+                cursor.execute(sql, (
+                    self._s.sales_item_type, self._s.sales_invoice_trx_type,
+                    str(route_code), str(customer_code), date,
+                ))
+                rows = cursor.fetchall()
         except Exception as exc:
             logger.error("Live customer-sales query failed: %s", exc)
             return {"available": False, "message": str(exc), "items": []}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception as close_exc:
-                    logger.warning("Live conn.close() failed: %s", close_exc)
 
         items = [
             {"item_code": str(r[0]).strip(), "qty": safe_int(r[1])}
@@ -1173,16 +1029,11 @@ class EdaService:
             "items": items,
             "fetched_at": pd.Timestamp.now().isoformat(),
         }
-    # ------------------------------------------------------------------
-    # Live van composition for one (route, date) -- past leftover +
-    # today's allocation + sales/returns, in a single 60-s-cached call.
-    # The reconciliation layer in demand_forecasting consumes this to
-    # surface "what's actually on the van right now".
-    #
-    # Identity guaranteed per item:
-    #     van_load     = past_leftover + today_allocation
-    #     leftover_now = max(0, van_load - sold - bad_return - good_return)
-    # ------------------------------------------------------------------
+    # Live van composition for one (route, date): past leftover +
+    # today's allocation + sales/returns. 60s cached.
+    # Identity per item:
+    #   van_load     = past_leftover + today_allocation
+    #   leftover_now = max(0, van_load - sold - bad_return - good_return)
 
     def get_live_van_composition(self, route_code: str, date: str) -> Dict[str, Any]:
         key = f"live_van_comp::{route_code}::{date}"
@@ -1198,94 +1049,76 @@ class EdaService:
             return {"available": False, "message": "DB not configured",
                     "items": [], "totals": {}}
 
-        # Strict ``TrxDate = date - 1`` for past_leftover. This is INTENTIONAL
-        # and matches the cron's effective semantic: the cron's
-        # ``forward_fill_closing`` only fills BETWEEN min and max observation
-        # per (route, item), and ``opening_today`` further restricts to the
-        # target window. Net effect: only items the rep tripped on within
-        # the last day or two carry a non-zero past_leftover. Items whose
-        # last closing is older than that are treated as "off the truck"
-        # by both surfaces, intentionally conservative (we don't assert
-        # phantom stock the rep may have returned silently).
-        #
-        # An earlier "most recent closing in 30-day window" approach was
-        # tried here -- it pulled past_leftover for every item with any
-        # observation in the lookback. That over-counted vs the cron by
-        # several hundred units per route per day, exposing items the
-        # cron deliberately drops. Reverted to the strict match so live
-        # and cron agree on the conservative interpretation.
+        # Strict TrxDate = date-1 for past_leftover -- matches the cron's
+        # conservative ``forward_fill_closing`` semantic (items off the
+        # truck stay off). A wider lookback over-counted live vs cron.
         prior_sql = "DATEADD(day, -1, CAST(? AS DATE))"
-        conn = None
         try:
-            conn = pyodbc.connect(
-                self._s.db.connection_string(live=True), autocommit=False,
-                timeout=self._s.db.live_connection_timeout,
+            pool = get_pool(
+                self._s.db.connection_string(live=True),
+                connect_timeout=int(self._s.db.live_connection_timeout),
+                query_timeout=int(self._s.db.live_query_timeout),
+                autocommit=True,
             )
-            conn.timeout = self._s.db.live_query_timeout
-            cur = conn.cursor()
+            with pool.acquire() as conn:
+                cur = conn.cursor()
 
-            cur.execute(f"""
-                SELECT ItemCode,
-                       MAX(ItemName)    AS ItemName,
-                       MAX(CategoryCode) AS CategoryCode,
-                       MAX(CategoryName) AS CategoryName,
-                       SUM(CAST(ClosingQty AS DECIMAL(18,2))) AS Qty
-                FROM {self._s.closing_stock_view} WITH (NOLOCK)
-                WHERE RouteCode = ? AND CAST(TrxDate AS DATE) = {prior_sql}
-                GROUP BY ItemCode
-            """, (str(route_code), date))
-            past = cur.fetchall()
+                cur.execute(f"""
+                    SELECT ItemCode,
+                           MAX(ItemName)    AS ItemName,
+                           MAX(CategoryCode) AS CategoryCode,
+                           MAX(CategoryName) AS CategoryName,
+                           SUM(CAST(ClosingQty AS DECIMAL(18,2))) AS Qty
+                    FROM {self._s.closing_stock_view} WITH (NOLOCK)
+                    WHERE RouteCode = ? AND CAST(TrxDate AS DATE) = {prior_sql}
+                    GROUP BY ItemCode
+                """, (str(route_code), date))
+                past = cur.fetchall()
 
-            cur.execute(f"""
-                SELECT ItemCode,
-                       MAX(ItemName)    AS ItemName,
-                       MAX(CategoryCode) AS CategoryCode,
-                       MAX(CategoryName) AS CategoryName,
-                       SUM(CAST(AllocatedQuantityInPC AS DECIMAL(18,2))) AS Qty
-                FROM {self._s.load_allocation_view} WITH (NOLOCK)
-                WHERE RouteCode = ? AND CAST(MovementDate AS DATE) = ?
-                GROUP BY ItemCode
-            """, (str(route_code), date))
-            alloc = cur.fetchall()
+                cur.execute(f"""
+                    SELECT ItemCode,
+                           MAX(ItemName)    AS ItemName,
+                           MAX(CategoryCode) AS CategoryCode,
+                           MAX(CategoryName) AS CategoryName,
+                           SUM(CAST(AllocatedQuantityInPC AS DECIMAL(18,2))) AS Qty
+                    FROM {self._s.load_allocation_view} WITH (NOLOCK)
+                    WHERE RouteCode = ? AND CAST(MovementDate AS DATE) = ?
+                    GROUP BY ItemCode
+                """, (str(route_code), date))
+                alloc = cur.fetchall()
 
-            cur.execute(f"""
-                SELECT ItemCode,
-                       MAX(ItemName)     AS ItemName,
-                       MAX(CategoryCode) AS CategoryCode,
-                       MAX(CategoryName) AS CategoryName,
-                       SUM(CASE WHEN TrxType = ? AND QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS SoldQty,
-                       SUM(CASE WHEN TrxType = ? THEN -QuantityInPCs ELSE 0 END) AS BadReturnQty,
-                       SUM(CASE WHEN TrxType = ? THEN -QuantityInPCs ELSE 0 END) AS GoodReturnQty
-                FROM {self._s.sales_view} WITH (NOLOCK)
-                WHERE RouteCode = ? AND ItemType = ? AND CAST(TrxDate AS DATE) = ?
-                GROUP BY ItemCode
-            """, (
-                self._s.sales_invoice_trx_type,
-                self._s.bad_return_trx_type,
-                self._s.good_return_trx_type,
-                str(route_code),
-                self._s.sales_item_type,
-                date,
-            ))
-            mov = cur.fetchall()
+                cur.execute(f"""
+                    SELECT ItemCode,
+                           MAX(ItemName)     AS ItemName,
+                           MAX(CategoryCode) AS CategoryCode,
+                           MAX(CategoryName) AS CategoryName,
+                           SUM(CASE WHEN TrxType = ? AND QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS SoldQty,
+                           SUM(CASE WHEN TrxType = ? THEN -QuantityInPCs ELSE 0 END) AS BadReturnQty,
+                           SUM(CASE WHEN TrxType = ? THEN -QuantityInPCs ELSE 0 END) AS GoodReturnQty
+                    FROM {self._s.sales_view} WITH (NOLOCK)
+                    WHERE RouteCode = ? AND ItemType = ? AND CAST(TrxDate AS DATE) = ?
+                    GROUP BY ItemCode
+                """, (
+                    self._s.sales_invoice_trx_type,
+                    self._s.bad_return_trx_type,
+                    self._s.good_return_trx_type,
+                    str(route_code),
+                    self._s.sales_item_type,
+                    date,
+                ))
+                mov = cur.fetchall()
 
-            cur.execute(f"""
-                SELECT ItemCode, SUM(CAST(ClosingQty AS DECIMAL(18,2))) AS Qty
-                FROM {self._s.closing_stock_view} WITH (NOLOCK)
-                WHERE RouteCode = ? AND CAST(TrxDate AS DATE) = ?
-                GROUP BY ItemCode
-            """, (str(route_code), date))
-            today_close = cur.fetchall()
+                cur.execute(f"""
+                    SELECT ItemCode, SUM(CAST(ClosingQty AS DECIMAL(18,2))) AS Qty
+                    FROM {self._s.closing_stock_view} WITH (NOLOCK)
+                    WHERE RouteCode = ? AND CAST(TrxDate AS DATE) = ?
+                    GROUP BY ItemCode
+                """, (str(route_code), date))
+                today_close = cur.fetchall()
         except Exception as exc:
             logger.error("Live van-composition query failed: %s", exc)
             return {"available": False, "message": str(exc),
                     "items": [], "totals": {}}
-        finally:
-            if conn is not None:
-                try:
-                    conn.close()
-                except Exception as close_exc:
-                    logger.warning("Live conn.close() failed: %s", close_exc)
 
         items: Dict[str, Dict[str, Any]] = {}
 
@@ -1331,9 +1164,8 @@ class EdaService:
                       or e["bad_return_qty"] > 0 or e["good_return_qty"] > 0]
         items_list.sort(key=lambda x: x["van_load"], reverse=True)
 
-        # Per-item return quantities feed ``leftover_now`` per row but no
-        # UI consumes the route-level return totals -- keep the per-row
-        # numbers, drop the dead-payload aggregates.
+        # Per-row returns feed leftover_now; route-level return totals
+        # are unused so they're omitted from the payload.
         totals = {
             "items_count":            len(items_list),
             "past_leftover_total":    sum(e["past_leftover"]    for e in items_list),

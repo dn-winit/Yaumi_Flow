@@ -1,6 +1,4 @@
-"""
-FastAPI dependency injection -- singleton instances shared across requests.
-"""
+"""FastAPI DI singletons shared across requests."""
 
 from __future__ import annotations
 
@@ -27,9 +25,7 @@ def get_data_manager() -> DataManager:
 
 
 def get_fresh_data_manager() -> DataManager:
-    """DataManager with auto-freshness check. Use this for any endpoint that
-    reads journey/customer/demand data so stale CSVs are detected and reloaded
-    before the request is served. The stat check is O(1) per file (~0.001ms)."""
+    """DataManager with auto-freshness check (stat-based O(1) per file)."""
     dm = get_data_manager()
     dm.ensure_fresh()
     return dm

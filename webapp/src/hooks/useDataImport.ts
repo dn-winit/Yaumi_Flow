@@ -3,16 +3,12 @@ import { dataImportApi } from "@/api/data-import";
 import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { tier } from "./refresh";
 
-// React Query key fragment for a reporting period. Stable string makes the
-// cache slot deterministic across renders (same dates -> same slot).
+// Deterministic cache-slot key for a reporting period.
 function periodKey(p: ReportingPeriod): string {
   return `${p.start_date}::${p.end_date}`;
 }
 
-// Stable, sorted-tuple cache key for a filter combination so different
-// orderings of the same selection share a query slot (mirrors the backend
-// _filter_key strategy). Memoized in callers via `useMemo`-driven props,
-// but cheap enough to recompute every call.
+// Sorted-tuple key so different orderings share a slot (mirrors backend _filter_key).
 function filterKey(f?: Partial<DashboardFilters>): string {
   const part = (name: string, vals?: string[]) =>
     vals && vals.length ? `${name}=${[...vals].sort().join("|")}` : `${name}=`;
@@ -43,11 +39,7 @@ export function useBusinessKpis(period: ReportingPeriod, filters?: Partial<Dashb
 }
 
 export function useFilterDimensions(filters?: Partial<DashboardFilters>, enabled = true) {
-  // Pass the full selection vector (including ``item_codes``) so the
-  // backend can return ``trimmed_selections`` -- the cleaned-up codes
-  // the FilterBar applies when an upstream change invalidates a
-  // downstream pick. ``enabled`` lets callers defer the fetch until
-  // the dropdowns actually need to render.
+  // Full selection enables backend trimmed_selections; `enabled` defers the fetch.
   const selections = {
     warehouse_codes: filters?.warehouse_codes,
     route_codes: filters?.route_codes,
@@ -63,11 +55,7 @@ export function useFilterDimensions(filters?: Partial<DashboardFilters>, enabled
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-/**
- * Most recent date in sales_recent.csv. Drawers call this to seed
- * defaults that always land on a date with data. Cached at the static
- * tier because the value only changes when the data_import cron runs.
- */
+/** Most recent date in sales_recent.csv; static tier (cron-cadence). */
 export function useLastActiveDate() {
   const { data, isLoading, error } = useQuery({
     queryKey: ["eda-last-active-date"],

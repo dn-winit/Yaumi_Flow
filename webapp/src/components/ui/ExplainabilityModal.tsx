@@ -24,8 +24,7 @@ interface Props {
 }
 
 function classDesc(cls: string): string {
-  // Neutral, factual descriptions -- avoid words like "harder to predict"
-  // that undermine the supervisor's trust in the number on screen.
+  // Neutral copy; don't undermine trust in the displayed number.
   const c = cls.toLowerCase();
   if (c === "smooth") return "Sells most days in steady quantities";
   if (c === "intermittent") return "Sells in bursts, fairly steady sizes";
@@ -46,10 +45,7 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
   if (!w || w.avg == null) {
     return <Stat label={label} value="-" hint="No demand in this window" />;
   }
-  // Backend computes avg as total / active_days, so the displayed figure is
-  // the typical quantity on days the item actually sold -- not a calendar-day
-  // average. Labelling it "/selling day" keeps the math honest: the user can
-  // verify avg x active_days == total from the hint.
+  // Backend avg = total / active_days; labelled "/selling day" so avg×days==total verifies.
   return (
     <Stat
       label={label}
@@ -72,40 +68,23 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
   const routeCode = str(row.RouteCode ?? row.route_code);
   const date = pickDate(row);
 
-  // Headline = total truck weight (carry + fresh). Adapter in VanLoadTable
-  // populates ``prediction`` with ``recommended_van_load`` so the headline
-  // matches the tile and the "On truck" column.
+  // Headline = total truck weight (carry + fresh). VanLoadTable adapter populates `prediction`.
   const recommendedLoad = num(row.prediction);
   const freshLoad = num(row.units_to_load) ?? recommendedLoad;
   const pDemand = num(row.p_demand);
   const q10 = num(row.lower_bound);
   const q90 = num(row.upper_bound);
   const cls = str(row.demand_class);
-  // ``expectedDemand`` is the engine's final per-day target (post bias-
-  // correction + recent-pattern adjustment). It is the single business-
-  // relevant number the supervisor needs to verify "fresh = expected -
-  // carried". ``recentAvg`` is the per-selling-day baseline shown as
-  // context. Intermediate engine math (raw forecast, bias %, corrected
-  // forecast) is technical detail and intentionally not surfaced here.
+  // expectedDemand = engine's per-day target; recentAvg = per-selling-day baseline.
   const openingStock = num(row.opening_stock);
   const expectedDemand = num(row.expected_demand);
   const recentAvg = num(row.recent_avg_per_selling_day);
   const guardSkipped = row.guard_skipped === true;
-  // Wire-driven informational flag: backend sets this when the corrected
-  // forecast significantly under-shoots the item's recent activity. The
-  // frontend NEVER recomputes or thresholds -- it just renders the chip
-  // when the server says so. Falsy/missing -> chip hidden.
+  // Wire-driven flag; frontend never recomputes/thresholds.
   const forecastLow = bool(row.forecast_below_recent);
-  // True when the row's class produces a real per-day probability (two-
-  // stage intermittent/lumpy models). Smooth/erratic classes emit a
-  // synthetic 0/1 fallback and the ConfidenceBadge renders a static
-  // label ("Regular"/"Frequent") -- showing "Probability at least one
-  // unit moves today" alongside that label would be a lie.
+  // True only for two-stage classes (intermittent/lumpy); smooth/erratic render a static label.
   const hasRealProbability = hasRealConfidence(cls);
-  // ``recentAvg`` populated => the cron has the recent selling pattern
-  // available for this item. We surface it as the supervisor's anchor
-  // for the recommended quantity; absent (null) means a brand-new item
-  // with no recent history and the pattern context drops out.
+  // recentAvg populated -> cron has the recent pattern; absent -> brand-new item, drop the panel.
   const hasRecentAnchor = recentAvg != null && recentAvg > 0;
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
@@ -119,9 +98,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           right={{ label: "Route / Date", primary: routeCode, secondary: fmtDate(date) }}
         />
 
-        {/* Guard banner: appears only when the journey-aware
-            concentration mask zeroed this row. Without it, a "0" load
-            with no explanation looks like a model miss. */}
+        {/* Guard banner: journey-aware concentration mask zeroed this row (else 0 looks like a miss). */}
         {guardSkipped && (
           <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-body text-warning-800">
             <strong>Skipped today:</strong> the customer who buys nearly all of this item isn&apos;t on
@@ -130,12 +107,9 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </div>
         )}
 
-        {/* Section 1: the recommendation itself. The headline number,
-            the chance it moves at all, the expected band. */}
+        {/* Section 1: recommendation -- headline, chance, range. */}
         <div>
-          {/* Wire-driven low-forecast warning. Renders only when the
-              backend flags this (route, item, date) row. Matches the
-              guardSkipped banner tokens so the two feel of-a-piece. */}
+          {/* Wire-driven low-forecast warning; uses the same tokens as guardSkipped. */}
           {forecastLow && (
             <div className="mb-2 rounded-md border border-warning-200 bg-warning-50 px-3 py-2 text-body text-warning-800">
               Forecast looks low for this item&apos;s recent pattern - worth reviewing
@@ -159,11 +133,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
             <Stat
               label="Chance of selling today"
               value={<ConfidenceBadge value={pDemand} demandClass={cls} />}
-              // Hint is honest only for two-stage classes that emit a real
-              // per-day probability. Smooth/erratic show a static label
-              // (the badge renders its own contextual tooltip in those
-              // cases), so the hint slot drops out instead of asserting
-              // a probability we don't compute.
+              // Honest hint only for two-stage classes; smooth/erratic get a different line.
               hint={
                 hasRealProbability
                   ? "Probability at least one unit moves today"
@@ -178,20 +148,12 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </div>
         </div>
 
-        {/* Section 2: today's truck weight broken into its three numbers.
-            Carried + Fresh = Total -- a literal identity the supervisor
-            can verify on screen. ``Expected today`` is the per-day demand
-            target the engine sized against (post bias + recent-pattern
-            adjustment); ``Recent pattern`` is the historical anchor for
-            context. Everything is a stored column on yf_sales_transactions,
-            no client-side math. */}
+        {/* Section 2: truck weight identity Carried + Fresh = Total; all server-stored, no math. */}
         {(openingStock != null || expectedDemand != null) && (
           <div>
             <SectionTitle>How we got the load</SectionTitle>
 
-            {/* Carry + Fresh = Total identity. Three tiles so the user
-                can verify the headline (recommendedLoad) is the literal
-                sum -- no manipulation, no hidden adjustment. */}
+            {/* Three tiles so the user can verify the headline is the literal sum. */}
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
               <Stat
                 label="Carried over"
@@ -211,8 +173,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
               />
             </div>
 
-            {/* Expected demand + recent pattern: the "why this size" pair.
-                Falls back gracefully when no recent history (new item). */}
+            {/* "Why this size" pair; drops out gracefully when the item is brand new. */}
             {(expectedDemand != null || hasRecentAnchor) && (
               <div className="mt-3 grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <Stat
@@ -234,10 +195,7 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
           </div>
         )}
 
-        {/* Section 3: demand history (rolling windows). Three windows
-            on one row so the supervisor sees the item's recent activity
-            at a glance -- the anchor for why today's recommendation is
-            what it is. */}
+        {/* Section 3: rolling-window demand history at a glance. */}
         <div>
           <SectionTitle right={stats.loading ? "loading..." : undefined}>
             Demand history

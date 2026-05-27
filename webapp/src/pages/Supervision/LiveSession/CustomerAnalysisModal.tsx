@@ -1,10 +1,9 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo } from "react";
 import Modal from "@/components/ui/Modal";
 import Loading from "@/components/ui/Loading";
 import EmptyState from "@/components/ui/EmptyState";
 import Badge from "@/components/ui/Badge";
 import { useAnalyzeCustomer } from "@/hooks/useAnalytics";
-import { supervisionApi } from "@/api/supervision";
 import AnalysisList from "./AnalysisList";
 
 export interface CustomerAnalysisContext {
@@ -13,10 +12,13 @@ export interface CustomerAnalysisContext {
   customerName: string;
   routeCode: string;
   date: string;
-  items: { itemCode: string; itemName?: string; recommendedQuantity: number; actualQuantity: number }[];
+  // Built by the canonical ``toLlmItemPayload`` helper in CustomerVisit.tsx.
+  // Carries every field from the rec engine (tier, frequency, cycle,
+  // days_since, why_*, source, trend) plus runtime fields. The analyzer's
+  // _pick() accepts Pascal/camel/snake interchangeably.
+  items: Record<string, unknown>[];
   score: { score: number; coverage: number; accuracy: number };
-  // Previously-saved structured analysis (JSON string). When supplied,
-  // the modal renders this directly instead of re-calling the LLM.
+  // Saved analysis JSON; when present, modal skips a fresh LLM call.
   initialAnalysis?: string | null;
 }
 
@@ -29,9 +31,7 @@ interface Props {
 export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
   const { execute, result, loading, error } = useAnalyzeCustomer();
 
-  // Hydrate from a saved JSON payload when present so re-opening the
-  // modal shows the same review the supervisor saw before, with no
-  // second LLM call.
+  // Hydrate from saved JSON so re-open skips a fresh LLM call.
   const hydrated = useMemo<Record<string, unknown> | null>(() => {
     if (!ctx?.initialAnalysis) return null;
     try {
@@ -42,12 +42,7 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
     }
   }, [ctx?.initialAnalysis]);
 
-  // Tracks whether the live LLM payload has already been persisted for
-  // the open ``ctx``. Prevents repeat saves when the modal re-renders.
-  const [persistedKey, setPersistedKey] = useState<string | null>(null);
-
-  // Fire the analysis when the modal opens for a customer that has no
-  // saved review yet. With ``hydrated`` in scope, no LLM call needed.
+  // Fire only when there's no saved review.
   useEffect(() => {
     if (!open || !ctx) return;
     if (hydrated) return;
@@ -55,7 +50,7 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
       customer_code: ctx.customerCode,
       route_code: ctx.routeCode,
       date: ctx.date,
-      customer_data: [],
+      // ctx.items already in the canonical shape; analyzer reads all fields directly.
       current_items: ctx.items,
       performance_score: ctx.score.score,
       coverage: ctx.score.coverage,
@@ -64,23 +59,9 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, ctx?.customerCode, hydrated]);
 
-  // Persist a freshly-generated analysis once per (sessionId, customerCode)
-  // so a re-open hydrates from saved storage instead of re-calling the LLM.
-  //
-  // Gated on ``success: true`` so degraded payloads (rate limit, empty
-  // input, retries exhausted) never land in the DB column -- those
-  // come back from the analyzer as success=false and the next attempt
-  // (after real data arrives) gets a clean slate to write into.
-  useEffect(() => {
-    if (!open || !ctx || !result?.data || !result.success) return;
-    const key = `${ctx.sessionId}::${ctx.customerCode}`;
-    if (persistedKey === key) return;
-    void supervisionApi
-      .saveCustomerAnalysis(ctx.sessionId, ctx.customerCode, JSON.stringify(result.data))
-      .catch(() => {/* fire-and-forget; logged server-side */});
-    setPersistedKey(key);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, ctx?.sessionId, ctx?.customerCode, result?.data, result?.success]);
+  // No server persistence -- analyses are generated on-demand each time
+  // the modal opens. The previous useEffect saved to a column we no longer
+  // maintain; removed end-to-end. ``persistedKey`` is no longer needed.
 
   const a = (hydrated ?? result?.data ?? {}) as Record<string, unknown>;
   const list = (key: string): string[] => {

@@ -1,16 +1,7 @@
 """APScheduler wrapper for the auto-visit reconciler.
 
-Runs ``AutoVisitService.reconcile_all`` on a fixed interval. One job,
-one in-memory dedup set inside the service, max one instance running
-at any time so a slow tick can never overlap itself.
-
-Lifecycle:
-  * ``start()``  -- called from the FastAPI lifespan on app startup.
-                    No-op if ``auto_visit_enabled=False``.
-  * ``shutdown()`` -- called on app shutdown. Idempotent.
-
-This is the only place that imports APScheduler in sales_supervision,
-keeping the dependency surface tight.
+Single job (max_instances=1) on a fixed interval; sole importer of APScheduler
+within sales_supervision. start()/shutdown() are wired into the FastAPI lifespan.
 """
 from __future__ import annotations
 
@@ -21,6 +12,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
 
+from common.scheduler_audit import attach_audit
 from sales_supervision.config.settings import Settings, get_settings
 from sales_supervision.services.auto_visit_service import AutoVisitService
 
@@ -53,15 +45,7 @@ class AutoVisitScheduler:
         if self.running:
             return
         interval = max(int(self._s.auto_visit_poll_seconds), 30)
-        # The scheduler's clock is anchored to ``auto_visit_timezone``
-        # (Asia/Dubai in production). We build ``next_run_time`` against
-        # that SAME zone so APScheduler does not silently re-interpret a
-        # naive wall-clock from the host's local timezone. On a host whose
-        # local time differs from the scheduler's zone (an IST dev box,
-        # a UTC container), a naive ``datetime.now()`` here was getting
-        # localised as Dubai -- pushing the very first tick hours into
-        # the future and making the cron look silently dead. This is the
-        # canonical fix for that class of cron drift.
+        # next_run_time uses the scheduler's tz so the first tick fires immediately on cross-tz hosts.
         tz = ZoneInfo(self._s.auto_visit_timezone)
         self._scheduler = BackgroundScheduler(timezone=tz, daemon=True)
         self._scheduler.add_job(
@@ -69,17 +53,19 @@ class AutoVisitScheduler:
             trigger="interval",
             seconds=interval,
             id=self.JOB_ID,
-            # ``max_instances=1`` + ``coalesce=True``: a slow tick skips
-            # the next slot rather than queueing; a service restart that
-            # crossed several slots only fires the make-up tick once.
-            # ``misfire_grace_time=interval`` lets APScheduler still
-            # fire after a brief stop instead of dropping the make-up
-            # past the default 1s threshold.
+            # max_instances=1 + coalesce=True: slow ticks skip rather than queue.
             max_instances=1,
             coalesce=True,
             misfire_grace_time=interval,
             next_run_time=datetime.now(tz=tz),
         )
+        # Audit listener -> yf_scheduler_log. Without this, "did supervision
+        # tick last hour?" is unanswerable from one query; every other service's
+        # scheduler is audited and we keep parity.
+        try:
+            attach_audit(self._scheduler, "sales_supervision", self._s.db.connection_string())
+        except Exception as exc:
+            logger.warning("attach_audit failed for supervision scheduler: %s", exc)
         self._scheduler.start()
         logger.info(
             "Auto-visit reconciler started -- interval=%ds tz=%s",

@@ -7,23 +7,7 @@ import type { BusinessKpis } from "@/types/data-import";
 
 const PLACEHOLDER = "—";
 
-/**
- * Dashboard KPI tiles -- pure SALES REALITY for the executive view.
- * Three numbers describing what's actually moving through the business:
- *
- *    • Total revenue        -- AED invoiced over the period
- *    • Total volume         -- units sold + invoice count
- *    • Unique items sold    -- distinct SKUs sold
- *
- * Forecast-performance metrics (accuracy, coverage, sales-opportunity)
- * live in the Past Performance drawer on the Plan page, where the
- * forecast vs actual comparison happens with route + window context.
- * Keeping Dashboard purely sales-reality avoids cross-surface
- * duplication and makes each page's purpose obvious at a glance.
- *
- * Every tile carries an "i" bubble so a reader who wants the formula
- * and source view can see it without cluttering the tile face.
- */
+/** Sales-reality tiles: revenue, volume, unique items. Forecast metrics live on the Plan drawer. */
 export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
   const revenue = k?.total_revenue;
   const volume = k?.total_volume;

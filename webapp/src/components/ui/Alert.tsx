@@ -8,12 +8,7 @@ interface AlertProps {
   className?: string;
 }
 
-/**
- * Single source of truth for inline error / success / warning / info
- * panels. Replaces ad-hoc ``<div className="bg-danger-50 ..."``
- * blocks scattered across admin / pipeline pages so the colour ramp
- * and spacing stay in lockstep.
- */
+/** Single source of truth for inline error/success/warning/info panels. */
 const STYLES: Record<Variant, string> = {
   error:   "bg-danger-50  border-danger-200  text-danger-700",
   success: "bg-success-50 border-success-200 text-success-700",

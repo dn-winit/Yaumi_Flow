@@ -93,13 +93,21 @@ def add_hijri_features(
     valid = in_range
     day_in[valid] = (d64[valid] - starts[idx[valid]]).astype("timedelta64[D]").astype(int) + 1
 
+    # Days remaining UNTIL Ramadan end (0 == last day, 9 == 10th-from-last).
+    # End-relative because Ramadan is 29 OR 30 days depending on lunar
+    # observation; ``day_in >= 21`` covers 10 days only in a 30-day year
+    # and just 9 days in a 29-day year (Laylat al-Qadr nights are
+    # observed in the last 10, so the mistiming matters).
+    days_to_end = np.full(len(d64), 9_999, dtype=int)
+    days_to_end[valid] = (ends[idx[valid]] - d64[valid]).astype("timedelta64[D]").astype(int)
+
     if features.get("is_ramadan"):
         df["is_ramadan"] = in_range.astype(int)
     if features.get("ramadan_day") and is_daily(granularity):
         df["ramadan_day"] = day_in
     if features.get("is_last_10_days_ramadan"):
-        # Compute end-relative position; last 10 days = days 21..30 (inclusive).
-        df["is_last_10_days_ramadan"] = ((day_in >= 21) & valid).astype(int)
+        # Last 10 days regardless of Ramadan length: days_to_end in [0, 9].
+        df["is_last_10_days_ramadan"] = ((days_to_end <= 9) & valid).astype(int)
 
     # Proximity (daily grain only)
     prox = cfg.get("proximity") or {}

@@ -4,22 +4,8 @@ import type {
   RedistributionView,
 } from "@/types/supervision";
 
-/**
- * Inline "Items redistributed" disclosure.
- *
- * Replaces the previous drawer/portal popover with a section that
- * expands directly below its trigger button, in the page flow. The
- * supervisor's question is still: "which items moved, to which
- * customers in what quantity -- and what stayed on the truck?".
- *
- * Direction is encoded by colour:
- *   - green = the customer gained units.
- *   - amber = the customer's planned share was reduced.
- *
- * When ``keptOnTruck > 0`` for a group, an explicit italic line is
- * appended under the item so the surplus that had no downstream taker
- * is visible rather than silently dropped.
- */
+/** Inline "Items redistributed" disclosure; green = gained, amber = reduced.
+ *  keptOnTruck>0 appends an italic surplus line so it's never silently dropped. */
 export interface RedistributionSectionProps {
   view: RedistributionView;
   /** Used purely to make the aria-controls id unique on the page. */
@@ -28,8 +14,7 @@ export interface RedistributionSectionProps {
   customerName: string;
 }
 
-/** Tiny pluraliser shared with LiveSessionTab. Keeps "1 unit" / "2 units"
- *  formatting consistent without dragging in an i18n dependency. */
+/** Pluraliser shared with LiveSessionTab; "1 unit" / "2 units" without an i18n dep. */
 export function pluralise(n: number, singular: string, plural?: string): string {
   return `${n} ${n === 1 ? singular : plural ?? `${singular}s`}`;
 }
@@ -41,9 +26,7 @@ export default function RedistributionSection({
 }: RedistributionSectionProps) {
   const [open, setOpen] = useState(false);
 
-  // Drop groups that have neither a redistribution entry nor a kept-on-
-  // truck remainder. Both signals are wire-supplied; the filter is a
-  // pure presentation concern (don't render empty-empty rows).
+  // Drop empty-empty groups (no entries and no kept-on-truck).
   const groupsWithContent: RedistributionGroup[] = view.groups.filter(
     (g) => g.entries.length > 0 || g.keptOnTruck > 0,
   );

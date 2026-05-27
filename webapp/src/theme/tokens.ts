@@ -1,14 +1,4 @@
-/**
- * Design tokens — single source of truth for the UI.
- *
- * Consumed by:
- *   - `tailwind.config.ts` (extends Tailwind's theme)
- *   - `src/index.css` (mirrored as CSS custom properties for runtime access)
- *   - `src/components/charts/theme.ts` (Recharts palette & shared props)
- *
- * Keep values in raw CSS units (px / unitless) so both Tailwind and CSS vars
- * can consume them without translation.
- */
+/** Design tokens -- single source of truth for the UI. Consumed by Tailwind, index.css, charts. */
 
 export const tokens = {
   color: {
@@ -168,9 +158,7 @@ export const tokens = {
   },
 
   chart: {
-    // Note: palette is assembled in `src/components/charts/theme.ts` by
-    // referencing the brand/accent/status scales above, so there is no
-    // duplicated hex here. Kept as an empty tuple for structural parity.
+    // Palette is assembled in components/charts/theme.ts from the scales above; empty tuple kept for shape.
     palette: [] as readonly string[],
     axis: {
       stroke:   "#cbd5e1", // neutral-300

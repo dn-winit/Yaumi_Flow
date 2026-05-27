@@ -1,18 +1,20 @@
 # API
-fastapi>=0.115.0
-uvicorn[standard]>=0.30.0
-pydantic>=2.0
-pydantic-settings>=2.0
-python-dotenv>=1.0
+fastapi>=0.115.0,<1.0
+uvicorn[standard]>=0.30.0,<1.0
+pydantic>=2.0,<3.0
+pydantic-settings>=2.0,<3.0
+python-dotenv>=1.0,<2.0
 
-# Upstream HTTP (live actuals via data_import)
-httpx>=0.27
+# Upstream HTTP clients (live actuals via data_import, recs via recommended_order,
+# briefings via llm_analytics). Single shared minimum across services so the
+# request-id propagation contract stays uniform.
+httpx>=0.27,<1.0
 
-# Database (save sessions to YaumiAIML)
-pyodbc>=5.0
+# Database (save sessions to YaumiAIML via common.db_pool with deadlock retry)
+pyodbc>=5.0,<6.0
 
-# Data shaping
-pandas>=2.0
+# Data shaping (feedback_loader frames + redistribution math)
+pandas>=2.0,<3.0
 
-# Scheduler (auto-visit reconciler ticks)
-APScheduler>=3.10
+# Scheduler (auto-visit reconciler ticks + scheduler_audit hook)
+APScheduler>=3.10,<4.0

@@ -3,8 +3,16 @@ __pycache__/
 *.py[cod]
 *.pyo
 .venv/
+venv/
 *.egg-info/
 .pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+.coverage.*
+htmlcov/
+coverage.xml
+.tox/
 
 # ── Node / Webapp ───────────────────────────────────────
 webapp/node_modules/
@@ -14,6 +22,8 @@ webapp/tsconfig.tsbuildinfo
 
 # ── Environment (secrets — never commit) ────────────────
 .env
+.env.local
+.env.*.local
 */.env
 
 # ── Data (large CSVs / artifacts produced by pipelines) ─
@@ -21,10 +31,16 @@ data/*.csv
 data/imports/
 data/forecast/
 data/recommendations/
+data/supervision/
+
+# ── Leader-election lock files (process-bound, not tracked) ─
+**/scheduler.lock
+**/scheduler.lock.pid
 
 # ── Demand Forecast artifacts (regeneratable) ──────────
 demand_forecasting_pipeline/artifacts/**/*.pkl
 demand_forecasting_pipeline/artifacts/**/*.csv
+demand_forecasting_pipeline/artifacts/**/*.parquet
 
 # ── Recommended Order (generated output + runtime state)─
 recommended_order/output/
@@ -45,6 +61,10 @@ llm_analytics/cache/
 
 # ── Logs ────────────────────────────────────────────────
 *.log
+logs/
+
+# ── Memory (auto-memory files) ─────────────────────────
+memory/
 
 # ── Temp / scratch files ────────────────────────────────
 _tmp_*

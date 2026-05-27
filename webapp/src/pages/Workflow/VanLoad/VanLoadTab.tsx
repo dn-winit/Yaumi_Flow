@@ -34,21 +34,14 @@ export default function VanLoadTab() {
   const [forecastOpen, setForecastOpen] = useState(false);
   const [explainRow, setExplainRow] = useState<Row | null>(null);
 
-  // Filter dimensions (warehouse + route with parent-warehouse mapping)
-  // come from data_import; journey counts come from recommended_order.
-  // Both feed the route-picker grid only -- gate them on ``!routeCode``
-  // so a refresh that already has a route in the URL skips two
-  // network round-trips that would never render anything.
+  // Picker-only data; gated on !routeCode so a URL refresh skips two unused fetches.
   const pickerVisible = !routeCode;
   const dims = useFilterDimensions(undefined, pickerVisible);
   const filterOpts = useFilterOptions(date, pickerVisible);
 
   const routes = dims.data?.routes ?? [];
 
-  // One backend fetch carries the summary, the chart, and the table.
-  // Server has already aggregated, sorted, filtered, and substituted
-  // canonical fields, so the page binds and renders -- no client-side
-  // compute. Tile == chart == table by construction.
+  // Single fetch carries summary + chart + table; server pre-aggregates so all three reconcile.
   const pageView = useVanLoadPageView(routeCode || undefined, date, Boolean(routeCode));
   const view = pageView.data;
 
@@ -63,10 +56,7 @@ export default function VanLoadTab() {
     />
   ) : (
     <div className="space-y-6">
-      {/* Page header carries the live scope: route + date are both fixed
-          once the supervisor enters the detail view. The date was
-          picked on the route-picker page, so it shows here as a read-
-          only label. Use "Back to routes" to change either. */}
+      {/* Read-only route + date; "Back to routes" to change either. */}
       <ContextStrip
         items={[
           { label: "Route", value: routeCode },
@@ -133,10 +123,7 @@ export default function VanLoadTab() {
                 yKey="predicted"
                 height={300}
                 onBarClick={(p) => {
-                  // Build a minimal Row for the modal from the bar's item
-                  // code by looking up the matching table row -- table
-                  // and chart are derived from the same load_df on the
-                  // server, so the lookup always succeeds.
+                  // Look up the table row by item code -- chart and table share the same server load_df.
                   const code = String((p as { item_code?: string }).item_code ?? "");
                   const row = view.table_rows.find((r) => r.item_code === code);
                   if (!row) return;
@@ -145,10 +132,7 @@ export default function VanLoadTab() {
                     ItemName: row.item_name,
                     RouteCode: routeCode,
                     TrxDate: date,
-                    // Headline = total truck weight (carry + fresh) so
-                    // the modal headline matches the table's "On truck"
-                    // column. Fresh part is forwarded separately so
-                    // the math chain can break it down.
+                    // Headline = total truck weight (carry + fresh); fresh part forwarded separately.
                     prediction: row.recommended_van_load,
                     units_to_load: row.units_to_load,
                     p_demand: row.p_demand,
@@ -207,11 +191,7 @@ export default function VanLoadTab() {
   );
 }
 
-/**
- * Route picker, grouped by warehouse. The grid is the picker -- no
- * separate route dropdown or warehouse filter, since each warehouse
- * already gets its own labelled section the user can scan.
- */
+/** Route picker grouped by warehouse; grid replaces the dropdown. */
 function VanLoadRouteGrid({
   routes,
   journeyCounts,
@@ -229,11 +209,7 @@ function VanLoadRouteGrid({
 }) {
   const summaryQ = useForecastRouteSummary(date);
 
-  // Build the per-route stat map once. The numbers come from
-  // /predictions/forecast/route-summary (server-aggregated, reconciled),
-  // joined with route metadata + journey counts. The grouping below
-  // is the only client-side transform -- pure presentation, no business
-  // calculation.
+  // Per-route stat map; joins server-aggregated route-summary with journey counts.
   const stats = useMemo<Record<string, RouteStat>>(() => {
     const out: Record<string, RouteStat> = {};
     const forecastByRoute: Record<string, { skus: number; qty: number }> = {};

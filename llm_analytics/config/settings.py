@@ -32,11 +32,39 @@ class Settings(BaseSettings):
     api_key: str = Field(default="", description="LLM provider API key")
     model: str = Field(default="llama-3.1-8b-instant", description="Model name/ID")
     temperature: float = Field(default=0.0, ge=0.0, le=2.0)
+    # Default ceiling; per-artifact overrides below are what live calls actually use.
     max_tokens: int = Field(default=4096, ge=256, le=32000)
+    # Per-artifact ceilings -- briefing rarely exceeds 800 output tokens, customer
+    # analysis ~1200, route analysis with 30+ customers can need 4-6k. Sized to
+    # fit P99 output without leaving headroom that wastes provider budget if a
+    # runaway response loops.
+    max_tokens_briefing: int = Field(default=1024, ge=256, le=8192)
+    max_tokens_customer_analysis: int = Field(default=1536, ge=512, le=8192)
+    max_tokens_route_analysis: int = Field(default=6144, ge=1024, le=16384)
     top_p: float = Field(default=0.1, ge=0.0, le=1.0)
     timeout: int = Field(default=45, ge=5, le=300)
-    max_retries: int = Field(default=2, ge=1, le=5)
+    # 3 retries gives one Retry-After honor + two backoff attempts. Pre-fix
+    # value of 2 burned through both attempts on transient JSON-parse blips.
+    max_retries: int = Field(default=3, ge=1, le=5)
     seed: int = Field(default=42)
+
+    # Cost telemetry -- the provider (Groq) bills in USD, period. We log USD
+    # as ground truth and also surface a converted display amount so reports
+    # match local accounting. Defaults below match Groq's published
+    # llama-3.1-8b-instant pricing as of 2025-11; override via env when the
+    # contract changes or the provider differs.
+    price_input_usd_per_million:  float = Field(default=0.05, ge=0.0)
+    price_output_usd_per_million: float = Field(default=0.08, ge=0.0)
+    # Display currency for the /cost endpoints. The USD figure is ALWAYS
+    # reported as the source of truth; this just adds a labelled second
+    # column. Set ``cost_display_rate`` to the USD->{display} rate (e.g.
+    # 3.6725 for AED on the dirham peg) so the conversion is transparent
+    # and auditable.
+    cost_display_currency: str   = Field(default="AED")
+    cost_display_rate:     float = Field(default=3.6725, ge=0.0)
+    # Ring buffer size for the /cost/today endpoint -- bounded so memory
+    # never grows with traffic. ~10k calls/day fits in the default 12000.
+    cost_buffer_size: int = Field(default=12000, ge=100, le=200000)
 
     # Prompts
     prompts_dir: str = Field(default=str(_MODULE_ROOT / "config" / "prompts"))
@@ -64,7 +92,9 @@ class Settings(BaseSettings):
     cache_janitor_every_n_writes: int = Field(default=200, ge=10, le=10000)
 
     # Data limits (prevent oversized prompts)
-    max_items_per_customer: int = Field(default=12)
+    max_items_per_customer: int = Field(default=12, ge=1, le=500)
+    max_customers_per_route: int = Field(default=50, ge=1, le=500,
+        description="Hard cap on route-performance table rows fed into the LLM prompt.")
 
     # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var.
     allow_origins: list[str] = Field(default_factory=_read_allow_origins)

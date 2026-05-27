@@ -1,9 +1,6 @@
-"""
-Accuracy service -- joins predicted (yf_demand_forecast in YaumiAIML)
-with live actual sales (VW_GET_SALES_DETAILS in YaumiLive).
+"""Accuracy service: joins predicted (YaumiAIML) with live actuals (YaumiLive).
 
-Aggregation matches the pipeline grouping exactly:
-GROUP BY (TrxDate, RouteCode, ItemCode), SUM positive QuantityInPCs.
+Aggregation: GROUP BY (TrxDate, RouteCode, ItemCode), SUM positive QuantityInPCs.
 """
 
 from __future__ import annotations
@@ -13,7 +10,6 @@ from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import (
@@ -28,28 +24,10 @@ from demand_forecasting_pipeline.src.evaluation.metrics import (
 
 logger = logging.getLogger(__name__)
 
-# ``accuracy_pct = None`` is the "no honest number" signal -- mirrors the
-# Pipeline summary endpoint's nullable convention so callers (drift,
-# dashboard) never have to disambiguate "0% accurate" from "no data
-# scored". A real 0% is still a real 0%; absence is None.
-#
-# Two accuracy lenses are emitted side by side:
-#   * ``model_accuracy_pct``      -- raw model forecast vs invoiced sales.
-#                                    Apples-to-apples with the
-#                                    training-time baseline (which also
-#                                    scores raw forecast vs actual on the
-#                                    held-out test split). Drift uses
-#                                    this so recent vs baseline measures
-#                                    the same thing on both sides.
-#   * ``reconciled_accuracy_pct`` -- V5_b reconciled van-load vs
-#                                    invoiced sales. The operational
-#                                    metric: "did the rep load the right
-#                                    amount". Captures the lift from
-#                                    post-forecast reconciliation.
-#
-# ``accuracy_pct`` / ``wape`` remain as backward-compatible aliases of
-# the model lens so any legacy caller that read them gets the honest,
-# baseline-comparable number.
+# accuracy_pct=None = "no honest number"; real 0% stays a real 0%.
+# Two lenses: model_accuracy_pct (raw forecast vs actual, drift-comparable to baseline)
+# and reconciled_accuracy_pct (V5_b van-load vs actual, operational lift).
+# accuracy_pct / wape are backward-compat aliases of the model lens.
 _EMPTY_SUMMARY: dict[str, Any] = {
     "rows_compared": 0,
     "total_predicted": 0.0,
@@ -78,22 +56,11 @@ class AccuracyService:
     # Internal helpers
     # ------------------------------------------------------------------
 
-    # Errors that should NEVER be retried -- bad SQL / bad data won't
-    # become right by waiting. Re-export from db_pool so the class still
-    # surfaces ``_FATAL_ERRORS`` for any external caller that referenced
-    # it before the pool consolidation.
+    # Errors that should NEVER be retried; re-export for back-compat with prior class-level alias.
     _FATAL_ERRORS = FATAL_DB_ERRORS
 
     def _query(self, conn_str: str, sql: str, params: list) -> pd.DataFrame:
-        """Execute a SQL query and return a DataFrame via the shared pool.
-
-        Honest production semantics:
-          * Cursor timeout = ``db.query_timeout`` -- a hung warehouse
-            never blocks the request thread indefinitely.
-          * Transient errors retried with exponential back-off via
-            ``with_db_retry`` (centralised in db_pool).
-          * Programming / data errors fail fast.
-        """
+        """SQL -> DataFrame via shared pool; query_timeout-bounded, transient retries via db_pool."""
         cfg = self._s.db
         pool = get_pool(
             conn_str,
@@ -142,12 +109,9 @@ class AccuracyService:
         item_code: Optional[str] = None,
         limit: Optional[int] = 5000,
     ) -> dict[str, Any]:
-        """Return per-(date, route, item) rows with predicted + live actual.
+        """Per-(date, route, item) rows with predicted + live actual.
 
-        ``limit=None`` returns every prediction in the window (no SQL TOP
-        cap). Drift detection MUST pass ``None`` -- otherwise the summary
-        is computed on a truncated sample and ``recent_accuracy`` drifts
-        from the true number on routes/dates that scroll past the cap.
+        ``limit=None`` returns every prediction in window (drift MUST pass None).
         """
         if not self.available:
             return {
@@ -175,14 +139,49 @@ class AccuracyService:
         merged = pred_df.merge(actual_df, on=["trx_date", "route_code", "item_code"], how="left")
         merged["actual_qty"] = merged["actual_qty"].fillna(0).astype(float)
 
-        # Substitute the raw forecast with the **reconciled van load**
-        # before computing variance / WAPE / accuracy. This makes every
-        # downstream accuracy metric (drift, recent-accuracy tile,
-        # comparison rows) measure "how well did our recommendation match
-        # reality" rather than "how well did the abstract model predict".
-        # Baseline accuracy stays raw -- computed separately on test set.
-        # Falls back transparently to raw ``predicted`` if the engine is
-        # unavailable, so the path never goes blank.
+        # Settlement-window guard: drop rows within N days of today (in-flight invoices).
+        # settlement_window_days=0 disables (dev fixtures).
+        settle = int(getattr(self._s, "accuracy_settlement_window_days", 2))
+        if settle > 0 and not merged.empty:
+            # Cutoff anchored to reconciliation_refresh_timezone (business day, not UTC).
+            biz_tz = getattr(
+                self._s, "reconciliation_refresh_timezone", "UTC",
+            ) or "UTC"
+            try:
+                now_biz = pd.Timestamp.now(tz=biz_tz)
+            except Exception:
+                # Bad tz string -- fall back to UTC + warn; don't crash on config typo.
+                logger.warning(
+                    "accuracy: reconciliation_refresh_timezone=%r is not a "
+                    "valid IANA zone; falling back to UTC for settlement "
+                    "cutoff", biz_tz,
+                )
+                now_biz = pd.Timestamp.now(tz="UTC")
+            cutoff = (
+                now_biz.tz_convert(None).normalize() - pd.Timedelta(days=settle)
+            )
+            merged_dt = pd.to_datetime(merged["trx_date"], errors="coerce")
+            # Log NaT rows separately so date corruption doesn't hide inside "unsettled".
+            nat_count = int(merged_dt.isna().sum())
+            if nat_count:
+                logger.warning(
+                    "accuracy: %d rows have unparseable trx_date "
+                    "(treated as unsettled and dropped)",
+                    nat_count,
+                )
+            settled_mask = merged_dt <= cutoff
+            dropped = int((~settled_mask).sum())
+            unsettled = dropped - nat_count
+            if unsettled > 0:
+                logger.info(
+                    "accuracy: dropped %d unsettled rows (trx_date > %s; "
+                    "settlement_window_days=%d)",
+                    unsettled, cutoff.date(), settle,
+                )
+            merged = merged.loc[settled_mask].reset_index(drop=True)
+
+        # Substitute raw forecast with reconciled van load for variance/WAPE/accuracy
+        # (measures recommendation vs reality, not abstract model). Falls back to raw on engine miss.
         merged["forecast_raw"] = merged["predicted"].astype(float)
         merged = self._reconcile_predicted(merged)
 
@@ -193,8 +192,7 @@ class AccuracyService:
             0.0,
         )
 
-        # JSON-safe conversion: NaN / +/-Inf become None so the FastAPI
-        # response survives strict JSON consumers.
+        # JSON-safe: NaN / +/-Inf -> None for strict consumers.
         json_safe = merged.replace([np.nan, np.inf, -np.inf], None)
         return {
             "success": True,
@@ -214,9 +212,7 @@ class AccuracyService:
         item_code: Optional[str],
         limit: Optional[int],
     ) -> pd.DataFrame:
-        # ``limit is None`` skips the SQL TOP cap entirely -- callers that
-        # need the complete window (drift comparison, audit) pass None;
-        # paged UI calls keep a finite cap.
+        # limit=None skips the SQL TOP cap (drift/audit); paged UI keeps the cap.
         top_clause = f"TOP {int(limit)}" if limit is not None else ""
         sql = f"""
             SELECT {top_clause}
@@ -291,18 +287,11 @@ class AccuracyService:
             df["actual_qty"] = df["actual_qty"].astype(float)
         return df
 
-    # ------------------------------------------------------------------
-    # Reconciliation -- thin wrapper around the canonical helper. Drift
-    # accuracy reflects "did we load the right amount" (van-load
-    # accuracy), not raw model accuracy. Baseline is computed elsewhere.
-    # ------------------------------------------------------------------
+    # Reconciliation wrapper; drift accuracy = van-load accuracy (not raw model).
 
     @staticmethod
     def _reconcile_predicted(df: pd.DataFrame) -> pd.DataFrame:
-        """Replace each row's ``predicted`` with its V5_b reconciled value
-        using the single canonical helper. Returns the frame untouched if
-        any required column is missing (engine fallback handled inside).
-        """
+        """Overwrite ``predicted`` with V5_b reconciled load via canonical engine helper."""
         if df.empty or "predicted" not in df.columns:
             return df
         from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
@@ -325,51 +314,27 @@ class AccuracyService:
     # ------------------------------------------------------------------
 
     def _compute_summary(self, df: pd.DataFrame) -> dict[str, Any]:
-        """Score the merged comparison frame under both lenses.
+        """Score under both lenses: model (raw, baseline-comparable) + reconciled (operational).
 
-        Both ``predicted`` (V5_b reconciled van-load) and ``forecast_raw``
-        (raw model output) are present on the frame -- ``get_comparison``
-        captures the raw column before reconciliation overwrites
-        ``predicted``. Each gets its own composite_summary call so:
-
-          * ``model_accuracy_pct`` is comparable to the training-time
-            baseline (raw model vs actual on held-out test cells).
-          * ``reconciled_accuracy_pct`` is the operational "did we load
-            the right amount" metric.
-
-        Tolerances come from the SAME pipeline YAML the training-time
-        baseline uses (resolved via ``composite_kwargs_from_yaml``), so a
-        config-driven tolerance change automatically applies to drift
-        scoring -- no silent divergence from baseline.
-
-        Computing both server-side is cheap (the heavy work is the
-        cross-DB join already done) and it keeps the frontend a pure
-        renderer -- no duplicated math, no "which column to score"
-        decision in two places.
+        Tolerances from same pipeline YAML as training baseline; both computed server-side.
         """
         if df.empty:
             return _EMPTY_SUMMARY
 
-        cls_arr = (
-            df["demand_class"].astype(str).to_numpy()
-            if "demand_class" in df.columns else None
+        from demand_forecasting_pipeline.src.evaluation.metrics import (
+            resolve_class_array,
         )
+        cls_arr = resolve_class_array(df)
         kwargs = composite_kwargs_from_yaml(self._s.pipeline_config)
         actual = df["actual_qty"].to_numpy()
         reconciled = composite_summary(actual, df["predicted"].to_numpy(), cls_arr, **kwargs)
-        # ``forecast_raw`` is captured pre-reconciliation in get_comparison.
-        # If absent (defensive), the model lens degenerates to the
-        # reconciled one rather than crashing -- but get_comparison always
-        # populates it, so this branch is for unit-test safety only.
+        # forecast_raw populated pre-reconciliation; defensive fallback for unit tests.
         if "forecast_raw" in df.columns:
             model = composite_summary(actual, df["forecast_raw"].to_numpy(), cls_arr, **kwargs)
         else:
             model = reconciled
 
-        # Side metrics (mae / rmse) are scored against the reconciled
-        # number -- they describe operational error magnitude, which is
-        # what the comparison-row UI used them for. Same both-positive
-        # subset as the composite numerator, no recompute.
+        # Side metrics (mae/rmse) on reconciled, both-positive subset (same as composite numerator).
         scored = df[(df["actual_qty"] > 0) & (df["predicted"] > 0)]
         if scored.empty:
             return {
@@ -391,10 +356,7 @@ class AccuracyService:
             "model_accuracy_pct":      model["accuracy_pct"],
             "reconciled_wape":         reconciled["wape"],
             "reconciled_accuracy_pct": reconciled["accuracy_pct"],
-            # Backward-compat aliases: the legacy keys carry the model
-            # lens (the honest, baseline-comparable number) so any caller
-            # that still reads ``accuracy_pct`` gets the apples-to-apples
-            # value rather than the inflated reconciled one.
+            # Legacy keys carry the model lens (baseline-comparable).
             "wape":         model["wape"],
             "accuracy_pct": model["accuracy_pct"],
         }

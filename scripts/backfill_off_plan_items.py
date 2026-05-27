@@ -132,15 +132,22 @@ def delete_customer_rows(con: pyodbc.Connection, route: str, date: str, custs: l
 
 
 def reinit_route(route: str, date: str) -> None:
-    """Phase 1 of /session/initialize runs the reconciler synchronously."""
+    """Phase 1 of /session/initialize runs the reconciler synchronously.
+
+    Raises ``RuntimeError`` on any non-2xx response so the caller can abort
+    the batch instead of leaving the just-deleted rows orphaned.
+    """
     with httpx.Client(timeout=120) as c:
-        recs = c.post(f"{RO}/get", json={
+        recs_resp = c.post(f"{RO}/get", json={
             "route_code": route, "date": date, "limit": 5000, "offset": 0,
-        }).json().get("data") or []
+        })
+        recs_resp.raise_for_status()
+        recs = recs_resp.json().get("data") or []
     with httpx.Client(timeout=240) as c:
-        c.post(f"{SS}/session/initialize", json={
+        init_resp = c.post(f"{SS}/session/initialize", json={
             "route_code": route, "date": date, "recommendations": recs,
         })
+        init_resp.raise_for_status()
 
 
 def main() -> int:
@@ -190,19 +197,41 @@ def main() -> int:
         return 0
 
     print("\nBackfilling...")
+    failed_routes: list[str] = []
     for route, targets in by_route.items():
         custs = [c for c, _ in targets]
         delete_customer_rows(con, route, args.date, custs)
-        reinit_route(route, args.date)
-        # Sanity: re-read
+        # If the re-init fails for ANY reason (HTTP error, network, /get
+        # returns garbage) we MUST stop -- those customers' rows are
+        # already deleted; leaving them un-rehydrated would surface as
+        # missing supervision entries in the UI. Caller decides whether
+        # to retry the same route or restore from backup.
+        try:
+            reinit_route(route, args.date)
+        except Exception as exc:
+            con.rollback()
+            failed_routes.append(route)
+            print(
+                f"Route {route}: re-init FAILED ({exc!r}); "
+                f"{len(custs)} customer rows were already deleted -- "
+                "aborting to prevent further orphaning."
+            )
+            break
+        # Sanity: re-read so we can report a meaningful count.
         new_persisted = persisted_item_codes(con, route, args.date)
-        backfilled = sum(
-            1 for c in custs
-            if any(ic in new_persisted.get(c, set()) for ic in (custs))
+        backfilled = sum(1 for c in custs if c in new_persisted)
+        print(
+            f"Route {route}: re-initialised, {len(custs)} customers "
+            f"re-processed ({backfilled} confirmed re-hydrated)."
         )
-        print(f"Route {route}: re-initialised, {len(custs)} customers re-processed")
 
     con.close()
+    if failed_routes:
+        print(
+            f"\nFAILED on routes {failed_routes}. Re-run --dry-run to see "
+            "what's still missing and re-process those routes only."
+        )
+        return 1
     print("\nDone. Refresh the Visit page -- alsoBought should now hydrate.")
     return 0
 

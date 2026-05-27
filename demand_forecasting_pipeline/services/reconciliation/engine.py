@@ -1,44 +1,13 @@
-"""Reconciliation engine -- pure arithmetic, no I/O.
+"""Reconciliation engine; pure arithmetic, no I/O.
 
-V5_b base formula (all knobs from Settings):
+V5_b: P_corrected = Predicted / (1 + bias_pct);
+      load = max(carry_floor_pct * P_corrected, P_corrected - opening).
 
-    P_corrected = Predicted / (1 + bias_pct)
-    load        = max(carry_floor_pct * P_corrected,  P_corrected - opening)
+V2 layers (opt-in via per-call args; default = V5_b):
+  L1b: pair-maturity bias shrinkage by n_active_days / threshold.
+  L4:  quantile loading (newsvendor) via interpolate(q_low, q50, q_high).
 
-V2 layers (kept after the audit -- only what measurably helps):
-
-    L1b  Pair-maturity bias shrinkage
-         effective_bias = bias_pct * min(1, n_active_days / threshold)
-         Pairs with too few sale-days for the bias estimate to be
-         meaningful get a proportionally weaker correction. Pairs at
-         or above the threshold behave exactly like V5_b.
-
-    L4   Quantile loading (newsvendor)
-         target = interpolate(q_low, q50, q_high) at class_quantile
-         q50 := P_corrected. Lumpy/erratic items deliberately load
-         below the mean to trade lost-sales risk for less overnight
-         stock. Smooth items load at q50 (== V5_b behaviour).
-
-Both layers are opt-in via per-call arrays; absent argument => V5_b
-behaviour. Either can be disabled in settings without code edits.
-
-Empirically chosen on a 12-route audit: textbook ``+ z*sigma`` safety
-stock fails because ``Predicted`` is already calibrated -- layering a
-second uncertainty buffer double-counts noise. L1b + L4 add modest
-improvement over V5_b without changing the model.
-
-This module is intentionally I/O-free so the formula can be unit-tested
-deterministically and so callers can swap bias / opening sources
-without touching the engine.
-
-Two surfaces:
-
-* ``recommend_one``  -- single-row, dataclass-returning. Used by the live
-  recommendation path and any caller that needs the full diagnostic
-  breakdown for one item.
-* ``recommend_batch`` -- vectorised over numpy arrays. Used by hot paths
-  (past-performance window simulation, batch generation) where a 5-10x
-  speed-up matters and the per-row dataclass overhead is wasted.
+Two surfaces: recommend_one (dataclass, diagnostic) + recommend_batch (vectorised).
 """
 from __future__ import annotations
 
@@ -50,9 +19,7 @@ import numpy as np
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 
 
-# Decision-path labels surfaced per item so the explainability layer can
-# tell the supervisor *why* the engine emitted a given fresh quantity.
-# Centralised so writer + reader (UI tooltip) reference one set of strings.
+# Decision-path labels for explainability; one set of strings for writer + UI reader.
 DECISION_SKIP            = "skip"             # forecast <= 0
 DECISION_LEFTOVER_COVERS = "leftover_covers"  # leftover >= target
 DECISION_FRESH_LOAD      = "fresh_load"       # fresh = target - leftover
@@ -70,8 +37,7 @@ class LoadRecommendation:
     bias_pct: float = 0.0
     forecast_corrected: float = 0.0
     opening_stock: float = 0.0
-    # V2 diagnostics (populated only when the corresponding inputs are
-    # supplied; legacy callers without them see V5_b dict shape).
+    # V2 diagnostics populated only when corresponding inputs are supplied.
     loading_quantile: Optional[float] = None
     target_qty: Optional[float] = None
     recommended_load: float = 0.0
@@ -146,18 +112,12 @@ class ReconciliationEngine:
         # band, matching the model's emitted ``q_10`` / ``q_90`` columns).
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
-        # L1b input -- per-pair sample size for bias-shrinkage. None ->
-        # full correction (V5_b behaviour).
+        # L1b sample size; None -> full correction (V5_b).
         n_active_days: Optional[float] = None,
-        # Adaptive per-pair calibration ratio (preferred correction).
-        # ``None`` -> kernel falls back to legacy bias_pct formula.
+        # Preferred adaptive ratio; None -> kernel falls back to bias_pct.
         calibration_ratio: Optional[float] = None,
         typical_alloc: Optional[float] = None,
-        # Default False to match every production caller (enrich,
-        # past_performance, /recommend). The carry floor was a
-        # transitional safety net that no current path actually wants
-        # firing -- leaving the default True was a footgun for any
-        # future caller that forgot to pass the kwarg.
+        # use_carry_floor=False matches every production caller.
         use_carry_floor: bool = False,
     ) -> LoadRecommendation:
         """Compute the fresh-issuance recommendation for one (item, day)."""
@@ -182,10 +142,7 @@ class ReconciliationEngine:
             q_high_pct=q_high_pct,
         )
         load = float(loads[0])
-        # ``forecast_corrected`` is the post-L4 target -- the same value
-        # ``recommend_batch`` returns and the same value the kernel
-        # actually subtracts opening from. Identity holds:
-        #   load = max(0, forecast_corrected - opening_stock)
+        # forecast_corrected = post-L4 target; identity: load = max(0, fc - opening_stock).
         target = float(diag["target_qty"][0])
         return LoadRecommendation(
             item_code=item_code, item_name=item_name, demand_class=demand_class,
@@ -207,10 +164,7 @@ class ReconciliationEngine:
         forecasts: np.ndarray,
         bias_pcts: np.ndarray,
         openings: np.ndarray,
-        # Default False to match every production caller. See
-        # recommend_one for the rationale -- one consistent default
-        # means a caller that forgets to pass the kwarg gets the
-        # production-correct behaviour, not the dead-default 50% floor.
+        # use_carry_floor=False matches every production caller (see recommend_one).
         use_carry_floor: bool = False,
         q_lows: Optional[np.ndarray] = None,
         q_highs: Optional[np.ndarray] = None,
@@ -220,38 +174,14 @@ class ReconciliationEngine:
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        """Vectorised over (item, day) pairs.
+        """Vectorised (item, day) batch.
 
-        Required arrays (all 1-D, equal length):
-          ``forecasts``, ``bias_pcts``, ``openings``.
+        Required arrays (1-D equal-length): forecasts, bias_pcts, openings.
+        Optional V2 inputs: q_lows/q_highs (L4), classes, n_active_days (L1b),
+        calibration_ratios (preferred over bias_pct). Layers OFF when None/NaN.
 
-        Optional arrays for the V2 layers:
-          ``q_lows`` / ``q_highs`` -- model q_low_pct / q_high_pct quantile
-                                      (L4 quantile loading)
-          ``classes``              -- per-item demand-class string
-                                      (L4 quantile lookup)
-          ``n_active_days``        -- per-pair sample size (L1b shrinkage)
-          ``calibration_ratios``   -- adaptive per-pair correction
-                                      ``sum(actual)/sum(predicted)`` from
-                                      the bias service. When supplied AND
-                                      finite for a row, replaces the
-                                      capped legacy bias correction with
-                                      ``P_corrected = f * ratio``. Pairs
-                                      missing a ratio (NaN) fall back to
-                                      the legacy bias formula transparently.
-
-        Each layer is OFF when its inputs are None or fully NaN; the
-        engine falls back to V5_b for that pair, item-by-item.
-
-        Returns ``(loads, forecast_corrected, carry_floor_applied,
-        decision_path)`` where ``forecast_corrected`` is the **post-L4
-        target** -- i.e. the same number the kernel subtracts opening
-        from to produce ``loads``. Callers that persist this column
-        alongside ``opening_stock`` and ``recommended_load`` get the
-        identity ``loads = max(0, forecast_corrected - opening_stock)``
-        for free, which is what the dashboard relies on for
-        transparency. (Pre-L4 ``p_corr`` is internal-only; if a future
-        consumer needs it, surface a separate diagnostic.)
+        Returns (loads, forecast_corrected, carry_floor_applied, decision_path)
+        with identity loads = max(0, forecast_corrected - opening_stock).
         """
         loads, _p_corr, floor_applied, decisions, diag = self._kernel(
             forecasts=np.asarray(forecasts, dtype=float),
@@ -289,26 +219,8 @@ class ReconciliationEngine:
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
     ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, np.ndarray]]]:
-        """Pure numpy kernel shared by ``recommend_one`` and
-        ``recommend_batch``. One implementation, no drift between
-        single-row and batch paths.
-
-        Robustness contract -- any combination of inputs returns a
-        well-defined output:
-          * NaN / +inf forecasts treated as 0 (skip).
-          * Negative forecasts treated as 0 (skip).
-          * NaN / -inf bias treated as 0 (no correction).
-          * Bias clamped at ``_BIAS_DENOM_MIN`` so the denominator is
-            always strictly positive.
-          * NaN / negative leftover treated as 0 (truck is empty).
-          * NaN q_low / q_high       -> L4 disabled for that row.
-          * NaN n_active_days        -> L1b disabled for that row.
-          * NaN calibration_ratio    -> falls back to legacy bias formula
-                                        for that row.
-          * Negative calibration_ratio treated as 0 (dormant pair).
-          * Missing class            -> per-class default from Settings.
-          * Zero-length input        -> empty arrays in matching shape.
-        """
+        """Shared numpy kernel; NaN/inf/negative inputs all map to safe defaults
+        so a bad row never poisons the batch."""
         if forecasts.shape != bias_pcts.shape or forecasts.shape != openings.shape:
             raise ValueError(
                 f"recommend_batch: shape mismatch -- forecasts={forecasts.shape}, "
@@ -333,11 +245,7 @@ class ReconciliationEngine:
             return (loads, p_corr, floor_applied, decisions,
                     {"target_qty": target_diag, "loading_quantile": quantile_diag})
 
-        # ------- Sanitise inputs -----------------------------------------
-        # NaN / -inf treated as missing/zero so a single bad row never
-        # poisons the rest of the batch. ``+inf`` forecast falls through
-        # ``active`` mask, producing inf load -- still bounded by the
-        # upstream forecast cap, never crashes.
+        # Sanitise inputs (NaN/-inf -> 0; +inf falls through active mask but never crashes).
         f = np.where(np.isfinite(forecasts), forecasts, 0.0)
         b = np.where(np.isfinite(bias_pcts), bias_pcts, 0.0)
         o = np.where(np.isfinite(openings) & (openings > 0), openings, 0.0)

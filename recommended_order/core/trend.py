@@ -1,6 +1,4 @@
-"""
-Trend calculator -- detects accelerating / declining purchase patterns.
-"""
+"""Trend calculator: accelerating / declining purchase patterns."""
 
 from __future__ import annotations
 
@@ -17,13 +15,8 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class _TrendThresholds:
-    """Ratio boundaries for trend classification.
-
-    These remain as a small internal dataclass because the trend factor is
-    a mathematical transform (ratio -> multiplier), not a business
-    threshold we'd calibrate per route. A Sprint-2 enhancement may move
-    these to calibration when we have enough signal.
-    """
+    """Ratio boundaries for trend classification (math transform, not
+    business thresholds; may move to calibration later)."""
     accelerating_fast: float = 0.8
     accelerating: float = 0.9
     stable_upper: float = 1.1
@@ -41,10 +34,7 @@ class TrendCalculator:
     def __init__(self) -> None:
         self._t = _TrendThresholds()
 
-    # Two-gap (3-purchase) trend signal is half-strength: enough to nudge
-    # qty for newly emerging acceleration / decline patterns without
-    # over-committing on noisy data. Once a 4th purchase lands, the
-    # outlier-trimmed-median path takes over at full strength.
+    # 2-gap signal at half strength; full strength activates from 4+ gaps.
     _LOW_CONFIDENCE_DAMPING: float = 0.5
 
     def calculate(
@@ -55,7 +45,7 @@ class TrendCalculator:
         if item_history is None or item_history.empty:
             return TrendInfo(1.0, "NO_DATA")
 
-        # TrxDate is already datetime64 (normalised at load); skip re-parsing.
+        # TrxDate already datetime64 (normalised at load).
         dates = item_history["TrxDate"].sort_values().unique()
         if len(dates) < 3:
             return TrendInfo(1.0, "INSUFFICIENT_DATA", {"purchase_count": len(dates)})
@@ -66,9 +56,7 @@ class TrendCalculator:
             return TrendInfo(1.0, "INSUFFICIENT_DATA")
 
         if n_gaps == 2:
-            # Exactly two gaps: compare them directly. Outlier removal is
-            # meaningless on n=2, so we accept both points and damp the
-            # resulting factor below.
+            # Outlier removal meaningless on n=2; damp the factor instead.
             historical = float(gaps[0])
             recent = float(gaps[1])
             damping = self._LOW_CONFIDENCE_DAMPING
@@ -97,7 +85,7 @@ class TrendCalculator:
             factor, ttype = self._t.factor_declining_fast, "DECLINING_FAST"
 
         if damping < 1.0 and ttype != "STABLE":
-            # Pull factor toward 1.0 (neutral) by ``damping``; tag the type.
+            # Pull factor toward 1.0 by ``damping``.
             factor = 1.0 + damping * (factor - 1.0)
             ttype = f"{ttype}_LOW_CONF"
 

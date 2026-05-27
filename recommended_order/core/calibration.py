@@ -1,26 +1,10 @@
-"""
-Per-route calibration.
+"""Per-route calibration derived from observed sales distribution.
 
-All thresholds that used to be hardcoded magic numbers (0.75 completion gate,
-90d dormancy, 50-unit qty benchmark, 75/55/35/15 tier cuts, ...) are derived
-here from the observed distribution of sales on the route. Safety clamps
-live in ``SafetyClamps`` -- they are the only numeric constants allowed in
-business code.
-
-Sprint-3 additions:
-
-* **Rolling window**: ``calibrate()`` accepts ``window_days`` (the user thinks of
-  this as "last N days of behaviour") and filters ``customer_df`` to the
-  trailing window before computing percentiles. Too-little-signal windows
-  fall back to corpus-wide calibration with ``fallback=True``.
-* **Anti-overfit sanity clamp** (``_sanity_clamp``): a per-route field that is
-  more than ``sanity_clamp_zscore`` stdevs from the corpus distribution of
-  that field gets clamped to the ``sanity_clamp_percentile`` of corpus values
-  (and a warning is logged).
-* **Feedback plumbing**: ``RouteCalibration.source_weight_adjustments`` carries
-  per-source multipliers derived by ``core.feedback``.
-* **Cache safety**: LRU + TTL (bounds: ``SafetyClamps.cache_max_entries`` /
-  ``cache_ttl_seconds``). Previously unbounded.
+``calibrate()`` accepts a rolling ``window_days``; thin windows fall back
+to corpus-wide calibration. Per-route field values that drift > N stdevs
+from the corpus distribution get sanity-clamped. LRU+TTL cache bounds
+memory; per-source feedback multipliers flow through
+``RouteCalibration.source_weight_adjustments``.
 """
 
 from __future__ import annotations
@@ -46,11 +30,8 @@ logger = logging.getLogger(__name__)
 @dataclass(frozen=True)
 class RouteCalibration:
     """Per-route thresholds derived from observed sales.
-
-    The ``derived_from`` dict documents how each field was computed, including
-    (Sprint-3) the rolling-window date range actually used and a ``fallback``
-    flag when the window had insufficient signal.
-    """
+    ``derived_from`` documents how each field was computed, including the
+    rolling-window date range and a ``fallback`` flag on thin windows."""
 
     route_code: str
 
@@ -74,17 +55,11 @@ class RouteCalibration:
     priority_weights_low_freq: Dict[str, float]
     priority_weights_high_freq: Dict[str, float]
 
-    # Sprint-3: per-source multipliers from the adaptive feedback loop.
-    # Keys: "history", "basket", "peer". Missing keys default to 1.0 at use sites.
+    # Per-source feedback multipliers (history/basket/peer); missing -> 1.0.
     source_weight_adjustments: Dict[str, float] = field(default_factory=dict)
-
-    # Sprint-4: per-source sample-size confidence in the multiplier
-    # (min(1, n / k)). 0.0 when no attributed samples; 1.0 when the route
-    # has at least as many samples as the prior strength k.
+    # Per-source sample-size confidence min(1, n / k).
     feedback_confidence: Dict[str, float] = field(default_factory=dict)
-
-    # Traceability -- every number above has an entry here; Sprint-3 adds:
-    #   derived_from["window"] = {"days", "start", "end", "fallback": bool}
+    # Traceability per field; derived_from["window"] carries the rolling-window meta.
     derived_from: Dict[str, Any] = field(default_factory=dict)
 
 
@@ -179,27 +154,9 @@ def calibrate(
 ) -> RouteCalibration:
     """Return a cached ``RouteCalibration`` for ``route_code``.
 
-    Args:
-        window_days: Trailing window (days) of ``customer_df`` to calibrate from.
-            The user's mental model is "the last N days of behaviour". When the
-            window yields fewer than ``calibration_fallback_min_days`` distinct
-            dates OR fewer than ``calibration_fallback_min_customers`` customers,
-            we fall back to the full corpus-wide frame and record
-            ``derived_from["window"]["fallback"] = True``.
-        corpus_field_values: Optional corpus-wide distributions of each
-            calibration field for the anti-overfit sanity clamp. When provided,
-            per-route values farther than ``sanity_clamp_zscore`` stdevs from
-            the corpus mean are clamped to the ``sanity_clamp_percentile``.
-        source_weight_adjustments: Per-source multipliers from the feedback loop.
-            Passed through to ``RouteCalibration``; multiplicative down-weighting
-            is applied at merge time in the engine.
-
-    Cache key: (route, csv_mtime, window_days, as_of). LRU + TTL bounded by
-    ``SafetyClamps``. ``as_of`` (the target visit date) is part of the key
-    because callers filter ``customer_df`` to ``TrxDate < as_of`` upstream
-    -- different target dates produce different per-route thresholds even
-    when the source CSV is unchanged. Without it the cache would serve
-    yesterday's calibration for tomorrow's request.
+    Cache key: (route, csv_mtime, window_days, as_of). ``as_of`` matters
+    because callers apply ``TrxDate < as_of`` upstream so each target date
+    yields a different filtered frame. Thin windows fall back to corpus-wide.
     """
     c = clamps or SafetyClamps()
     w = int(window_days if window_days is not None else c.calibration_window_days)
@@ -209,8 +166,7 @@ def calibrate(
     as_of_key = as_of.date().isoformat() if as_of is not None else ""
     key = (route_code, _csv_mtime(settings), w, as_of_key)
     cached = _cache_get(key, c.cache_ttl_seconds)
-    # If feedback adjustments/confidence were provided, we must refresh --
-    # cache hits return unmodified entries so re-cache with the new multipliers.
+    # Refresh on feedback-adjustment changes; cached entries are unmodified.
     if cached is not None and not source_weight_adjustments and not feedback_confidence:
         return cached
 
@@ -233,12 +189,8 @@ def calibrate(
 def _window_filter(
     customer_df: pd.DataFrame, window_days: int, clamps: SafetyClamps,
 ) -> Tuple[pd.DataFrame, Dict[str, Any]]:
-    """Filter ``customer_df`` to the trailing ``window_days`` from its max date.
-
-    Returns the filtered frame + a ``window`` meta dict. If the window is
-    degenerate (too few days or customers), we return the *unfiltered* frame
-    with ``fallback=True`` and the range of the unfiltered frame.
-    """
+    """Trailing ``window_days`` filter; degenerate windows return the full
+    frame with ``fallback=True`` in the meta dict."""
     if customer_df.empty or "TrxDate" not in customer_df.columns:
         return customer_df, {
             "days": int(window_days),
@@ -301,13 +253,9 @@ def _sanity_clamp(
     *,
     clamps: SafetyClamps,
 ) -> Tuple[float, Dict[str, Any]]:
-    """Clamp ``route_value`` to the corpus percentile when it's an outlier.
-
-    If |route_value - corpus_mean| / corpus_std > ``sanity_clamp_zscore``, the
-    route value is pulled to the ``sanity_clamp_percentile`` of the corpus
-    distribution and a warning is logged. Returns ``(clamped_value, meta)``.
-    Small or degenerate corpora are a no-op.
-    """
+    """Clamp outlier ``route_value`` to ``sanity_clamp_percentile`` of the
+    corpus when |z| > ``sanity_clamp_zscore``. Small/degenerate corpora
+    are a no-op."""
     arr = np.asarray([float(v) for v in corpus_distribution if v is not None], dtype=float)
     arr = arr[np.isfinite(arr)]
     if arr.size < 5:
@@ -355,7 +303,7 @@ def _compute(
 ) -> RouteCalibration:
     derived: Dict[str, Any] = {}
 
-    # Sprint-3: apply the rolling window up-front. Everything below uses windowed.
+    # Rolling window applied up-front; everything below uses windowed.
     windowed, window_meta = _window_filter(customer_df, window_days, c)
     derived["window"] = window_meta
 
@@ -524,7 +472,7 @@ def _compute(
         "blending": "linear in frequency",
     }
 
-    # ---- Sprint-3: anti-overfit sanity clamp against corpus distributions ----
+    # Anti-overfit sanity clamp against corpus distributions.
     sanity_meta: Dict[str, Any] = {}
     if corpus_field_values:
         for name, current in (

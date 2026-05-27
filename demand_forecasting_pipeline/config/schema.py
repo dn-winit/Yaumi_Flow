@@ -1,23 +1,7 @@
-"""
-Pydantic schema for ``config.yaml``.
+"""Pydantic schema for ``config.yaml``: fail-fast structural + cross-rule validation.
 
-The pipeline depends on ~80 distinct knobs spread across 14 top-level
-keys. Without an explicit schema, a typo in a routing rule's model
-name (``ligthgbm`` instead of ``lightgbm``) silently disables the rule
-at runtime; an off-by-one threshold (``adi_intermittent_threshold:
-13.2``) silently mis-classifies the entire fleet. The schema below:
-
-  * Validates structure and types up-front so misconfigurations fail
-    at boot, not three steps into a one-hour training run.
-  * Pins a ``version`` key so downstream releases can detect stale
-    configs and refuse to run against them.
-  * Cross-validates routing rules: every model name referenced in
-    ``allow``/``exclude``/``prefer`` must exist in the model registry,
-    and every signal in ``when`` must come from the documented signal
-    list (typos surface immediately).
-
-Schema validation is opt-in via ``DF_VALIDATE_CONFIG`` (default: on).
-Set ``DF_VALIDATE_CONFIG=0`` to bypass during emergency rollbacks.
+Cross-validates routing rules against the model registry and signal list so typos
+fail at boot, not deep into a training run. Toggle via ``DF_VALIDATE_CONFIG``.
 """
 
 from __future__ import annotations
@@ -26,13 +10,10 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-# Current schema major.minor. Bump when the YAML contract changes in a
-# way that older configs can't satisfy; the loader rejects mismatches
-# so a stale config file can't take down a fresh deployment silently.
+# Bump when YAML contract breaks; loader rejects mismatches.
 SUPPORTED_VERSIONS = {"1.0"}
 
-# Operators recognised by the routing rule engine. Mirrors
-# ``src/routing/rules.py``; keep in sync with that module.
+# Mirrors ``src/routing/rules.py``; keep in sync.
 _ROUTING_OPERATORS = {
     "lt", "lte", "gt", "gte", "eq", "ne",
     "in", "not_in",
@@ -41,10 +22,8 @@ _ROUTING_OPERATORS = {
     "is_true", "is_false",
 }
 
-# Signals the routing engine knows how to materialise from the per-pair
-# stats frame. Rules referencing a signal not in this set are valid YAML
-# but will silently never fire - exactly the kind of bug this schema
-# exists to catch.
+# Signals the routing engine materialises from per-pair stats. Unknown signals
+# pass YAML but never fire -- the bug this schema catches.
 _ROUTING_SIGNALS = {
     "class",
     "adi", "cv2",
@@ -66,8 +45,7 @@ class ConfigError(ValueError):
     """Raised when ``config.yaml`` fails schema validation."""
 
 class _AllowExtra(BaseModel):
-    """Permit forward-compatible additions in YAML without forcing a
-    new schema release for every new knob."""
+    """Permit forward-compatible YAML additions without a schema release."""
 
     model_config = ConfigDict(extra="allow", arbitrary_types_allowed=True)
 
@@ -106,14 +84,11 @@ class ClassificationCfg(_AllowExtra):
     adi_intermittent_threshold: float = Field(default=1.32, gt=0)
     cv2_erratic_threshold: float = Field(default=0.49, gt=0)
     min_observations_for_classification: int = Field(default=3, ge=1)
+    # Drop EOL tail before ADI/CV^2 so dormant mature SKUs aren't mis-classed intermittent.
+    exclude_eol_tail: bool = True
 
 class WhenCfg(_AllowExtra):
-    """Loose schema -- the rule body is a dict of {signal: condition}.
-
-    Validated with a model-level check below rather than via field types
-    because ``when`` keys are signal names (variable) and values are
-    operator dicts (variable shape).
-    """
+    """Loose schema: {signal: condition} validated by model-level check below."""
 
 class RoutingRule(_AllowExtra):
     name: str
@@ -149,7 +124,8 @@ class RoutingCfg(_AllowExtra):
 class ModelsCfg(_AllowExtra):
     enabled: dict[str, list[str]]
     fallback_order: list[str] = []
-    selection_metric: str = "rmse"
+    # Single metric name OR class -> metric mapping (with optional ``default``).
+    selection_metric: str | dict[str, str] = "wape"
     model_defaults: dict[str, Any] = {}
 
 class TuningCfg(_AllowExtra):
@@ -167,8 +143,7 @@ class EvaluationCfg(_AllowExtra):
 
 class InferenceCfg(_AllowExtra):
     forecast_horizon: int = Field(default=30, ge=1)
-    # ``auto`` resolves at runtime to ``min(horizon, max(1, horizon//max_lag))``
-    # so adaptive feature horizons don't need a manual config bump.
+    # ``auto`` resolves to ``min(horizon, max(1, horizon//max_lag))`` at runtime.
     recursive_iterations: int | Literal["auto"] = "auto"
 
 class FeatureEngineeringCfg(_AllowExtra):
@@ -178,8 +153,7 @@ class FeatureEngineeringCfg(_AllowExtra):
     horizon_safe_lags: bool = True
 
 class PipelineConfig(_AllowExtra):
-    """Top-level config schema. Unknown keys are preserved (extra='allow')
-    so YAML extensions don't require a coupled schema release."""
+    """Top-level config schema; unknown keys preserved via extra='allow'."""
 
     version: str = Field(..., description="Schema version, e.g. '1.0'.")
     project: ProjectCfg = ProjectCfg()
@@ -206,21 +180,15 @@ class PipelineConfig(_AllowExtra):
 
     @model_validator(mode="after")
     def _cross_validate(self) -> "PipelineConfig":
-        # Lazy import: registry pulls heavy ML deps and is unavailable
-        # during simple syntax checks (e.g. CI's `python -m py_compile`).
+        # Lazy import: registry pulls heavy ML deps, unavailable for syntax-only checks.
         try:
             from demand_forecasting_pipeline.src.models.registry import REGISTRY
-            # ``ensemble`` is a meta-model -- composed at training time
-            # from already-trained class members, not registered as a
-            # Forecaster subclass. Treat it as a known name so config
-            # validation doesn't reject a perfectly valid menu.
+            # ``ensemble`` is a meta-model composed at train time; treat as known.
             known_models = set(REGISTRY.keys()) | {"ensemble"}
         except Exception:
             known_models = None
 
-        # Every model name in models.enabled / fallback_order must be
-        # registered. Unknown names silently get filtered by the registry
-        # at training time -- catch them here so the failure is loud.
+        # Validate model names in models.enabled / fallback_order against registry.
         if known_models is not None:
             for cls_, names in (self.models.enabled or {}).items():
                 for name in names:
@@ -259,13 +227,10 @@ class PipelineConfig(_AllowExtra):
         return self
 
 def validate_config(raw: dict[str, Any]) -> dict[str, Any]:
-    """Validate ``raw`` against ``PipelineConfig`` and return it unchanged
-    on success. On failure, raises ``ConfigError`` with a path-prefixed
-    message so the offending field is obvious from the boot log.
+    """Validate ``raw`` against ``PipelineConfig``; return it unchanged on success.
 
-    The function returns the *raw* dict (not the parsed model) because
-    callers downstream still treat the config as a plain ``dict``; the
-    schema is a pure gatekeeper.
+    Raises ``ConfigError`` with path-prefixed message. Returns the raw dict (not the
+    parsed model) since downstream callers still treat config as plain dict.
     """
     try:
         PipelineConfig.model_validate(raw)

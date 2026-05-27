@@ -1,54 +1,24 @@
-"""Auto-visit reconciler -- mirrors live invoices into yf_supervision_*.
+"""Auto-visit reconciler -- mirrors live YaumiLive invoices into yf_supervision_*.
 
-The browser-driven path (UI mounts -> polls live actuals -> fires
-``/session/visit``) only writes rows while a supervisor has the route
-page open. This reconciler removes that dependency: every poll cycle
-it walks each configured route, fetches today's invoiced customers
-from YaumiLive (via data_import), diffs against existing DB rows,
-and upserts the missing visits.
-
-End-to-end flow per (route, date):
-
-  1. Get-or-create the in-memory session for ``route, date``.
-     Recommendations are pulled from ``recommended_order`` so the
-     session is scored against the same baseline the supervisor sees.
-
-  2. Fetch invoiced customers from YaumiLive (planned + unplanned).
-
-  3. Skip customers already persisted (idempotent across ticks).
-
-  4. For each new customer:
-       - Planned   -> standard ``SessionManager.process_visit`` path
-                      (full coverage / accuracy / score).
-       - Unplanned -> register an ad-hoc ``SessionCustomer`` from the
-                      live actuals (no recommended baseline) so the
-                      DB row captures the activity even though it's
-                      out of plan.
-
-  5. Trigger LLM analyses (per-customer briefing+retro and, when the
-     planned set is fully visited, the route-level retro). Optional
-     -- gated by ``llm_analytics_url``; absent means we just skip.
-
-  6. Upsert each customer through the same ``DbSaver.upsert_visit``
-     used by the manual path -- one persist surface, no drift.
-
-The reconciler is idempotent and crash-safe: a tick that fails
-mid-route logs and leaves whatever it had completed in the DB. The
-next tick re-evaluates from scratch.
+Removes the browser dependency: per tick, each configured route fetches today's
+invoiced customers, diffs against the DB, then upserts via the same DbSaver path
+used by /session/visit. Idempotent + crash-safe; failed mid-route ticks leave
+partial state and the next tick re-evaluates.
 """
 from __future__ import annotations
 
 import logging
 import threading
-from concurrent.futures import ThreadPoolExecutor
+import time
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, field
 from datetime import date as _date_cls, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-# Phase concurrency caps live in Settings (auto_visit_data_phase_workers,
-# auto_visit_llm_phase_workers) so ops can tune them per environment
-# without a code change. See config/settings.py for the bounds.
+# Phase concurrency caps live in Settings; see config/settings.py.
 
+from common.numeric import safe_float, safe_int
 from sales_supervision.config.settings import Settings, get_settings
 from sales_supervision.core.constants import TIER_UNPLANNED, is_unplanned_customer
 from sales_supervision.core.session import SessionManager
@@ -60,10 +30,31 @@ from sales_supervision.models.schemas import (
 )
 from sales_supervision.services.db_saver import DbSaver
 from sales_supervision.services.live_actuals import LiveActualsClient
-from sales_supervision.services.llm_client import LlmClient
 from sales_supervision.services.recommended_order_client import RecommendedOrderClient
 
 logger = logging.getLogger(__name__)
+
+
+def _session_item_from_rec(rec: dict) -> "SessionItem":
+    """Build a SessionItem from one yf_recommended_orders row.
+
+    Single source of truth for the rec -> SessionItem mapping so the "new
+    customer" branch and the "missing item on existing customer" branch in
+    _merge_planned_customers can't drift.
+    """
+    from sales_supervision.models.schemas import SessionItem
+    return SessionItem(
+        item_code=str(rec.get("ItemCode", "")),
+        item_name=str(rec.get("ItemName", "")),
+        recommended_qty=int(rec.get("RecommendedQuantity", 0) or 0),
+        tier=str(rec.get("Tier", "")),
+        priority_score=safe_float(rec.get("PriorityScore")),
+        days_since_last_purchase=int(rec.get("DaysSinceLastPurchase", 0) or 0),
+        purchase_cycle_days=safe_float(rec.get("PurchaseCycleDays")),
+        frequency_percent=safe_float(rec.get("FrequencyPercent")),
+        van_inventory_qty=int(rec.get("VanLoad", 0) or 0),
+        raw=rec,
+    )
 
 
 @dataclass
@@ -74,9 +65,6 @@ class TickReport:
     date: str
     planned_visits: int = 0
     unplanned_visits: int = 0
-    llm_briefing_calls: int = 0
-    llm_customer_calls: int = 0
-    llm_route_calls: int = 0
     error: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
@@ -85,9 +73,6 @@ class TickReport:
             "date": self.date,
             "planned_visits": self.planned_visits,
             "unplanned_visits": self.unplanned_visits,
-            "llm_briefing_calls": self.llm_briefing_calls,
-            "llm_customer_calls": self.llm_customer_calls,
-            "llm_route_calls": self.llm_route_calls,
             "error": self.error,
         }
 
@@ -95,31 +80,11 @@ class TickReport:
 @dataclass
 class _SessionCacheEntry:
     session: Session
-    # Visit count at the most recent route-LLM fire. The end-of-day
-    # route summary refreshes whenever new visits have landed since
-    # the last fire -- so by the final tick of the day, the DB column
-    # holds the most complete state. ``0`` means "never fired in this
-    # process" (cross-restart fires once before catching up).
-    last_visit_count_at_route_llm: int = 0
-    # Signature of the last route-header upsert the cron sent to the
-    # DB. ``None`` forces the next tick to write so a process restart
-    # always re-stamps once. After that, the cron skips
-    # ``refresh_route_header`` when the live summary state is byte-
-    # identical to the persisted one -- no MERGE on idle routes, no
-    # noise in the DB write log, no wasted lock acquisition every 60s.
+    # Last route-header signature persisted by the cron; None forces re-stamp on restart.
     last_header_signature: Optional[Tuple[Any, ...]] = None
-    # Wall-clock instant of the last reconcile_route tick for this
-    # cached entry. Read by the TTL eviction sweep so entries for
-    # (route, date) pairs no operator has touched for hours get
-    # dropped -- keeps ``_sessions`` from growing unbounded across
-    # multi-day operation.
+    # Wall-clock of the last tick; drives TTL eviction so _sessions stays bounded.
     last_seen_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
-    # Per-session lock serialising in-memory mutation across the worker
-    # pool. process_visit / _register_unplanned mutate session.customers
-    # and assign visit_sequence by scanning the current max -- two
-    # threads without a lock would race on the sequence. Held only for
-    # the in-memory mutation + snapshot capture (microseconds); released
-    # before the slow HTTP / DB work each worker does.
+    # Serialises in-memory mutation across the worker pool (process_visit, _register_unplanned).
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -134,25 +99,16 @@ class AutoVisitService:
         live_actuals: LiveActualsClient,
         recommended_order: RecommendedOrderClient,
         db_saver: DbSaver,
-        llm_client: LlmClient,
     ) -> None:
         self._s = settings or get_settings()
         self._sessions: Dict[str, _SessionCacheEntry] = {}  # session_id -> entry
-        # Guards every read and mutation of ``_sessions``. Reentrant so
-        # one tick's resolve -> upsert chain can re-enter without
-        # deadlocking. Without this, /session/initialize's
-        # ``invalidate_route`` iterating ``_sessions.items()`` while the
-        # 60s reconcile cron's ``_resolve_session`` was writing the same
-        # dict raised ``RuntimeError: dictionary changed size during
-        # iteration`` under load (browser tab open + cron tick = race).
+        # Reentrant lock so a tick's resolve -> upsert chain can re-enter without deadlocking.
         self._sessions_lock = threading.RLock()
         self._mgr = session_manager
         self._live = live_actuals
         self._recs = recommended_order
         self._db = db_saver
-        self._llm = llm_client
-        # Last successful reconcile_all completion. Read by /health to
-        # expose data freshness; reference assignment is atomic in CPython.
+        # Read by /health for data freshness; atomic reference assignment in CPython.
         self._last_reconcile_at: Optional[datetime] = None
 
     @property
@@ -164,23 +120,18 @@ class AutoVisitService:
     # ------------------------------------------------------------------
 
     def reconcile_all(self) -> List[Dict[str, Any]]:
-        """Run one full reconciliation pass across every configured route."""
-        date = _date_cls.today().strftime("%Y-%m-%d")
-        # Heartbeat the moment the cron begins working so /health flips
-        # out of ``reconcile_stale`` immediately. Without this, health
-        # only updated at end-of-tick, leaving the indicator at
-        # "degraded" for the full 30-90s+ of a fresh-boot pass even
-        # though the cron was running fine. We also re-stamp inside
-        # the per-route loop so a long full-fleet tick (LLM phase
-        # enabled, 5+ minutes) never accumulates a lag larger than one
-        # route's processing time -- the 2x poll threshold in
-        # ``health.py`` is dimensioned for per-route, not per-tick.
+        """Run one full reconciliation pass across every configured route.
+
+        Date is computed in the configured business timezone (default Asia/Dubai)
+        rather than server-local. Without this, a UTC host serving a Dubai
+        operation would reconcile against "yesterday" for the four hours each
+        day where UTC is still on the previous date while the UI is on today.
+        """
+        tz = ZoneInfo(self._s.auto_visit_timezone)
+        date = datetime.now(tz).date().strftime("%Y-%m-%d")
+        # Heartbeat at tick start so /health flips out of reconcile_stale immediately.
         self._last_reconcile_at = datetime.now(timezone.utc)
-        # Evict cache entries whose (route, date) pairs nobody has
-        # touched in ``auto_visit_session_ttl_seconds``. Cheap walk
-        # under the existing _sessions_lock; runs once per tick so
-        # ``_sessions`` never accumulates more than the active routes
-        # actually being reconciled plus a TTL-bounded tail.
+        # TTL-evict idle (route, date) cache entries each tick.
         self._evict_stale_sessions()
         out: List[Dict[str, Any]] = []
         for route in self._configured_routes():
@@ -190,20 +141,12 @@ class AutoVisitService:
                 logger.exception("Auto-visit tick failed for %s: %s", route, exc)
                 rep = TickReport(route_code=route, date=date, error=str(exc))
             out.append(rep.to_dict())
-            # Per-route heartbeat: a long tick (LLM phase enabled, 12
-            # routes x ~25s/route) used to leave health "stale" for
-            # minutes even though the cron was actively writing. With
-            # this stamp, lag tracks the gap between consecutive route
-            # completions -- always well under the 2x poll threshold.
+            # Per-route heartbeat keeps lag below the 2x-poll health threshold during long ticks.
             self._last_reconcile_at = datetime.now(timezone.utc)
         if any(r.get("planned_visits") or r.get("unplanned_visits") for r in out):
             logger.info("Auto-visit tick summary: %s", out)
         else:
-            # Heartbeat for ticks where nothing landed -- still proves
-            # the cron is alive and surfaces silent skips. Without this,
-            # a fully-skipped tick was invisible in the logs and an
-            # operator had no way to tell whether the scheduler was
-            # running at all.
+            # Heartbeat for no-op ticks so the cron is provably alive in the log.
             skipped = sum(1 for r in out if r.get("error"))
             logger.info(
                 "Auto-visit tick heartbeat: %d routes processed, %d skipped",
@@ -217,20 +160,9 @@ class AutoVisitService:
 
     @staticmethod
     def _route_header_signature(snapshot: Dict[str, Any]) -> Tuple[Any, ...]:
-        """Stable tuple over the summary fields persisted by the route
-        header upsert. Two ticks that produce the same tuple write the
-        same row -- so the second tick can skip the MERGE entirely.
+        """Stable tuple over fields persisted by _upsert_route_header; equal tuples skip the MERGE.
 
-        Fields chosen to **exactly mirror** the bound values in
-        ``DbSaver._upsert_route_header`` -- one entry per UPDATE column
-        whose value comes from the snapshot. Columns the upsert sets to
-        a constant (``session_status='active'``, ``session_started_at``
-        on INSERT only, ``llm_route_analysis`` excluded from UPDATE)
-        don't need a signature entry because skipping the MERGE leaves
-        them at their last-written value (correct). If a new mutable
-        column is wired into ``_upsert_route_header``, the corresponding
-        snapshot key must be appended HERE -- otherwise the guard would
-        silently elide an UPDATE the supervisor needs to see.
+        IMPORTANT: keep in sync with the UPDATE column set in DbSaver._upsert_route_header.
         """
         return (
             snapshot.get("plannedCustomers"),           # customers_planned
@@ -239,21 +171,13 @@ class AutoVisitService:
             snapshot.get("visitedRecommended"),         # visited_qty_recommended
             snapshot.get("visitedActual"),              # visited_qty_actual
             snapshot.get("visitedAchievement"),         # route_performance_score
-            # Drop-in counters live on customer rows, not the header,
-            # but they DO move ``visitedAchievement`` so they're
-            # captured transitively. Keep them in the tuple anyway so a
-            # plan change that adjusts drop-ins without moving the
-            # achievement still triggers a write.
             snapshot.get("unplannedVisitedCustomers"),
             snapshot.get("remainingCustomers"),
             snapshot.get("status"),
         )
 
     def _evict_stale_sessions(self) -> None:
-        """Drop ``_sessions`` entries whose last-seen timestamp is older
-        than ``auto_visit_session_ttl_seconds``. Bounded memory growth
-        across multi-day operation; idempotent (a no-op when every
-        cached entry is fresh)."""
+        """Drop _sessions entries older than auto_visit_session_ttl_seconds."""
         ttl = int(self._s.auto_visit_session_ttl_seconds)
         if ttl <= 0:
             return
@@ -275,33 +199,14 @@ class AutoVisitService:
         self,
         route_code: str,
         date: str,
-        *,
-        skip_llm: bool = False,
     ) -> TickReport:
-        """Reconcile a single (route, date) pair. Caller catches and logs.
+        """Reconcile a single (route, date) -- data sync only.
 
-        Runs in three decoupled phases so a slow LLM call never blocks
-        the DB sync supervisors are watching:
+        Phase 0: refresh route header from session state (idle-tick skip).
+        Phase 1: parallel data sync (live YaumiLive actuals -> DB upsert).
 
-          Phase 1 -- Data sync. Walks new YaumiLive invoices and
-                     upserts visit rows in parallel (cap from
-                     ``auto_visit_data_phase_workers``). HTTP + DB
-                     only; no LLM. Catches up the ``Visited X/Y``
-                     tile in seconds.
-          Phase 2 -- LLM analyses. Pre-visit briefings and customer
-                     retros fire in a smaller pool (cap from
-                     ``auto_visit_llm_phase_workers``) because LLM
-                     providers rate-limit. Idempotent against the DB
-                     columns so a tick that ran phase 2 can re-run
-                     cheaply.
-          Phase 3 -- Route-level retro. Single shot, refreshes when
-                     new visits have landed since the last fire.
-
-        ``skip_llm`` short-circuits phases 2 and 3 -- used by the
-        synchronous /session/initialize hook so the page snaps to the
-        correct ``visited`` count in seconds, not after every per-
-        customer LLM call. The 60s cron picks up the LLM phases on the
-        next tick (idempotent), so nothing is lost.
+        LLM phases are gone -- analyses are generated on-demand by the webapp
+        directly against llm_analytics; the cron no longer fires them.
         """
         report = TickReport(route_code=str(route_code), date=str(date))
 
@@ -309,10 +214,7 @@ class AutoVisitService:
         session = self._resolve_session(route_code, date)
         if session is None:
             report.error = "no recommendations available; cannot scope a session"
-            # Visible heartbeat so a route stuck on an empty-cache miss
-            # doesn't go silently dark for a whole shift. Logged at
-            # WARNING so a routinely-empty route (genuinely no plan
-            # today) is greppable but doesn't pollute INFO with noise.
+            # WARNING so an empty route is greppable without polluting INFO.
             logger.warning(
                 "Auto-visit skip route=%s date=%s -- no recommendations yet "
                 "(retrying next tick; check recommended_order data load if "
@@ -321,20 +223,7 @@ class AutoVisitService:
             )
             return report
 
-        # ---- Phase 0: Stamp the route header from current session state.
-        # Cheap (one UPDATE-or-INSERT). Guarantees customers_planned /
-        # customers_visited / visited_qty_* always reflect the latest
-        # formula, even on a fully-idempotent tick where Phases 1/2/3
-        # all short-circuit. Without this, a route that completed
-        # earlier in the day keeps stale counts forever.
-        #
-        # Signature guard: skip the upsert when the summary state is
-        # byte-identical to the last one we wrote for this (route,
-        # date). On idle routes (route done for the day, no new visits
-        # landing) this collapses the 60s tick into pure no-op --
-        # eliminates ~1440 wasted MERGE calls per route per day.
-        # ``None`` signature forces a write on the first tick after
-        # process boot so a restart always re-asserts the header once.
+        # Phase 0: refresh route header from session state; signature guard skips no-op writes on idle routes.
         snapshot = session.to_dict()
         sig = self._route_header_signature(snapshot)
         with self._sessions_lock:
@@ -354,31 +243,9 @@ class AutoVisitService:
             report.planned_visits, report.unplanned_visits = (
                 self._sync_visits_parallel(session, invoiced)
             )
-
-        if skip_llm:
-            return report
-
-        # ---- Phase 2: LLM analyses (parallel, cap=auto_visit_llm_phase_workers) ----
-        if self._llm.configured and self._s.auto_visit_llm_enabled:
-            report.llm_briefing_calls = self._fire_pending_briefings_parallel(session)
-            report.llm_customer_calls = self._fire_customer_llms_parallel(session)
-
-        # ---- Phase 3: Route-level retro (single shot) ----
-        # Refreshes whenever new visits have landed since the last fire,
-        # so the LATEST tick of the day always wins and the DB column
-        # holds the end-of-day state by close of business.
-        with self._sessions_lock:
-            cache = self._sessions[session.session_id]
-        current_visit_count = sum(
-            1 for c in session.customers.values() if c.visited
-        )
-        if (self._llm.configured
-                and self._s.auto_visit_llm_enabled
-                and current_visit_count > 0
-                and current_visit_count > cache.last_visit_count_at_route_llm):
-            self._fire_route_llm(session)
-            cache.last_visit_count_at_route_llm = current_visit_count
-            report.llm_route_calls += 1
+            # Bust the load_session_visits cache for this (route, date) so /saved reads fresh DB state.
+            if report.planned_visits or report.unplanned_visits:
+                self._db.invalidate_saved_visits(route_code, date)
 
         return report
 
@@ -391,16 +258,10 @@ class AutoVisitService:
         session: Session,
         invoiced: List[Dict[str, Any]],
     ) -> Tuple[int, int]:
-        """Walk YaumiLive invoices, upsert each customer's visit + items
-        in parallel. Every invoiced customer is re-processed on every
-        tick so the DB tracks YaumiLive's current state -- returns,
-        voids, and late-arriving line items all propagate within one
-        cron cadence. ``process_visit`` and ``upsert_visit`` are
-        idempotent on (route, date, customer); ``_register_unplanned``
-        preserves the original ``visit_sequence`` on re-touch so visit
-        ordering stays stable across ticks.
+        """Upsert every invoiced customer in parallel so returns/voids propagate within one tick.
 
-        Returns ``(planned_count, unplanned_count)``.
+        process_visit / upsert_visit are idempotent on (route, date, customer);
+        _register_unplanned preserves visit_sequence on re-touch. Returns (planned, unplanned).
         """
         with self._sessions_lock:
             cache = self._sessions[session.session_id]
@@ -428,17 +289,18 @@ class AutoVisitService:
 
         def _process(target: Tuple[str, str, Dict[str, int]]) -> str:
             code, cust_name, actuals = target
+            # Mutate the in-memory session under ``lock`` (short critical
+            # section) and snapshot it; release the lock BEFORE the DB write
+            # so other workers actually run in parallel on their own customer.
+            # Previously the entire DB upsert was inside ``with lock`` and the
+            # ThreadPoolExecutor delivered zero real parallelism.
             with lock:
                 if code in session.customers and any(
                     it.recommended_qty > 0 for it in session.customers[code].items
                 ):
                     kind = "planned"
                     self._mgr.process_visit(session, code, actuals)
-                    # Refresh off-plan items in place: drop the previous
-                    # set, re-derive from the current actuals. Planned
-                    # items keep their rec_qty + the actuals process_visit
-                    # just wrote. ``yf_supervision_items`` then byte-tracks
-                    # YaumiLive line by line.
+                    # Refresh off-plan items in place so supervision_items byte-tracks YaumiLive.
                     cust = session.customers[code]
                     cust.items = [it for it in cust.items if it.recommended_qty > 0]
                     planned_codes = {it.item_code for it in cust.items}
@@ -462,7 +324,13 @@ class AutoVisitService:
                 else:
                     kind = "unplanned"
                     self._register_unplanned(session, code, cust_name, actuals)
+                # Deep-copy via to_dict() to detach the snapshot from the
+                # live session; concurrent mutations on other customers must
+                # not race against the upsert reader below.
                 snapshot = session.to_dict()
+            # DB write happens outside the lock so true N-way parallelism is
+            # restored across workers writing different (route, date, customer)
+            # MERGE targets.
             self._db.upsert_visit(snapshot, code)
             return kind
 
@@ -478,156 +346,8 @@ class AutoVisitService:
                     unplanned += 1
         return planned, unplanned
 
-    # ------------------------------------------------------------------
-    # Phase 2 -- parallel LLM analyses
-    # ------------------------------------------------------------------
-
-    def _fire_pending_briefings_parallel(self, session: Session) -> int:
-        """Pre-visit briefings for every planned customer whose
-        ``llm_pre_visit_briefing`` column is still NULL. Parallel,
-        cap=auto_visit_llm_phase_workers. Idempotent against the DB column."""
-        already_briefed = self._db.list_customers_with_briefing(
-            session.route_code, session.date,
-        )
-        snapshot = session.to_dict()
-        targets: List[str] = []
-        for code, cust in session.customers.items():
-            if code in already_briefed:
-                continue
-            if not cust.items or is_unplanned_customer(cust):
-                continue
-            targets.append(code)
-        if not targets:
-            return 0
-
-        def _fire(code: str) -> int:
-            return self._fire_briefing_one(session, code, snapshot=snapshot)
-
-        with ThreadPoolExecutor(
-            max_workers=self._s.auto_visit_llm_phase_workers,
-            thread_name_prefix=f"av-llm-brief-{session.route_code}",
-        ) as pool:
-            return sum(pool.map(_fire, targets))
-
-    def _fire_briefing_one(
-        self,
-        session: Session,
-        customer_code: str,
-        *,
-        snapshot: Optional[Dict[str, Any]] = None,
-    ) -> int:
-        """Fire one pre-visit briefing and persist it.
-
-        Shared primitive used by both the parallel cron path and the
-        per-/visit fire path. ``snapshot`` is passed by the cron (one
-        snapshot per tick, reused across all customers); the /visit
-        path leaves it ``None`` and we snapshot here. Returns 1 if the
-        briefing landed, 0 otherwise.
-
-        ``save_pre_visit_briefing`` is always called, even when the LLM
-        returned None -- the shared save path upserts the route header
-        and the customer row first, then conditionally writes the
-        briefing column. An LLM failure still leaves a customer row in
-        place (column NULL, ready for retry) and route-header counts
-        always match customer-table cardinality.
-        """
-        cust = session.customers.get(customer_code)
-        if cust is None:
-            return 0
-        items_payload = [
-            {
-                "item_code": it.item_code,
-                "item_name": it.item_name,
-                "recommended_qty": int(it.recommended_qty),
-                "tier": it.tier,
-                "purchase_cycle_days": float(it.purchase_cycle_days or 0.0),
-                "days_since_last_purchase": int(it.days_since_last_purchase or 0),
-                "frequency_percent": float(it.frequency_percent or 0.0),
-            }
-            for it in cust.items
-        ]
-        briefing = self._llm.pre_visit_briefing(
-            customer_code=customer_code,
-            customer_name=cust.customer_name,
-            route_code=session.route_code,
-            date=session.date,
-            items=items_payload,
-        )
-        snap = snapshot if snapshot is not None else session.to_dict()
-        self._db.save_pre_visit_briefing(snap, customer_code, briefing)
-        return 1 if briefing else 0
-
-    def _fire_customer_llms_parallel(self, session: Session) -> int:
-        """Customer-level retro analyses for every visited customer
-        whose ``llm_performance_analysis`` column is still NULL.
-        Parallel, cap=auto_visit_llm_phase_workers. Subsumes the previous tick's
-        catch-up loop -- one source of truth for "which customers need
-        an analysis"."""
-        already_analysed = self._db.list_customers_with_performance_analysis(
-            session.route_code, session.date,
-        )
-        targets = [
-            code for code, cust in session.customers.items()
-            if cust.visited and code not in already_analysed
-        ]
-        if not targets:
-            return 0
-
-        def _fire(code: str) -> int:
-            self._fire_customer_llm(session, code)
-            return 1
-
-        with ThreadPoolExecutor(
-            max_workers=self._s.auto_visit_llm_phase_workers,
-            thread_name_prefix=f"av-llm-cust-{session.route_code}",
-        ) as pool:
-            return sum(pool.map(_fire, targets))
-
-    def fire_llms_for_visit(
-        self, session: Session, customer_code: str,
-    ) -> None:
-        """Fire briefing + customer LLM for one newly-visited customer.
-
-        Called from /session/visit's BackgroundTask after the visit
-        upsert lands so the green-dot moment populates the LLM columns
-        within seconds instead of waiting up to 60s for the cron tick.
-        Both fires are idempotent against the DB columns -- a column
-        already populated short-circuits the LLM call. Route analysis
-        stays on the cron's per-tick rhythm so a single route summary
-        covers a burst of visits instead of firing per-visit.
-        """
-        if not self._llm.configured or not self._s.auto_visit_llm_enabled:
-            return
-        cust = session.customers.get(customer_code)
-        if cust is None:
-            return
-
-        if cust.items and not is_unplanned_customer(cust):
-            already_briefed = self._db.list_customers_with_briefing(
-                session.route_code, session.date,
-            )
-            if customer_code not in already_briefed:
-                self._fire_briefing_one(session, customer_code)
-
-        if cust.visited:
-            already_analysed = self._db.list_customers_with_performance_analysis(
-                session.route_code, session.date,
-            )
-            if customer_code not in already_analysed:
-                self._fire_customer_llm(session, customer_code)
-
     def invalidate_route(self, route_code: str, date: str) -> None:
-        """Drop any cached session for ``(route_code, date)``.
-
-        Called by /session/initialize so the next reconcile rebuilds
-        from the current journey plan + DB state. Without this, a
-        customer added to today's plan after the cron's session was
-        cached would never appear as inplan -- the cache returns the
-        stale session unchanged. Pre-existing visit + LLM rows survive
-        because the next ``_resolve_session`` falls through to the DB
-        rebuild branch, which calls ``hydrate_saved_visits`` to restore
-        them.
-        """
+        """Drop cached session for (route_code, date); next reconcile rebuilds via DB hydration."""
         with self._sessions_lock:
             stale = [
                 sid for sid, cache in self._sessions.items()
@@ -637,29 +357,35 @@ class AutoVisitService:
             for sid in stale:
                 self._sessions.pop(sid, None)
 
+    def invalidate_all_for_date(self, date: str) -> int:
+        """Drop every cached session matching ``date``; returns count evicted.
+
+        Used by the demand_forecasting retrain cascade: after fresh recs land
+        in yf_recommended_orders, every cached supervision session for today
+        is scoring against stale recommendations. The next reconcile tick
+        re-hydrates from DB and picks up the new plan.
+        """
+        target = str(date)
+        with self._sessions_lock:
+            stale = [
+                sid for sid, cache in self._sessions.items()
+                if cache.session.date == target
+            ]
+            for sid in stale:
+                self._sessions.pop(sid, None)
+        return len(stale)
+
     # ------------------------------------------------------------------
     # Session resolution
     # ------------------------------------------------------------------
 
     def _resolve_session(self, route_code: str, date: str) -> Optional[Session]:
-        """Return a session for (route, date), reusing across ticks AND
-        across process restarts.
+        """Return a session for (route, date) across ticks and restarts.
 
-        Resolution order:
-          1. In-process cache -- the running scheduler reuses the same
-             ``Session`` object across consecutive ticks.
-          2. DB lookup -- after a restart, the cache is empty; we
-             rebuild the session from the most-recent header row in
-             ``yf_supervision_routes`` so the existing ``session_id``
-             is reused, NOT replaced. This keeps the LLM idempotency
-             contract (already-briefed customers stay skipped).
-          3. Fresh creation -- only when no DB row exists. Pulls
-             recommendations from recommended_order to scope the
-             planned customer set.
+        Order: in-process cache, then DB rebuild (keeps original session_id for LLM idempotency),
+        then fresh creation from recommended_order.
         """
-        # 1. In-process cache. Stamp ``last_seen_at`` so the TTL
-        # eviction sweep does not drop an active (route, date) entry
-        # under the operator's nose.
+        # 1. In-process cache; stamp last_seen_at so the TTL sweep can't drop active entries.
         now = datetime.now(timezone.utc)
         with self._sessions_lock:
             for cache in self._sessions.values():
@@ -688,45 +414,84 @@ class AutoVisitService:
 
     @staticmethod
     def _merge_planned_customers(session: Session, recs: list) -> None:
-        """Add planned customers from ``recs`` to a rebuilt session
-        when they're not already present. Existing customers (rebuilt
-        from DB rows OR previously merged this tick) keep their state;
-        only customers absent from the rebuild get added.
+        """Merge recs into a (possibly DB-rebuilt) session, healing zero-rec items.
 
-        Recommendation rows are row-per-(customer, item); a customer
-        with N recommended items shows up as N rows. We snapshot the
-        set of pre-existing customer codes BEFORE the loop so each new
-        customer accumulates ALL their item rows. A naive
-        ``ccode in session.customers`` check after each insert would
-        treat the second row for a newly-added customer as "already
-        merged" and silently drop items 2..N -- the bug this guards
-        against.
+        Two modes per customer:
+          * NEW customer (not in session.customers): create the customer + append
+            every rec row as a SessionItem.
+          * EXISTING customer (already in session.customers): for each rec, find
+            the matching SessionItem by item_code. If found AND its recommended_qty
+            is zero (typical for a session created BEFORE the rec cron fired),
+            OVERWRITE the rec/planning fields from the incoming rec. If not found,
+            append it. This is the self-healing path that closes the rec-timing
+            race -- a session born with empty recs is repaired the next time
+            this method runs against a non-empty rec list.
+
+        Item-name + tier are ALSO overwritten when the in-memory value is empty,
+        because the same race produces empty item names (no master-lookup at
+        visit time when the customer came in via the unplanned branch).
+
+        Snapshots pre-existing codes BEFORE the loop so each new customer
+        accumulates all N rec rows (a naive in-place check would drop items
+        2..N from a NEW customer being built up across multiple recs).
         """
         from sales_supervision.models.schemas import SessionCustomer, SessionItem
         pre_existing: Set[str] = set(session.customers.keys())
         for rec in recs:
             ccode = str(rec.get("CustomerCode", ""))
-            if not ccode or ccode in pre_existing:
+            if not ccode:
                 continue
             cust = session.customers.get(ccode)
+
+            if ccode not in pre_existing:
+                # NEW customer: build from scratch (one customer, many rec rows).
+                if cust is None:
+                    cust = SessionCustomer(
+                        customer_code=ccode,
+                        customer_name=str(rec.get("CustomerName", "")),
+                    )
+                    session.customers[ccode] = cust
+                cust.items.append(_session_item_from_rec(rec))
+                continue
+
+            # EXISTING customer: heal zero/empty fields, leave non-empty
+            # in-memory values alone (they represent rep actuals or manual edits).
             if cust is None:
-                cust = SessionCustomer(
-                    customer_code=ccode,
-                    customer_name=str(rec.get("CustomerName", "")),
+                continue  # shouldn't happen given pre_existing membership
+
+            # Heal blank customer_name from the rec.
+            if not (cust.customer_name and cust.customer_name.strip()):
+                cust.customer_name = str(rec.get("CustomerName", "")) or cust.customer_name
+
+            icode = str(rec.get("ItemCode", ""))
+            if not icode:
+                continue
+            rec_qty = int(rec.get("RecommendedQuantity", 0) or 0)
+
+            matched = next((it for it in cust.items if it.item_code == icode), None)
+            if matched is None:
+                # Item missing from in-memory cust.items: append from rec.
+                cust.items.append(_session_item_from_rec(rec))
+                continue
+
+            # Heal: if in-memory rec is zero but incoming is non-zero, OVERWRITE.
+            if matched.recommended_qty == 0 and rec_qty > 0:
+                matched.recommended_qty = rec_qty
+                matched.tier = str(rec.get("Tier", "")) or matched.tier
+                matched.priority_score = safe_float(rec.get("PriorityScore")) or matched.priority_score
+                matched.days_since_last_purchase = (
+                    int(rec.get("DaysSinceLastPurchase", 0) or 0) or matched.days_since_last_purchase
                 )
-                session.customers[ccode] = cust
-            cust.items.append(SessionItem(
-                item_code=str(rec.get("ItemCode", "")),
-                item_name=str(rec.get("ItemName", "")),
-                recommended_qty=int(rec.get("RecommendedQuantity", 0)),
-                tier=str(rec.get("Tier", "")),
-                priority_score=float(rec.get("PriorityScore", 0)),
-                days_since_last_purchase=int(rec.get("DaysSinceLastPurchase", 0)),
-                purchase_cycle_days=float(rec.get("PurchaseCycleDays", 0)),
-                frequency_percent=float(rec.get("FrequencyPercent", 0)),
-                van_inventory_qty=int(rec.get("VanLoad", 0)),
-                raw=rec,
-            ))
+                matched.purchase_cycle_days = (
+                    safe_float(rec.get("PurchaseCycleDays")) or matched.purchase_cycle_days
+                )
+                matched.frequency_percent = (
+                    safe_float(rec.get("FrequencyPercent")) or matched.frequency_percent
+                )
+                matched.raw = rec
+            # Heal blank item_name regardless of rec_qty -- empty names are useless to readers.
+            if not matched.item_name:
+                matched.item_name = str(rec.get("ItemName", "")) or matched.item_name
 
     def _register_unplanned(
         self,
@@ -735,13 +500,7 @@ class AutoVisitService:
         customer_name: str,
         actual_sales: Dict[str, int],
     ) -> None:
-        """Register (or refresh) a drop-in customer's invoiced items.
-
-        Re-callable: on first touch the customer is assigned the next
-        visit_sequence; on subsequent ticks the original sequence is
-        preserved so visit ordering stays stable while items rebuild
-        from current YaumiLive state.
-        """
+        """Register/refresh a drop-in customer; preserves the original visit_sequence on re-touch."""
         items = [
             SessionItem(
                 item_code=str(ic), item_name="",
@@ -767,113 +526,9 @@ class AutoVisitService:
             items=items,
             visited=True,
             visit_sequence=seq,
-            # No baseline to score against -- coverage/accuracy/score = 0.
+            # No baseline to score against; coverage/accuracy/score = 0.
             score=ScoreResult(score=0.0, coverage=0.0, accuracy=0.0),
         )
-
-    # ------------------------------------------------------------------
-    # LLM triggers (in-flow pipeline)
-    #
-    # Three steps, each fires automatically as the operational state
-    # advances -- no manual intervention required:
-    #
-    #   1. Pre-visit briefing  -- after session scoping, before any
-    #                              visit. One per planned customer.
-    #   2. Customer analysis   -- after a visit lands (we have actuals).
-    #                              One per visited customer.
-    #   3. Route analysis      -- after every planned customer in the
-    #                              route is visited. One per route.
-    #
-    # Each step is idempotent against the DB: if the column is already
-    # populated, the LLM is skipped on the next tick.
-    # ------------------------------------------------------------------
-
-    def _fire_customer_llm(self, session: Session, customer_code: str) -> None:
-        """Run customer-level analysis and persist via DbSaver. No-ops on
-        any failure -- the visit row is already in DB without it.
-
-        ``items_payload`` carries the full per-item planning context
-        (cycle, days_since, frequency, was_sold) so the prompt's
-        EXAMPLE STRUCTURE -- which already cites those fields -- has
-        ground truth to draw from. Without these the LLM either
-        hallucinated frequencies or fell back to generic prose.
-        """
-        cust = session.customers.get(customer_code)
-        if cust is None:
-            return
-        items_payload = [
-            {
-                "item_code": it.item_code,
-                "item_name": it.item_name,
-                "recommended_qty": int(it.recommended_qty),
-                "actual_qty": int(it.actual_qty),
-                "tier": it.tier,
-                "purchase_cycle_days": float(it.purchase_cycle_days or 0.0),
-                "days_since_last_purchase": int(it.days_since_last_purchase or 0),
-                "frequency_percent": float(it.frequency_percent or 0.0),
-                "was_sold": bool(it.was_sold),
-            }
-            for it in cust.items
-        ]
-        analysis = self._llm.analyze_customer(
-            customer_code=customer_code,
-            route_code=session.route_code,
-            date=session.date,
-            current_items=items_payload,
-            performance_score=cust.score.score,
-            coverage=cust.score.coverage,
-            accuracy=cust.score.accuracy,
-        )
-        if analysis is not None:
-            self._db.save_customer_analysis(session.to_dict(), customer_code, analysis)
-
-    def _fire_route_llm(self, session: Session) -> None:
-        """Run end-of-day route summary covering BOTH planned and
-        unplanned visits.
-
-        Route totals (``total_actual`` / ``total_recommended``) are
-        derived from the **same** per-customer rows the prompt's body
-        renders, NOT from ``session.total_*``. This guarantees the
-        header line and the per-customer table cannot disagree -- the
-        contradiction "achieving 3566 units but every customer at 0%"
-        that earlier route summaries produced is impossible by
-        construction once the two reads share one source.
-        """
-        visited_customers = [c for c in session.customers.values() if c.visited]
-        visited = [
-            {
-                "customer_code": c.customer_code,
-                "customer_name": c.customer_name,
-                "is_planned": not is_unplanned_customer(c),
-                "score": float(c.score.score),
-                "coverage": float(c.score.coverage),
-                "accuracy": float(c.score.accuracy),
-                "total_actual": int(c.total_actual),
-                "total_recommended": int(c.total_recommended),
-                "item_count": len(c.items),
-                "items_sold": c.items_sold,
-            }
-            for c in visited_customers
-        ]
-        planned_count = sum(
-            1 for c in session.customers.values()
-            if not is_unplanned_customer(c)
-        )
-        # Derived from the per-customer rows above -- identical source,
-        # zero risk of header/body contradiction in the prompt.
-        derived_total_actual = sum(v["total_actual"] for v in visited)
-        derived_total_recommended = sum(v["total_recommended"] for v in visited)
-        analysis = self._llm.analyze_route(
-            route_code=session.route_code,
-            date=session.date,
-            visited_customers=visited,
-            total_customers=planned_count,
-            total_actual=derived_total_actual,
-            total_recommended=derived_total_recommended,
-            actual_customer_codes=[c.customer_code for c in visited_customers],
-        )
-        if analysis is not None:
-            self._db.save_route_analysis(session.to_dict(), analysis)
 
     # ------------------------------------------------------------------
     # Helpers
@@ -881,13 +536,10 @@ class AutoVisitService:
 
 
     def _configured_routes(self) -> List[str]:
-        """Routes to monitor each tick. Falls back to demand-forecasting's
-        ``live_route_codes`` (already env-configured) when the supervision
-        side hasn't been pinned to its own list -- one source of truth."""
+        """Routes to monitor per tick; falls back to demand-forecasting's live_route_codes."""
         explicit = list(self._s.auto_visit_route_codes or [])
         if explicit:
             return [str(r).strip() for r in explicit if str(r).strip()]
-        # Reuse the demand-forecasting fleet so ops don't double-configure.
         try:
             from demand_forecasting_pipeline.config.settings import get_settings as df_settings
             return [str(r).strip() for r in (df_settings().live_route_codes or []) if str(r).strip()]

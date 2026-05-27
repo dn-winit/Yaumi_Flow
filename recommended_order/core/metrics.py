@@ -1,20 +1,6 @@
-"""
-Per-generator observability.
-
-Two sinks:
-
-* ``LastGenerationTracker`` -- in-memory store of the most recent generation
-  run's per-route, per-generator counts + source mix + calibration snapshot.
-  Read by the service ``/health`` endpoint (per-route last-generation
-  timestamps + rolling average duration).
-* ``MetricsCsvSink`` -- append-only single-line summary CSV under
-  ``data/generation_metrics.csv`` for trend analysis. Rotates at
-  ``SafetyClamps.generation_metrics_max_bytes`` by renaming the current file
-  to ``generation_metrics.<rotation-idx>.csv`` and starting a fresh header.
-
-Both sinks are thread-safe. Neither is on the hot path -- a single lock
-around append / snapshot is plenty.
-"""
+"""Per-generator observability. ``LastGenerationTracker`` is the
+in-memory snapshot read by /health; ``MetricsCsvSink`` is an append-only
+trend log that rotates at ``generation_metrics_max_bytes``."""
 
 from __future__ import annotations
 
@@ -31,9 +17,7 @@ from recommended_order.config.constants import SafetyClamps
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
-# CSV sink (append-only, rotated)
-# ---------------------------------------------------------------------------
+# CSV sink (append-only, size-rotated).
 
 _CSV_COLUMNS = (
     "timestamp",
@@ -92,9 +76,7 @@ class MetricsCsvSink:
             logger.warning("Failed to rotate metrics CSV: %s", exc)
 
 
-# ---------------------------------------------------------------------------
-# Last-generation tracker (read by /health for per-route freshness signals)
-# ---------------------------------------------------------------------------
+# Last-generation tracker (consumed by /health).
 
 @dataclass
 class _DurationRing:
@@ -132,14 +114,8 @@ class LastGenerationTracker:
         calibration_summary: Dict[str, Any],
         duration_seconds: float,
     ) -> None:
-        # ``isoformat()`` on a naive datetime produces no timezone
-        # suffix, which is what the downstream snapshot consumers (the
-        # /summary endpoint + dashboard tile) expect. Use the modern
-        # ``datetime.now(timezone.utc)`` to silence the utcnow()
-        # deprecation, then drop the tzinfo to preserve the legacy
-        # wire shape (``2026-05-18T13:00:00.000000`` not
-        # ``...+00:00``).
-        now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat()
+        # UTC-aware ISO so client parsers see an explicit offset.
+        now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             self._last_run_at = now
             self._last_target_date = target_date
@@ -170,9 +146,7 @@ class LastGenerationTracker:
             return round(self._durations.avg, 3)
 
 
-# ---------------------------------------------------------------------------
-# Module-level singletons (injected via dependencies)
-# ---------------------------------------------------------------------------
+# Module-level singletons (injected via dependencies).
 
 _TRACKER: Optional[LastGenerationTracker] = None
 _CSV_SINK: Optional[MetricsCsvSink] = None

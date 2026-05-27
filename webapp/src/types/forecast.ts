@@ -4,7 +4,7 @@ export interface PastPerformanceDaily {
   date: string;
   /** Rep's PHYSICAL truck total for the day (carry + fresh). */
   rep_van_load: number;
-  /** Engine's recommended truck total for the day (carry + fresh). Plotted as the "Recommended van load" bar. */
+  /** Engine's recommended truck total (carry + fresh); plotted as "Recommended van load". */
   recommended_van_load: number;
   /** Invoiced demand for the day. */
   actual_sold: number;
@@ -21,7 +21,7 @@ export interface PastPerformanceTotals {
   recommended_van_load_total: number;
   /** sum_d actual_sold. Ground-truth demand for the window. */
   actual_sold_total: number;
-  /** sum_i min(actual_sold_i, recommended_van_load_i). Units of demand the recommendation would have actually filled (capped by what was on the truck). Used server-side to compute the "% of customers served" share in the insight banner. */
+  /** sum_i min(actual_sold_i, recommended_van_load_i); powers "% of customers served". */
   served_units: number;
   /** Working days inside the window (denominator for any per-day mean). */
   active_days: number;
@@ -41,23 +41,12 @@ export interface PastPerformanceTotals {
   skus_coverage_pct: number;
 }
 
-/**
- * Per-(item, date) row backing the click-to-explain popovers on every
- * aggregate tile in the Past Performance drawer and the VanLoad summary.
- * Pre-sorted and pre-aggregated server-side. The wire is the single
- * source of truth -- the client does not re-sort, sum, or mutate.
- *
- * Each row carries the eight per-day measurements the drawer table
- * renders. Explain-modal fields (expected_demand, recent_avg_per_selling_day,
- * forecast_below_recent, ...) live on ``table_rows[*].explain`` instead
- * -- one diagnostic, one home on the wire.
- */
+/** Per-(item, date) row for click-to-explain popovers; server-sorted, never client-mutated.
+ *  Explain-modal diagnostics live on `table_rows[*].explain`, not here. */
 export interface PastPerformanceItem {
   itemCode: string;
   itemName: string;
-  /** Category the item belongs to. Empty string when the catalogue
-   *  has no CategoryName for this code -- rendered as "Uncategorised"
-   *  in the category rollup. */
+  /** Category; empty -> rendered as "Uncategorised" in the rollup. */
   categoryName: string;
   /** ISO YYYY-MM-DD date this row applies to. */
   date: string;
@@ -71,27 +60,19 @@ export interface PastPerformanceItem {
   actual_leftover: number;
   /** Naive leftover under the engine's recommendation: max(recommended_van_load - actual_sold, 0). */
   recommended_leftover: number;
-  /** Rep's prior-day leftover (yf_sales_transactions.yaumi_opening_stock),
-   *  sourced from VW_GET_CLOSING_STOCK. ``null`` for dates predating the
-   *  yaumi_* backfill or future dates with no rep activity. */
+  /** Rep's prior-day leftover (VW_GET_CLOSING_STOCK); null on pre-backfill / future dates. */
   yaumi_opening_stock?: number | null;
-  /** Rep's fresh depot allocation (yaumi_fresh_load), sourced from
-   *  VW_GET_LOAD_ALLOCATION_DETAILS. Same null semantics as above. */
+  /** Rep's fresh depot allocation (VW_GET_LOAD_ALLOCATION_DETAILS); same null semantics. */
   yaumi_fresh_load?: number | null;
   /** Rep's actual total van load (yaumi_total_van_load = opening + fresh). */
   yaumi_total_van_load?: number | null;
   /** Rep's end-of-day leftover (yaumi_leftover) after sales / returns. */
   yaumi_leftover?: number | null;
-  /** Dormancy guard flag from yf_sales_transactions.forecast_dormant.
-   *  ``true`` when the (route, item) pair had zero sales across its
-   *  route's last N trip days and the engine zeroed expected_demand
-   *  for it. ``null`` on legacy rows predating the dormancy backfill. */
+  /** True when the (route, item) was zeroed by the dormancy guard; null on legacy rows. */
   forecast_dormant?: boolean | null;
 }
 
-/** Per-category rollup row, aggregated server-side from items_payload.
- *  Identity by construction: sum(categories[*].field) == sum(items[*].field)
- *  for every numeric field below. Sorted by recommended_van_load desc. */
+/** Per-category rollup; sum(categories[*]) == sum(items[*]) by construction. Sorted desc. */
 export interface PastPerformanceCategoryRow {
   categoryName: string;
   /** Count of distinct itemCodes in the category with any activity. */
@@ -113,12 +94,9 @@ export interface PastPerformanceResponse {
   active_days?: number;
   daily: PastPerformanceDaily[];
   totals: PastPerformanceTotals;
-  /** Per-category rollup across the whole window. Empty when items
-   *  is empty. Rendered as a collapsible category breakdown table. */
+  /** Per-category rollup; empty when items is empty. */
   categories: PastPerformanceCategoryRow[];
-  /** Non-optional on the wire; backend defaults to [] when no anchor
-   *  items exist for the window. Rendered as the per-item breakdown
-   *  table; hidden entirely when empty. */
+  /** Non-optional on the wire; defaults to []. Per-item breakdown table hides when empty. */
   items: PastPerformanceItem[];
 }
 
@@ -140,9 +118,7 @@ export interface ResolvedPipelineStep {
   last_success_duration_seconds: number | null;
   /** Server-rendered metric line (formatted text, ready to display). */
   metric_text: string | null;
-  /** Server-rendered detail line. ``null`` for running steps -- the
-   *  client renders ``Running for Xs`` from started_at + a per-second
-   *  tick because that's animation, not calculation. */
+  /** Server-rendered detail; null while running (client animates "Running for Xs"). */
   detail_text: string | null;
 }
 
@@ -164,28 +140,30 @@ export interface RetrainConfig {
 
 export interface RetrainHistoryEntry {
   date: string;
+  /** Origin: "manual" | "schedule" | "drift" | "scheduled" (legacy). */
   trigger: string;
   accuracy_before: number | null;
   accuracy_after: number | null;
   duration_seconds: number;
+  /** "success" | "failed"; for success see promotion_decision for live status. */
   status: string;
+  /** Snapshot id under versions/<version_id>/; null on legacy rows. */
+  version_id?: string | null;
+  /** Gate verdict: "promote" | "reject" | "cold_start" | null (gate disabled). */
+  promotion_decision?: "promote" | "reject" | "cold_start" | string | null;
+  /** Human-readable rationale shown in the decision-badge tooltip. */
+  promotion_reason?: string | null;
 }
 
 export interface DriftStatus {
   status: "stable" | "drifting" | "significant";
-  // Apples-to-apples: raw model forecast vs invoiced actuals, scored
-  // under the same composite function the training-time baseline uses.
-  // Drift uses this for the recent vs baseline delta so the comparison
-  // is honest -- not contaminated by reconciliation lift.
+  // Raw model forecast vs invoiced actuals (no reconciliation lift) -- honest drift signal.
   recent_accuracy: number | null;
   baseline_accuracy: number | null;
   delta: number | null;
   source: "live" | "test_set" | "unavailable";
-  // Operational lens on the same window: V5_b reconciled van-load vs
-  // invoiced actuals. Always null on the test_set fallback path -- test
-  // predictions don't have a van-load to reconcile against.
+  // V5_b reconciled van-load vs actuals; null on test_set fallback.
   recent_reconciled_accuracy: number | null;
-  // Sample size that fed the recent score (cells where actual > 0 AND
-  // predicted > 0). Surfaced so the UI can render "n cells scored".
+  // Cells where actual>0 AND predicted>0; powers the "n cells scored" UI string.
   rows_compared: number | null;
 }

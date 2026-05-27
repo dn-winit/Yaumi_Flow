@@ -1,10 +1,5 @@
-"""
-Data importer -- handles incremental and full-refresh loading for all datasets.
-
-Incremental logic:
-    1. Read existing CSV, find max date
-    2. Fetch only rows after that date from DB
-    3. Append to existing CSV (deduplicate)
+"""Data importer -- incremental + full refresh for all datasets.
+Incremental: read CSV max date, fetch newer rows, append, dedup.
 """
 
 from __future__ import annotations
@@ -14,7 +9,7 @@ import os
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
@@ -25,26 +20,23 @@ from data_import.core.queries import QueryBuilder
 logger = logging.getLogger(__name__)
 
 
-# Dataset registry: key -> (file_setting, date_column, query_method, db, dim_key)
-# ``dim_key`` is the canonical natural-key column tuple used to dedup
-# merge results -- exactly the columns the upstream DB MERGE keys on,
-# nothing more. Without an explicit list, dedup defaults to "every
-# non-numeric column", which silently breaks when a non-key column
-# (e.g. ModelUsed, DemandClass) changes across training runs --
-# duplicate rows then accumulate forever in the CSV mirror.
+# Dataset registry: key -> (file_setting, date_column, query_method, db,
+#                           dim_key, retention_attr)
+# dim_key MUST match the upstream DB MERGE natural key, else non-key
+# column drift (e.g. ModelUsed) accumulates duplicates forever.
+# retention_attr bounds the CSV's date range after each merge.
 _DATASETS = {
-    "customer_data":   ("customer_data_file",   "TrxDate",     "customer_data",   "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate")),
-    "journey_plan":    ("journey_plan_file",    "JourneyDate", "journey_plan",    "live", ("RouteCode", "CustomerCode", "JourneyDate")),
-    "sales_recent":    ("sales_recent_file",    "TrxDate",     "sales_recent",    "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate")),
-    "demand_forecast": ("demand_forecast_file", "TrxDate",     "demand_forecast", "aiml", ("RouteCode", "ItemCode", "TrxDate", "DataSplit")),
-    # Sales-transactions mirror: carry chain + diagnostics + actual_sold
-    # for past + today (yf_sales_transactions). One row per (route, item,
-    # date) -- split-agnostic.
-    "sales_transactions": ("sales_transactions_file", "TrxDate", "sales_transactions", "aiml", ("RouteCode", "ItemCode", "TrxDate")),
+    "customer_data":      ("customer_data_file",      "TrxDate",     "customer_data",      "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate"),                "customer_data_lookback_days"),
+    "journey_plan":       ("journey_plan_file",       "JourneyDate", "journey_plan",       "live", ("RouteCode", "CustomerCode", "JourneyDate"),                         "journey_plan_window_days"),
+    # sales_recent is a route-level rollup (GROUP BY drops CustomerCode).
+    "sales_recent":       ("sales_recent_file",       "TrxDate",     "sales_recent",       "live", ("RouteCode", "ItemCode", "TrxDate"),                                 "sales_recent_lookback_days"),
+    "demand_forecast":    ("demand_forecast_file",    "TrxDate",     "demand_forecast",    "aiml", ("RouteCode", "ItemCode", "TrxDate", "DataSplit"),                    "demand_forecast_lookback_days"),
+    # Sales-transactions mirror: carry chain + diagnostics + actual_sold.
+    "sales_transactions": ("sales_transactions_file", "TrxDate",     "sales_transactions", "aiml", ("RouteCode", "ItemCode", "TrxDate"),                                 "sales_transactions_lookback_days"),
     # Van-stock reconciliation inputs
-    "closing_stock":   ("closing_stock_file",   "TrxDate",     "closing_stock",   "live", ("RouteCode", "ItemCode", "TrxDate")),
-    "load_allocation": ("load_allocation_file", "TrxDate",     "load_allocation", "live", ("RouteCode", "ItemCode", "TrxDate")),
-    "returns_recent":  ("returns_recent_file",  "TrxDate",     "sales_returns",   "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate")),
+    "closing_stock":      ("closing_stock_file",      "TrxDate",     "closing_stock",      "live", ("RouteCode", "ItemCode", "TrxDate"),                                 "closing_stock_lookback_days"),
+    "load_allocation":    ("load_allocation_file",    "TrxDate",     "load_allocation",    "live", ("RouteCode", "ItemCode", "TrxDate"),                                 "load_allocation_lookback_days"),
+    "returns_recent":     ("returns_recent_file",     "TrxDate",     "sales_returns",      "live", ("RouteCode", "CustomerCode", "ItemCode", "TrxDate"),                 "sales_returns_lookback_days"),
 }
 
 
@@ -65,52 +57,57 @@ class DataImporter:
     # Public API
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _csv_has_column(path: Path, column: str) -> bool:
+        """Cheap header probe so the chunked merge can decide whether the
+        existing CSV carries the dataset's date column without paying a
+        full read. Reads exactly one row."""
+        try:
+            head = pd.read_csv(path, nrows=0)
+            return column in head.columns
+        except Exception:
+            return False
+
     def import_dataset(
         self,
         dataset: str,
         mode: str = "incremental",
         lookback_days: Optional[int] = None,
+        routes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        """
-        Import a single dataset.
+        """Import a single dataset.
 
-        Args:
-            dataset: "customer_data", "journey_plan", or "sales_recent"
-            mode: "incremental" (append new rows) or "full" (replace all)
-            lookback_days: Optional refresh window for incremental mode.
-                When set, the importer re-pulls the last N days regardless
-                of the CSV's max date, then dedup-merges (last-write-wins
-                on numeric aggregates). Required when an upstream producer
-                UPDATES existing rows (e.g. ``reconciliation_refresh``
-                rewriting demand_forecast); pure-append
-                ``trx_date > max_csv_date`` would miss those updates.
+        ``mode``: ``"incremental"`` (append) or ``"full"`` (replace).
+        ``lookback_days``: refresh-window override for incremental; required
+        when upstream UPDATEs existing rows (pure-append would miss them).
+        ``routes``: subset for gentle backfills (default = fleet from settings).
         """
         if dataset not in _DATASETS:
             return {"success": False, "error": f"Unknown dataset: {dataset}. Use: {list(_DATASETS.keys())}"}
 
-        file_attr, date_col, query_method, db, dim_key = _DATASETS[dataset]
+        file_attr, date_col, query_method, db, dim_key, retention_attr = _DATASETS[dataset]
         file_path = self._s.data_path(getattr(self._s, file_attr))
 
         t0 = time.time()
 
-        # Decide the SQL window + whether to merge with the existing CSV.
-        #   ``full``                       -> replace CSV outright.
-        #   ``incremental`` + lookback_days -> refresh window: re-pull the
-        #       last N days, dedup-merge with existing CSV. Catches row
-        #       UPDATEs that pure-append would miss.
-        #   ``incremental`` + existing CSV -> auto-detect from max(date)
-        #       and append rows strictly after it.
-        #   ``incremental`` + no CSV       -> pull the query's default
-        #       window into a fresh CSV.
+        # SQL window + merge decision:
+        #   full -> replace CSV; incremental+lookback_days -> refresh window;
+        #   incremental+CSV -> append since max(date); incremental+no-CSV -> default.
         query_fn = getattr(self._qb, query_method)
         since_date: Optional[str] = None
         existing_rows = 0
         merge_with_existing = False
 
+        # Threads the ``routes`` override through every branch.
+        def _build(**kwargs):
+            if routes is not None:
+                kwargs["routes"] = routes
+            return query_fn(**kwargs)
+
         if mode == "full":
-            sql, params = query_fn()
+            sql, params = _build()
         elif lookback_days and file_path.exists():
-            sql, params = query_fn(lookback_days=int(lookback_days))
+            sql, params = _build(lookback_days=int(lookback_days))
             merge_with_existing = True
             existing_rows = self._detect_last_date(file_path, date_col)[1]
             logger.info(
@@ -120,16 +117,16 @@ class DataImporter:
         elif mode == "incremental" and file_path.exists():
             since_date, existing_rows = self._detect_last_date(file_path, date_col)
             if since_date:
-                sql, params = query_fn(since_date=since_date)
+                sql, params = _build(since_date=since_date)
                 merge_with_existing = True
                 logger.info(
                     "%s: incremental from %s (%d existing rows)",
                     dataset, since_date, existing_rows,
                 )
             else:
-                sql, params = query_fn()
+                sql, params = _build()
         else:
-            sql, params = query_fn()
+            sql, params = _build()
 
         try:
             new_df = self._db.execute_query(sql, tuple(params), db=db)
@@ -151,26 +148,70 @@ class DataImporter:
         if date_col in new_df.columns:
             new_df[date_col] = pd.to_datetime(new_df[date_col]).dt.strftime("%Y-%m-%d")
 
-        # Merge with existing CSV when we pulled a partial window
-        # (incremental or refresh-window); otherwise replace outright.
-        # Dedup uses ONLY the dataset's canonical natural-key columns
-        # (the same tuple the upstream DB MERGE keys on). This is
-        # critical: a previous version used "every column except numeric
-        # aggregates" which silently let columns like ModelUsed and
-        # DemandClass drift the key across training runs -- duplicates
-        # then accumulated forever, inflating the CSV and breaking
-        # downstream sums. Restricting to the natural key + coercing
-        # to string with empty-fill makes last-write-wins propagate
-        # producer UPDATEs cleanly regardless of which non-key columns
-        # changed.
+        # Partial-window pulls merge into existing CSV; dedup uses ONLY
+        # the dataset's canonical natural key so non-key drift (ModelUsed,
+        # DemandClass) can't accumulate duplicates over training runs.
         if merge_with_existing:
-            existing_df = pd.read_csv(file_path, low_memory=False)
-            combined = pd.concat([existing_df, new_df], ignore_index=True)
+            # Hot path: in-window pull AND existing CSV has the dataset's
+            # date column. Stream the existing CSV in chunks, keeping only
+            # rows STRICTLY before ``window_min``; in-window rows come
+            # exclusively from new_df so DB DELETEs propagate without the
+            # full-history materialisation that an unfiltered ``read_csv``
+            # would force. Falls back to the legacy concat+dedup when the
+            # date column is missing on either side.
+            window_min: Optional[pd.Timestamp] = None
+            if not new_df.empty and date_col in new_df.columns:
+                new_dates = pd.to_datetime(new_df[date_col], errors="coerce")
+                wm = new_dates.min()
+                if pd.notna(wm):
+                    window_min = wm
+            can_stream = (
+                window_min is not None
+                and file_path.exists()
+                and self._csv_has_column(file_path, date_col)
+            )
+            if can_stream:
+                kept_chunks: list[pd.DataFrame] = []
+                dropped = 0
+                # 200k-row chunks keep peak memory ~tens-of-MB even on the
+                # 5y sales_recent file; the filter cost is O(chunk-rows).
+                for chunk_df in pd.read_csv(
+                    file_path, chunksize=200_000, low_memory=False,
+                ):
+                    if date_col not in chunk_df.columns:
+                        kept_chunks.append(chunk_df)
+                        continue
+                    ex_dates = pd.to_datetime(chunk_df[date_col], errors="coerce")
+                    pre_window_mask = ex_dates < window_min
+                    dropped += int((~pre_window_mask).sum())
+                    pre_window_chunk = chunk_df.loc[pre_window_mask]
+                    if not pre_window_chunk.empty:
+                        kept_chunks.append(pre_window_chunk)
+                if dropped:
+                    logger.info(
+                        "%s: DELETE-aware merge dropped %d existing CSV "
+                        "row(s) in refresh window [%s ..]; window will be "
+                        "replaced exclusively by new_df",
+                        dataset, dropped, window_min.date(),
+                    )
+                existing_kept = (
+                    pd.concat(kept_chunks, ignore_index=True)
+                    if kept_chunks
+                    else pd.DataFrame(columns=new_df.columns)
+                )
+                combined = pd.concat([existing_kept, new_df], ignore_index=True)
+            else:
+                # Legacy path: column missing or empty new_df. Loads the
+                # full CSV once; the dedup-on-keys below remains the
+                # safety net for repeat keys across the union.
+                existing_df = (
+                    pd.read_csv(file_path, low_memory=False)
+                    if file_path.exists() else pd.DataFrame(columns=new_df.columns)
+                )
+                combined = pd.concat([existing_df, new_df], ignore_index=True)
             key_cols = [c for c in dim_key if c in combined.columns]
             if not key_cols:
-                # Defensive: dataset registry mis-configured. Fall back
-                # to whole-row dedup so we at least don't accumulate
-                # exact duplicates.
+                # Defensive fallback: registry mis-configured.
                 combined = combined.drop_duplicates(keep="last")
             else:
                 combined[key_cols] = (
@@ -182,10 +223,33 @@ class DataImporter:
             combined = new_df
             total_rows = len(combined)
 
-        # Save atomically: write to a sibling .tmp then ``os.replace`` so a
-        # crash mid-write can't truncate the canonical CSV that downstream
-        # services treat as the single source of truth. ``os.replace`` is
-        # atomic on Windows + POSIX (rename-on-rename semantics).
+        # Retention prune inside the same atomic write as the merge so
+        # the CSV's date footprint stays bounded by the import contract.
+        # prune_to_lookback=False opts out (snapshot / debug pulls).
+        if self._s.prune_to_lookback and date_col in combined.columns:
+            retention_days = int(getattr(self._s, retention_attr, 0) or 0)
+            if retention_days > 0:
+                # Mirrors SQL ``DATEADD(day, -?, GETDATE())``: keep rows
+                # on/after (today - retention_days).
+                cutoff = (
+                    pd.Timestamp.now().normalize()
+                    - pd.Timedelta(days=retention_days)
+                )
+                dates = pd.to_datetime(combined[date_col], errors="coerce")
+                keep_mask = dates >= cutoff
+                pruned = int((~keep_mask).sum())
+                if pruned > 0:
+                    combined = combined.loc[keep_mask].reset_index(drop=True)
+                    total_rows = len(combined)
+                    logger.info(
+                        "%s: pruned %d row(s) older than %s "
+                        "(retention=%d days from ``%s``)",
+                        dataset, pruned, cutoff.date(),
+                        retention_days, retention_attr,
+                    )
+
+        # Atomic save: write .tmp then os.replace (rename-on-rename is
+        # atomic on Windows + POSIX) so a crash mid-write can't truncate.
         Path(file_path).parent.mkdir(parents=True, exist_ok=True)
         tmp_path = file_path.with_suffix(file_path.suffix + ".tmp")
         combined.to_csv(tmp_path, index=False)
@@ -211,35 +275,30 @@ class DataImporter:
         self,
         mode: str = "incremental",
         lookback_days: Optional[int] = None,
+        dataset_lookback_overrides: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
-        """Import all datasets in parallel.
-
-        The 7 dataset queries hit two independent DBs and are otherwise
-        independent of each other. pyodbc releases the GIL during network
-        I/O, so a small thread pool turns the cron into a single
-        connection-bounded round trip instead of a serial chain. The
-        ``import_concurrency`` setting caps fan-out so OLTP load stays
-        gentle even under a freshly-stale full refresh.
-
-        ``lookback_days`` flows through to every dataset's
-        ``import_dataset`` so a single cascade call can refresh the
-        rolling window across all mirrors.
-
-        A failure in one dataset is captured into its result dict and
-        does not block the others -- the caller still gets a complete
-        per-dataset status map.
+        """Import all datasets in parallel (thread pool sized by
+        ``import_concurrency``). Per-dataset failures are captured into
+        the result map without blocking the rest.
+        ``dataset_lookback_overrides`` pins a wider window for specific
+        datasets (e.g. sales_recent for late-arriving return netting).
         """
+        overrides = dataset_lookback_overrides or {}
+        def resolve_lookback(dataset: str) -> Optional[int]:
+            override = overrides.get(dataset)
+            return override if override and override > 0 else lookback_days
+
         workers = max(1, min(len(_DATASETS), int(self._s.import_concurrency)))
         if workers <= 1 or len(_DATASETS) <= 1:
             return {
-                dataset: self.import_dataset(dataset, mode, lookback_days=lookback_days)
+                dataset: self.import_dataset(dataset, mode, lookback_days=resolve_lookback(dataset))
                 for dataset in _DATASETS
             }
 
         results: Dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="di-import") as pool:
             future_to_dataset = {
-                pool.submit(self.import_dataset, dataset, mode, lookback_days): dataset
+                pool.submit(self.import_dataset, dataset, mode, resolve_lookback(dataset)): dataset
                 for dataset in _DATASETS
             }
             for fut in as_completed(future_to_dataset):
@@ -254,20 +313,15 @@ class DataImporter:
                         "error": str(exc),
                         "new_rows": 0,
                     }
-        # Preserve a stable key order (matches the registry) so downstream
-        # consumers iterating the response see the same shape as the serial path.
+        # Preserve registry order so the response shape matches the serial path.
         return {dataset: results[dataset] for dataset in _DATASETS if dataset in results}
 
     def status(self) -> Dict[str, Any]:
-        """Return current state of all local data files.
-
-        Per-dataset result is memoised keyed on (path, mtime, size). Only the
-        files whose mtime changed get re-parsed -- so a stable status endpoint
-        is O(1) instead of an O(N) date-column scan on every call.
-        """
+        """Return current state of all local data files. Memoised on
+        (path, mtime, size) so a stable endpoint is O(1)."""
         info: Dict[str, Any] = {}
         cache = self._status_cache
-        for dataset, (file_attr, date_col, _, _, _) in _DATASETS.items():
+        for dataset, (file_attr, date_col, _, _, _, _) in _DATASETS.items():
             file_path = self._s.data_path(getattr(self._s, file_attr))
             if not file_path.exists():
                 info[dataset] = {"exists": False, "rows": 0, "last_date": None}
@@ -297,14 +351,11 @@ class DataImporter:
         return info
 
     def test_connection(self) -> bool:
-        """Cached DB liveness probe -- avoids per-request DB connect on hot endpoints."""
+        """Cached DB liveness probe (avoids per-request DB connect)."""
         now = time.time()
         if self._conn_probe and (now - self._conn_probe[0]) < self._CONN_PROBE_TTL_SECONDS:
             return self._conn_probe[1]
-        # ``DatabaseClient.test_connection`` returns (ok, reason); only the
-        # boolean is cached on the hot endpoint for back-compat. The reason
-        # is logged inside the client at warning/error level so ops still
-        # get the diagnostic.
+        # Only the boolean is cached; client logs the reason for ops.
         result = self._db.test_connection()
         ok = bool(result[0]) if isinstance(result, tuple) else bool(result)
         self._conn_probe = (now, ok)

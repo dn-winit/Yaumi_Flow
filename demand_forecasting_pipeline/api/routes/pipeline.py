@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends
 
@@ -16,16 +17,19 @@ from demand_forecasting_pipeline.api.schemas import (
     ResolvedPipelineStatus,
     ResolvedStep,
 )
+from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
 from demand_forecasting_pipeline.services.pipeline_service import PipelineService
 
+
+def _display_tz() -> ZoneInfo:
+    """Display TZ from settings; resolved per call so env overrides take effect live."""
+    return ZoneInfo(get_settings().log_timezone)
+
 router = APIRouter(prefix="/pipeline", tags=["pipeline"])
 
-# Pipeline page step strip. One row per phase the supervisor cares
-# about; ``pipeline_keys`` are the step ids ``on_step`` callbacks emit
-# (matched against ``status['steps']``). Mirrors the legacy frontend
-# ``STEPS`` table so the wire shape and the UI ordering stay in
-# lockstep.
+# Pipeline page step strip; ``pipeline_keys`` match the step ids ``on_step`` emits.
+# Order mirrors the legacy frontend STEPS table.
 _STEPS: list[dict[str, Any]] = [
     {"key": "collection",     "name": "Data collection",       "pipeline_keys": ("data_collection", "collection")},
     {"key": "processing",     "name": "Data processing",       "pipeline_keys": ("data_processing", "processing")},
@@ -76,24 +80,30 @@ def _fmt_date(iso: Optional[str]) -> Optional[str]:
     s = str(iso).strip()
     if not s:
         return None
-    # Accept either ``YYYY-MM-DD`` or a full ISO timestamp; strip to the
-    # date portion, then format as ``DD MMM YYYY`` to match the live UI.
+    # Accept YYYY-MM-DD or ISO datetime; convert TZ-aware inputs first to avoid calendar-roll.
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%d %b %Y")
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
+        if dt.tzinfo is not None:
+            dt = dt.astimezone(_display_tz())
+        return dt.strftime("%d %b %Y")
     except ValueError:
         return s[:10]
 
 
 def _fmt_datetime(iso: Optional[str]) -> Optional[str]:
+    """ISO -> ``DD MMM YYYY, HH:MM`` in display TZ; naive input rendered as-is."""
     if not iso:
         return None
     s = str(iso).strip()
     if not s:
         return None
     try:
-        return datetime.fromisoformat(s.replace("Z", "+00:00")).strftime("%d %b %Y, %H:%M")
+        dt = datetime.fromisoformat(s.replace("Z", "+00:00"))
     except ValueError:
         return s
+    if dt.tzinfo is not None:
+        dt = dt.astimezone(_display_tz())
+    return dt.strftime("%d %b %Y, %H:%M")
 
 
 def _fmt_duration(seconds: Optional[float]) -> str:
@@ -112,9 +122,7 @@ def _resolve_step(
     step: dict[str, Any],
     statuses: dict[str, dict[str, Any]],
 ) -> tuple[str, Optional[dict[str, Any]]]:
-    """Find the first matching pipeline step status. Returns
-    ``(status, info_dict)``. ``info_dict`` is the parent pipeline run.
-    """
+    """First matching step status; returns (status, parent_run_info)."""
     pipeline_keys: tuple[str, ...] = step["pipeline_keys"]
     for pipeline in ("train", "inference"):
         run = statuses.get(pipeline)
@@ -136,9 +144,7 @@ def _resolve_step(
 def _resolve_publish(
     statuses: dict[str, dict[str, Any]],
 ) -> tuple[str, Optional[dict[str, Any]], dict[str, Any]]:
-    """The most recent run owns the publish display. Worst-of-two over
-    the two cascade substeps. Returns ``(status, run_info, cascade)``.
-    """
+    """Most recent run owns publish display; worst-of-two over cascade substeps."""
     candidates = [
         statuses[p]
         for p in ("train", "inference")
@@ -164,10 +170,7 @@ def _step_metric_text(
     publish_status: str,
     cascade_text: str,
 ) -> Optional[str]:
-    """Plain-language metric line for each phase. Mirrors the legacy
-    ``stepMetric()`` switch on the frontend so the wire string is the
-    final wording the page renders.
-    """
+    """Plain-language metric line per phase; mirrors the legacy stepMetric() switch."""
     summary = summary or {}
     overview = summary.get("training_overview") or {}
 
@@ -240,9 +243,7 @@ def _step_detail_text(
     status: str,
     info: Optional[dict[str, Any]],
 ) -> Optional[str]:
-    """Static (non-running) detail line. The running-step elapsed timer
-    is computed client-side because it ticks per second.
-    """
+    """Static (non-running) detail line; running elapsed timer is client-side."""
     if status == "failed":
         msg = (info or {}).get("error")
         if not msg:
@@ -301,9 +302,7 @@ def trigger_training(
     req: PipelineRunRequest = Body(default_factory=PipelineRunRequest),
     svc: PipelineService = Depends(get_pipeline_service),
 ):
-    """Body is optional; ``Body(default_factory=...)`` constructs a fresh
-    instance per request so a default-mutated request from one client
-    can't leak into the next."""
+    """Body optional; default_factory builds a fresh instance per request (no cross-request leak)."""
     result = svc.run_training(req.config_path)
     return PipelineRunResponse(**result)
 
@@ -328,23 +327,13 @@ def get_resolved_pipeline_status(
     pipeline_svc: PipelineService = Depends(get_pipeline_service),
     artifact_svc: ArtifactService = Depends(get_artifact_service),
 ) -> ResolvedPipelineStatus:
-    """Pipeline page composite payload.
+    """Pipeline page composite payload; page renders the list verbatim.
 
-    Walks the raw status map, runs the worst-of-two reduction for the
-    publishing step, and emits each phase with its plain-language
-    metric / detail strings already shaped. The page renders the list
-    verbatim -- no client-side step resolution, no priority compare,
-    no metric-text switch.
-
-    The only client-side compute that survives is the per-second
-    elapsed timer for a running step (presentation animation).
+    Only client-side compute: per-second elapsed timer for a running step.
     """
     raw_statuses = pipeline_svc.get_all_status() or {}
 
-    # ``training_summary`` powers the metric texts (item-route pairs,
-    # routes, model counts, etc.). Mirrors the data ``/forecast/summary``
-    # already builds, but composed inline so this endpoint owns its
-    # canonical view of the page.
+    # training_summary powers the metric texts; composed inline so this endpoint owns its view.
     summary_payload: dict[str, Any] = {}
     try:
         ts = artifact_svc.get_training_summary() or {}

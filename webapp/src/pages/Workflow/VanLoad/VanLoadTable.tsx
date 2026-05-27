@@ -7,43 +7,25 @@ import type { Row } from "@/types/common";
 import { fmtNum } from "@/lib/format";
 
 interface Props {
-  /** Pre-sorted rows from the page-view endpoint. The server has
-   *  already substituted recommended_load -> units_to_load and the
-   *  bound names -> lower_bound / upper_bound, so the table reads one
-   *  canonical field per concept. No client-side sort, no fallback. */
+  /** Pre-sorted page-view rows; no client-side sort/fallback. */
   rows: VanLoadTableRow[];
-  /** Per-(item, date) rows for the same page. Carries
-   *  yaumi_total_van_load -- the rep's actual physical loading on the
-   *  truck for this (route, item, date). Wired into the table by
-   *  joining on item_code so we surface the rep's reality alongside our
-   *  recommendation without a second fetch. ``null`` per item when no
-   *  rep data exists for that day (pre-backfill / no rep activity). */
+  /** Per-(item, date) rep loading joined by item_code; null when no rep data for that day. */
   items: PastPerformanceItem[];
   routeCode: string;
   date: string;
 }
 
-/** Adapter: wrap one page-view row plus its scope into the legacy
- *  Row shape the ExplainabilityModal expects. The modal headline reads
- *  ``prediction`` (= recommended_van_load = carry + fresh) so it
- *  matches the headline tile and the table's "On truck" column;
- *  ``units_to_load`` is also passed through so the math chain can show
- *  the fresh part separately. ``explain`` carries the business-facing
- *  diagnostics the modal renders (opening_stock,
- *  recent_avg_per_selling_day, expected_demand, forecast_below_recent,
- *  guard_skipped). */
+/** Adapter to the legacy Row shape ExplainabilityModal expects;
+ *  prediction = total truck weight, units_to_load = fresh part, explain = diagnostics. */
 function toLegacyRow(r: VanLoadTableRow, routeCode: string, date: string): Row {
   return {
     ItemCode: r.item_code,
     ItemName: r.item_name,
     RouteCode: routeCode,
     TrxDate: date,
-    // Headline = total truck weight (carry + fresh). Matches the tile
-    // and the new "On truck" table column so all three surfaces agree
-    // on what "Recommended van load" means for one item.
+    // Total truck weight (carry + fresh); matches the tile + "On truck" column.
     prediction: r.recommended_van_load,
-    // Fresh-only number, surfaced separately in the modal's math chain
-    // so the breakdown carry + fresh = total stays transparent.
+    // Fresh-only; surfaced separately so the modal's math chain stays transparent.
     units_to_load: r.units_to_load,
     p_demand: r.p_demand,
     demand_class: r.demand_class,
@@ -55,10 +37,7 @@ function toLegacyRow(r: VanLoadTableRow, routeCode: string, date: string): Row {
 }
 
 export default function VanLoadTable({ rows, items, routeCode, date }: Props) {
-  // Lookup map from item_code -> rep's actual loading numbers. Built
-  // once per render; rows[] and items[] are both pre-sized by the same
-  // server-side query so a missing key just means the day had no rep
-  // data for that item (rendered as em-dash).
+  // item_code -> rep loading lookup; missing key -> em-dash (no rep data that day).
   const yaumiByItem = new Map<string, PastPerformanceItem>();
   for (const it of items) yaumiByItem.set(it.itemCode, it);
 

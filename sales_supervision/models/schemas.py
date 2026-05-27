@@ -24,11 +24,7 @@ class SessionItem:
     purchase_cycle_days: float = 0.0
     frequency_percent: float = 0.0
     van_inventory_qty: int = 0
-    # Original PascalCase rec from the recommended_order engine. Carried
-    # verbatim so explainability fields (WhyItem, WhyQuantity, Confidence,
-    # PurchaseCount, AvgQuantityPerVisit, Signals, Source, ...) survive
-    # the round-trip into the live session and back out to the UI without
-    # the dataclass having to enumerate every field.
+    # Original PascalCase rec from recommended_order; carries explainability fields verbatim.
     raw: Dict[str, Any] = field(default_factory=dict)
 
     @property
@@ -36,15 +32,7 @@ class SessionItem:
         return self.recommended_qty + self.adjustment
 
     def to_dict(self) -> Dict[str, Any]:
-        # Canonical PascalCase shape. Order matters: canonical fields
-        # derived from dataclass attrs come first, then ``self.raw`` is
-        # spread so engine-supplied values override the defaults, and
-        # supervision-runtime fields (Actual / Adjustment / ...) land
-        # last so they always win. Earlier this method spread ``raw``
-        # first without emitting the dataclass fields -- callers that
-        # built a SessionItem with empty ``raw`` produced dicts with NO
-        # ``ItemCode`` key, which collapsed every item to ``""`` at the
-        # DB layer and tripped the ``uq_yf_si`` unique constraint.
+        # Canonical PascalCase; dataclass fields first, then raw, then supervision runtime fields (winners).
         return {
             "ItemCode":              self.item_code,
             "ItemName":              self.item_name,
@@ -63,6 +51,45 @@ class SessionItem:
             "WasEdited":            self.was_edited,
         }
 
+    def to_llm_payload(self) -> Dict[str, Any]:
+        """Canonical snake_case payload for llm_analytics.
+
+        Single source of truth for the LLM-facing item shape -- both the
+        pre-visit briefing fan-out and the post-visit customer-analysis fan-out
+        call this helper. Carries every field the prompt YAMLs read:
+        - typed fields (item_code, recommended_qty, tier, frequency_percent...)
+        - explainability fields from the rec-engine (why_item, why_quantity,
+          trend_factor, source) via ``self.raw`` lookup
+        - runtime fields (actual_qty, was_sold) for post-visit context
+
+        Adding a new field to the prompts means: add one lookup line here,
+        and every consumer gets it -- no two-tier quality across callers.
+        """
+        def _from_raw(*keys: str, default: Any = None) -> Any:
+            for k in keys:
+                v = self.raw.get(k)
+                if v is not None:
+                    return v
+            return default
+
+        return {
+            "item_code":                self.item_code,
+            "item_name":                self.item_name,
+            "recommended_qty":          int(self.recommended_qty),
+            "actual_qty":               int(self.actual_qty),
+            "tier":                     self.tier,
+            "priority_score":           float(self.priority_score or 0.0),
+            "purchase_cycle_days":      float(self.purchase_cycle_days or 0.0),
+            "days_since_last_purchase": int(self.days_since_last_purchase or 0),
+            "frequency_percent":        float(self.frequency_percent or 0.0),
+            "was_sold":                 bool(self.was_sold),
+            # Explainability fields -- carried verbatim from the rec engine.
+            "trend_factor":  _from_raw("trend_factor", "TrendFactor", "trendFactor"),
+            "why_item":      _from_raw("why_item", "WhyItem", "whyItem"),
+            "why_quantity":  _from_raw("why_quantity", "WhyQuantity", "whyQuantity"),
+            "source":        _from_raw("source", "Source"),
+        }
+
 
 @dataclass
 class ScoreResult:
@@ -79,7 +106,6 @@ class SessionCustomer:
     visited: bool = False
     visit_sequence: int = 0
     score: ScoreResult = field(default_factory=ScoreResult)
-    llm_analysis: str = ""
 
     @property
     def total_recommended(self) -> int:
@@ -107,7 +133,6 @@ class SessionCustomer:
             "totalItems": len(self.items),
             "itemsSold": self.items_sold,
             "items": [it.to_dict() for it in self.items],
-            "llmAnalysis": self.llm_analysis,
         }
 
 
@@ -140,27 +165,12 @@ class Session:
         return max((c.visit_sequence for c in self.customers.values() if c.visited), default=0)
 
     def summary(self) -> Dict[str, Any]:
-        """Wire-shaped summary the live UI binds to.
+        """Wire-shaped summary for the live UI.
 
-        Carries everything the LiveSessionTab used to compute on the
-        client: per-customer grouped items (with qty>0), per-customer
-        tile stats, and both the static recommendation totals (planned)
-        and the dynamic visit totals (live, including avg score).
-
-        ``customers_grouped`` and ``customer_tiles`` are filtered to
-        items with ``effective_recommended > 0`` and customers that
-        survive that filter -- matches the legacy frontend rule. The
-        unfiltered map is still available via ``to_dict()['customers']``
-        for the visit handler to look customers up by code.
+        ``customers_grouped`` and ``customer_tiles`` filter to items with effective_recommended > 0;
+        the unfiltered map is still available via to_dict()['customers'].
         """
-        # Two visited cohorts -- planned (rep delivered against the
-        # journey plan) and unplanned (drop-in invoices, all items
-        # tier="UNPLANNED"). Route-header counters and the "Visited X/Y"
-        # tile must compare like-with-like (planned-visited / planned),
-        # so we compute them separately. ``visit_totals.visited_count``
-        # follows the same rule -- planned-only -- because the UI's
-        # denominator (recommendation_totals.customers_count) is also
-        # planned-only.
+        # Planned vs unplanned cohorts are tracked separately so "Visited X/Y" compares like-with-like.
         from sales_supervision.core.constants import is_unplanned_customer
 
         planned = [c for c in self.customers.values() if not is_unplanned_customer(c)]
@@ -168,14 +178,24 @@ class Session:
         unplanned_visited = [c for c in self.customers.values()
                               if is_unplanned_customer(c) and c.visited]
 
-        visited_rec = sum(c.total_recommended for c in planned_visited)
-        visited_act = sum(c.total_actual for c in planned_visited)
-        avg_score = (
-            round(sum(c.score.score for c in planned_visited) / len(planned_visited), 2)
-            if planned_visited else None
+        # Shared aggregator so in-memory and DB-derived paths stay byte-identical.
+        from sales_supervision.core.visit_totals import aggregate_visit_totals
+        _aggregated = aggregate_visit_totals(
+            planned_visited=[
+                {
+                    "total_actual": c.total_actual,
+                    "total_recommended": c.total_recommended,
+                    "score": c.score.score,
+                }
+                for c in planned_visited
+            ],
+            unplanned_visited_count=len(unplanned_visited),
         )
+        visited_rec = _aggregated["total_recommended"]
+        visited_act = _aggregated["total_actual"]
+        avg_score = _aggregated["avg_score"]
 
-        # --- Pre-shaped customer payload (filter qty>0 items + drop empties)
+        # Pre-shaped customer payload: filter qty>0 items and drop empty customers.
         customers_grouped: List[Dict[str, Any]] = []
         customer_tiles: List[Dict[str, Any]] = []
         unique_items: set[str] = set()
@@ -206,30 +226,18 @@ class Session:
             "total_units": total_units,
             "customers_count": len(customers_grouped),
         }
-        visit_totals = {
-            "visited_count": len(planned_visited),
-            "total_actual": visited_act,
-            "total_recommended": visited_rec,
-            "avg_score": avg_score,
-            # Drop-in count surfaced separately so the UI / route header
-            # can render it without re-walking the full session.
-            "unplanned_visited_count": len(unplanned_visited),
-        }
+        visit_totals = _aggregated
 
         return {
             "sessionId": self.session_id,
             "routeCode": self.route_code,
             "date": self.date,
             "status": self.status,
-            # Planned-only headline counts. The route header writer
-            # reads these so customers_planned / customers_visited stay
-            # comparable across the day even as drop-ins land.
+            # Planned-only headline counts; the route header writer reads these.
             "plannedCustomers": len(planned),
             "plannedVisitedCustomers": len(planned_visited),
             "unplannedVisitedCustomers": len(unplanned_visited),
-            # Legacy session-wide totals (planned + unplanned). Kept so
-            # any client that used to read these still works, but no
-            # longer drives the route-header tile.
+            # Legacy session-wide totals retained for backward compat.
             "totalCustomers": self.total_customers,
             "visitedCustomers": self.visited_customers,
             "remainingCustomers": len(planned) - len(planned_visited),
@@ -239,8 +247,7 @@ class Session:
             "visitedActual": visited_act,
             "visitedAchievement": round(visited_act / max(visited_rec, 1) * 100, 1),
             "overallAchievement": round(self.total_actual / max(self.total_recommended, 1) * 100, 1),
-            # Pure-render payload for the live UI. Frontend never
-            # aggregates the recommendations array itself.
+            # Pre-aggregated payload so the frontend never sums recommendations itself.
             "customers_grouped": customers_grouped,
             "customer_tiles": customer_tiles,
             "recommendation_totals": recommendation_totals,

@@ -51,18 +51,43 @@ from ..utils.logger import get_logger
 from ..utils.time_utils import build_date_range, period_offset
 
 
-def _future_skeleton(history_df, group_keys, date_col, horizon, granularity):
+def _future_skeleton(history_df, group_keys, date_col, horizon, granularity, anchor_date=None):
     """One row per (pair, horizon step). Each row is (pair_keys + future_date).
     Target / causal / meta columns are filled later.
 
-    Vectorised: one ``groupby().max()`` to get each pair's last date, then
-    a Cartesian-style cross-join with ``range(1, horizon+1)`` to build
-    every (pair, step) row in a single pandas pass. Replaces the prior
-    per-pair Python loop that built ~2M dicts at fleet scale (6000 pairs
-    x 365 horizon).
+    ``anchor_date`` (optional): when provided, every pair's future
+    window starts at ``anchor_date + 1 step`` regardless of the pair's
+    own latest data date. This is the training's ``test_date_end`` --
+    using it as the global anchor closes the "training-day gap" where
+    a date past test_end but before inference-time _last_date would
+    have neither a Test prediction nor a Forecast prediction. When
+    omitted, falls back to per-pair ``_last_date + 1`` (backwards-compat).
+
+    Vectorised: scalar arithmetic when anchored; per-pair ``groupby().max()``
+    otherwise. The horizon loop adds the DateOffset to a Series in either
+    case so we stay vectorised at fleet scale.
     """
     if history_df.empty or horizon <= 0:
         return pd.DataFrame(columns=list(group_keys) + [date_col])
+
+    if anchor_date is not None:
+        # Global anchor: every pair starts forecasting at anchor + 1 period.
+        # Get the distinct pair set from history (we still emit one row
+        # per (pair, step), just with a shared start date).
+        pairs = (
+            history_df[list(group_keys)]
+            .drop_duplicates()
+            .reset_index(drop=True)
+        )
+        anchor_ts = pd.Timestamp(anchor_date)
+        parts: list[pd.DataFrame] = []
+        for step in range(1, int(horizon) + 1):
+            off = period_offset(granularity, step)
+            df = pairs.copy()
+            df[date_col] = anchor_ts + off
+            parts.append(df)
+        skeleton = pd.concat(parts, ignore_index=True)
+        return skeleton[list(group_keys) + [date_col]]
 
     last_per_pair = (
         history_df.groupby(group_keys, sort=False, as_index=False)[date_col]
@@ -252,6 +277,25 @@ def run_inference(config_path, on_step=None):
         agg[group_keys].drop_duplicates().assign(_in_feed=True).reset_index(drop=True)
     )
     pairs_before = len(feed_pairs)
+
+    # Snapshot the FULL per-pair meta lookup (ItemName, CategoryName,
+    # WarehouseName, ...) BEFORE the cold-start filter. Used at the
+    # very end of inference to attach meta to BOTH trained-pair
+    # forecasts AND warm-started cold-start forecasts -- otherwise
+    # the warm-start path emits rows for pairs ``agg`` no longer holds
+    # and DbPusher writes NULL for ``item_name``. Keeping last-known
+    # meta per pair (``drop_duplicates(keep="last")``) matches the
+    # semantic ``build_panel`` already uses.
+    _meta_lookup_full: "pd.DataFrame | None" = None
+    if meta_cols:
+        _meta_present = [c for c in meta_cols if c in agg.columns]
+        if _meta_present:
+            _meta_lookup_full = (
+                agg[group_keys + _meta_present]
+                .drop_duplicates(subset=group_keys, keep="last")
+                .reset_index(drop=True)
+            )
+
     agg = agg.merge(classes_df.reset_index()[group_keys], on=group_keys, how="inner")
     pairs_after = agg.groupby(group_keys).ngroups
     unknown_pairs = pairs_before - pairs_after
@@ -314,6 +358,29 @@ def run_inference(config_path, on_step=None):
             f"config and retrain."
         )
 
+    # Pre-load training metadata so we can anchor the future skeleton
+    # at ``test_date_end + 1``. Without this, inference uses each pair's
+    # own ``_last_date + 1`` -- which silently slides forward whenever
+    # the panel has advanced past training (e.g. inference running the
+    # day after training picks up yesterday's settled actuals and starts
+    # forecasting from today instead of the training day). The result
+    # is the "training-day gap" where the date between test_end and
+    # _last_date has neither a Test prediction nor a Forecast row in
+    # yf_demand_forecast. Anchoring globally on test_date_end closes it.
+    _metadata_path = os.path.join(cfg["paths"]["artifacts_dir"], "training_summary.json")
+    _test_end_anchor: pd.Timestamp | None = None
+    try:
+        _ts_payload = load_json(_metadata_path)
+        _raw_end = (_ts_payload.get("metadata") or {}).get("test_date_end")
+        if _raw_end:
+            _test_end_anchor = pd.Timestamp(_raw_end)
+    except Exception as exc:
+        # Missing metadata is fine for legacy snapshots -- fall back to
+        # the per-pair anchor. Only the no-gap guarantee is forfeited.
+        logger.info(
+            "training_summary.test_date_end unreadable (%s); using per-pair anchor", exc,
+        )
+
     # ---- Future skeleton ------------------------------------------------
     # One row per (pair, step) for the forecast horizon. Target is set to
     # 0 because we don't know the future; meta / causal columns are carried
@@ -321,7 +388,10 @@ def run_inference(config_path, on_step=None):
     # consumes them (e.g. vwap price lags) has a value to work with. This is
     # the standard direct-forecasting setup - no manipulation beyond what's
     # necessary to run feature_engineering on rows without observed target.
-    future = _future_skeleton(agg, group_keys, date_col, horizon, freq)
+    future = _future_skeleton(
+        agg, group_keys, date_col, horizon, freq,
+        anchor_date=_test_end_anchor,
+    )
     future[target_col] = 0.0
     meta_present = [c for c in (meta_cols or []) if c in agg.columns]
     causal_present = [cc["col"] for cc in causal_cols if cc["col"] in agg.columns]
@@ -333,11 +403,32 @@ def run_inference(config_path, on_step=None):
         )
         future = future.merge(fill_df, on=group_keys, how="left")
     if activity_flag and "activity_flag" not in future.columns:
-        # Activity flag doesn't flow into any feature - it's a pass-through
-        # column consumed by downstream dashboards. 0 denotes "no observation
-        # (inferred)" which is the honest label for a forecast row.
-        future["activity_flag"] = 0
+        # activity_flag is in feature_cols, so it feeds the model. Use
+        # the pair's historical activity rate (training distribution);
+        # hardcoding 0 puts every future row in the gap-branch of trees
+        # trained on (activity_flag=0, target=0) reindex rows and
+        # silently produces zero forecasts.
+        pair_active_rate = (
+            agg.groupby(group_keys, as_index=False)["activity_flag"]
+            .mean()
+            .rename(columns={"activity_flag": "_pair_active_rate"})
+        )
+        future = future.merge(pair_active_rate, on=group_keys, how="left")
+        # Pairs absent from agg (warm-start fallbacks) get 1.0.
+        future["activity_flag"] = future["_pair_active_rate"].fillna(1.0)
+        future = future.drop(columns=["_pair_active_rate"])
     full = pd.concat([agg, future], ignore_index=True, sort=False)
+    # When the future-skeleton anchor (``test_date_end + 1``) overlaps
+    # with dates that already have observed actuals in ``agg`` (e.g. a
+    # pair has data through today even though training cut off at
+    # yesterday), the concat produces two rows per (pair, date) -- one
+    # with the real target, one with the placeholder 0. ``agg`` rows win
+    # so feature engineering sees the actual targets for lag / rolling
+    # windows. The future skeleton still drives the prediction loop
+    # below, so those overlap dates get a Forecast prediction written
+    # alongside the actual -- closing the training-day gap that
+    # produced empty forecast_corrected rows in yf_sales_transactions.
+    full = full.drop_duplicates(subset=list(group_keys) + [date_col], keep="first").reset_index(drop=True)
     full_date_range = build_date_range(full[date_col].min(), full[date_col].max(), freq)
 
     _step("data_processing", "completed")
@@ -367,6 +458,31 @@ def run_inference(config_path, on_step=None):
             len(te_artifact_inf[0]), te_artifact_inf[1],
         )
 
+    # Load the per-pair origins persisted by training so the trend
+    # feature ``periods_since_start`` stays anchored at the same date
+    # train saw. A missing artifact is non-fatal: ``add_temporal_features``
+    # falls back to the inline groupby min for every pair (legacy
+    # behavior), but the persisted path is what guarantees train/serve
+    # parity on partial-window inference frames.
+    pair_origins_inf = None
+    try:
+        from ..feature_engineering.temporal_features import load_pair_origins
+        po_path = os.path.join(cfg["paths"]["artifacts_dir"], "pair_origins.json")
+        if os.path.exists(po_path):
+            pair_origins_inf = load_pair_origins(
+                po_path, expected_group_keys=group_keys,
+            )
+            logger.info(
+                "pair_origins: loaded %d entries for inference",
+                len(pair_origins_inf),
+            )
+    except Exception as exc:
+        logger.warning(
+            "pair_origins: load failed (%s); falling back to inline "
+            "min -- trend feature may drift if inference window doesn't "
+            "reach back to each pair's training origin", exc,
+        )
+
     feats = build_features(
         full, group_keys, date_col, target_col, classes_df, cfg["feature_engineering"],
         holiday_cfg=cfg.get("holidays"),
@@ -375,6 +491,7 @@ def run_inference(config_path, on_step=None):
         granularity=freq,
         full_date_range=full_date_range,
         target_encoding_artifact=te_artifact_inf,
+        pair_origins=pair_origins_inf,
         forecast_horizon=horizon,
     )
     _step("feature_engineering", "completed")
@@ -614,6 +731,7 @@ def run_inference(config_path, on_step=None):
                 granularity=freq,
                 full_date_range=full_date_range,
                 target_encoding_artifact=te_artifact_inf,
+                pair_origins=pair_origins_inf,
                 forecast_horizon=horizon,
             )
             # Re-apply the safety nets: missing columns and residual NaN.
@@ -733,6 +851,20 @@ def run_inference(config_path, on_step=None):
                 )
         except Exception as exc:
             logger.warning("warm_start failed (%s); cold-start pairs stay dropped", exc)
+
+    # Attach meta columns (ItemName, CategoryName, WarehouseName) so
+    # DbPusher (which reads ``ItemName`` from this CSV) populates
+    # ``yf_demand_forecast.item_name`` instead of NULL.
+    #
+    # Source is ``_meta_lookup_full`` -- the pre-cold-start-filter
+    # snapshot built above. Using post-filter ``agg`` would miss meta
+    # for warm-started cold-start pairs (their rows aren't in agg
+    # because the inner-merge with classes_df dropped them), leaving
+    # tens of thousands of forecast rows with NULL ``item_name``.
+    # The full snapshot covers both trained pairs AND warm-started
+    # cold-start pairs from one consistent source.
+    if _meta_lookup_full is not None and not _meta_lookup_full.empty:
+        forecast = forecast.merge(_meta_lookup_full, on=group_keys, how="left")
 
     # Quantities ship as physical units. Ceiling once at the source so
     # every downstream reader (DbPusher, data_import merge, UI tiles)

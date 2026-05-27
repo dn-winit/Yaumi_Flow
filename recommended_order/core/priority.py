@@ -1,13 +1,5 @@
-"""
-Priority calculator.
-
-Sprint-1 changes:
-  * Adaptive weights blended by item frequency (low-freq items don't let
-    timing alone dominate; high-freq items do).
-  * Smooth timing decay (gaussian about on-time) -- no 1.0 plateau, so
-    yearly items don't beat weekly staples just by being more overdue.
-  * Every scoring step appends a Signal to the passed-in Explanation.
-"""
+"""Priority calculator: adaptive weights blended by item frequency,
+gaussian-around-on-time timing decay, signals attached to Explanation."""
 
 from __future__ import annotations
 
@@ -70,10 +62,7 @@ class PriorityCalculator:
         )
         score = round(max(0.0, min(100.0, raw * 100)), 2)
 
-        # ---- emit signals ----
-        # Reuse caller-supplied counts when available -- gen_history already
-        # computed them for its frequency gate, so a second nunique() pass
-        # here is wasted work.
+        # Reuse caller-supplied counts when available.
         if total_visits is None:
             total_visits = int(cust_history["TrxDate"].nunique()) if not cust_history.empty else 0
         if item_visits is None:
@@ -103,7 +92,7 @@ class PriorityCalculator:
             ))
 
         if consistency >= 0.75:
-            # CV derived from consistency: consistency = 1 - cv*0.7 (see below)
+            # consistency = 1 - cv*0.7 -> invert.
             cv = max(0.0, (1.0 - consistency) / 0.7)
             explanation.add_item_signal(Signal(
                 kind=KIND_CONSISTENT,
@@ -124,13 +113,7 @@ class PriorityCalculator:
     # ------------------------------------------------------------------
 
     def _timing_score(self, days_since: int, cycle_days: int) -> float:
-        """Gaussian around on-time (cycles_missed ~= 1 == "exactly due").
-
-        score = exp(-(cycles - 1)^2 / 2), clipped to [0, 1].
-
-        This makes on-time score highest (1.0), overdue decay smoothly,
-        and early-stage (0.5 cycles) also score noticeably.
-        """
+        """Gaussian around on-time: score = exp(-(cycles - 1)^2 / 2)."""
         if cycle_days <= 0 or days_since < 0:
             return 0.0
         cycles = days_since / cycle_days
@@ -164,13 +147,8 @@ class PriorityCalculator:
         data_boost = min(0.2, len(intervals) * 0.02)
         return min(1.0, consistency + data_boost)
 
-    # Tier shifts the freq-blend interpolant toward the weights that match
-    # the customer's archetype:
-    #   HEAVY (hypermarket-like) -> qty-heavy weights -> push t toward 0.
-    #   LIGHT (mini-mart-like)   -> timing-heavy weights -> push t toward 1.
-    # MEDIUM is unchanged. Magnitude (0.2) is half a freq-band so a single
-    # tier shift can never fully invert the freq signal -- it nudges, not
-    # overrides.
+    # Tier nudges the freq-blend interpolant; magnitude < half a freq-band
+    # so it can't invert the freq signal.
     _TIER_T_OFFSET: Dict[str, float] = {"HEAVY": -0.2, "LIGHT": 0.2, "MEDIUM": 0.0}
 
     @classmethod
@@ -181,13 +159,8 @@ class PriorityCalculator:
         *,
         tier: str = "MEDIUM",
     ) -> dict:
-        """Linear blend of low/high-freq weight triples based on frequency,
-        nudged by the customer's basket-size tier.
-
-        Frequency at or below floor -> low-freq weights (qty-heavy).
-        Frequency at or above 0.5 -> high-freq weights (timing-heavy).
-        Tier offset shifts the interpolant within the same axes.
-        """
+        """Linear blend of low/high-freq weight triples by frequency,
+        nudged by basket-size tier. Below floor = qty-heavy; >= 0.5 = timing-heavy."""
         floor = calibration.frequency_floor
         ceiling = max(floor + 1e-6, 0.5)
         t = (item_frequency - floor) / (ceiling - floor)

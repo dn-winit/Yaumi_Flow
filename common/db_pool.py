@@ -1,23 +1,9 @@
-"""
-Bounded DB connection pool (one per DSN) with retry-with-backoff.
+"""Bounded DB connection pool (one per DSN) with retry-with-backoff.
 
-Why a Python-level pool when ODBC already pools internally? Two reasons:
-
-  * ``pyodbc.pooling = True`` lets the ODBC driver reuse the underlying
-    socket but does NOT bound concurrency. Without a Python semaphore,
-    a burst of API requests can blow past the SQL Server connection
-    cap and degrade to error pages instead of queueing politely.
-  * Centralising the connect / timeout / retry logic in one place keeps
-    every consumer (``DbPusher``, ``AccuracyService``, future readers)
-    on the same contract - a single source of truth for retry
-    behaviour, error classification, and connection lifecycle.
-
-Usage:
-    pool = get_pool(conn_str, max_connections=8, query_timeout=300)
-    with pool.acquire() as conn:
-        cur = conn.cursor()
-        cur.execute("...")
-        conn.commit()
+ODBC pooling reuses sockets but doesn't bound concurrency; the Python
+semaphore here caps in-flight connections so a request burst queues
+politely instead of blowing past the SQL Server cap. Also the single
+source of truth for retry behaviour and connection lifecycle.
 """
 
 from __future__ import annotations
@@ -31,17 +17,15 @@ from typing import Any, Callable, Iterator, Optional, TypeVar
 
 import pyodbc
 
-# Enable ODBC driver-level connection caching globally. Idempotent;
-# safe to set multiple times (pyodbc just toggles a module flag).
+# Enable ODBC driver-level connection caching globally (idempotent).
 pyodbc.pooling = True
 
 logger = logging.getLogger(__name__)
 
 T = TypeVar("T")
 
-# Errors that should NEVER be retried -- bad SQL / bad data won't
-# become right by waiting. Other pyodbc errors (Operational, Interface)
-# are treated as transient.
+# Never-retry errors: bad SQL / bad data won't fix itself by waiting.
+# Other pyodbc errors (Operational, Interface) are treated as transient.
 FATAL_DB_ERRORS = (
     pyodbc.ProgrammingError,
     pyodbc.DataError,
@@ -50,14 +34,9 @@ FATAL_DB_ERRORS = (
 
 
 def _is_deadlock(exc: BaseException) -> bool:
-    """Detect SQL Server deadlock-victim signals.
-
-    SQL Server picks a "victim" when two transactions deadlock and kills
-    it; the victim is the one that surfaces an error here. By definition
-    the conflict is already resolved when this raises, so the retry
-    should be FAST -- no exponential 1s waste. SQLSTATE 40001 is the
-    ANSI "serialization failure" code; error 1205 is the SQL Server
-    native code; the message text always contains "deadlock".
+    """Detect SQL Server deadlock-victim signals (SQLSTATE 40001 / error
+    1205 / "deadlock" in message). Caller retries fast since the winning
+    txn has already committed by the time we see this.
     """
     if not isinstance(exc, pyodbc.Error) or not exc.args:
         return False
@@ -66,11 +45,8 @@ def _is_deadlock(exc: BaseException) -> bool:
     return state == "40001" or "deadlock" in msg or " 1205 " in f" {msg} "
 
 class DbConnectionPool:
-    """Semaphore-bounded connection acquirer for a single DSN.
-
-    The pool itself does not retain idle connections (that's the ODBC
-    driver's job); it bounds the *concurrent* count so a flood of
-    callers can't open more sockets than the warehouse will tolerate.
+    """Semaphore-bounded connection acquirer for a single DSN. Idle
+    reuse is the ODBC driver's job; this bounds concurrency only.
     """
 
     def __init__(
@@ -99,12 +75,9 @@ class DbConnectionPool:
 
     @contextmanager
     def acquire(self) -> Iterator[pyodbc.Connection]:
-        """Acquire a connection. Blocks until one is available; the
-        connection is closed on context exit so the underlying socket
-        returns to the ODBC driver's pool for reuse.
-
-        Per-cursor query timeout is pre-applied. Callers can override
-        with ``conn.timeout = N`` for an unusually slow statement.
+        """Acquire a connection (blocks until available). Closed on exit
+        so the socket returns to the ODBC pool. Per-cursor query timeout
+        is pre-applied; callers can override via ``conn.timeout = N``.
         """
         self._sem.acquire()
         conn: Optional[pyodbc.Connection] = None
@@ -114,10 +87,8 @@ class DbConnectionPool:
                 autocommit=self._autocommit,
                 timeout=self._connect_timeout,
             )
-            # Cursor timeout (per pyodbc docs: this is the SQL command
-            # timeout, not the connect timeout). Distinct knob from
-            # connect_timeout above so a slow handshake and a slow
-            # query are bounded independently.
+            # SQL command timeout (distinct from connect_timeout so
+            # slow handshake and slow query are bounded independently).
             conn.timeout = self._query_timeout
             yield conn
         finally:
@@ -128,10 +99,8 @@ class DbConnectionPool:
                     logger.warning("db_pool: conn.close() failed: %s", close_exc)
             self._sem.release()
 
-# Process-wide pool registry, keyed by (conn_str, autocommit). Two
-# callers using the same DSN+mode share one pool. The key includes
-# autocommit so a transactional pool and an autocommit pool against
-# the same DSN don't collide.
+# Process-wide pool registry keyed by (conn_str, autocommit) so
+# transactional and autocommit pools against the same DSN don't collide.
 _POOLS: dict[tuple[str, bool], DbConnectionPool] = {}
 _POOLS_LOCK = threading.Lock()
 
@@ -143,10 +112,9 @@ def get_pool(
     query_timeout: int = 300,
     autocommit: bool = False,
 ) -> DbConnectionPool:
-    """Return the (single) pool for ``conn_str``+``autocommit``, creating
-    it on first call. Sizing arguments only apply to the first creation;
-    later calls return the existing pool unchanged so a slow consumer
-    can't accidentally raise the cap mid-flight."""
+    """Return the singleton pool for ``conn_str``+``autocommit``; sizing
+    args apply only on first creation so a slow consumer can't raise the
+    cap mid-flight."""
     key = (conn_str, bool(autocommit))
     with _POOLS_LOCK:
         pool = _POOLS.get(key)
@@ -170,22 +138,9 @@ def with_db_retry(
     deadlock_attempts: int = 5,
 ) -> Callable[..., T]:
     """Decorator: retry transient DB errors with exponential backoff.
-
-    Two backoff schedules in one decorator:
-
-    * Deadlocks (SQLSTATE 40001 / SQL Server error 1205) -- by the time
-      the victim sees the error the winning transaction has already
-      committed, so the retry should be FAST. Defaults to 50 ms / 100
-      ms / 200 ms / 400 ms / 800 ms (up to 5 attempts). Reader-writer
-      contention between the supervision UI poll and the auto_visit
-      cron lands here.
-    * Other transient errors (connection blip, statement timeout) --
-      slow exponential 1s / 2s / 4s, capped at ``attempts``. Bad SQL /
-      bad data (``FATAL_DB_ERRORS``) is never retried.
-
-    The function's first positional arg is unused by the decorator;
-    the wrapped callable can have any signature -- only its DB
-    exception behaviour is changed.
+    Deadlocks (SQLSTATE 40001 / err 1205) retry fast (50ms..800ms, up to 5);
+    other transient errors retry slowly (1s/2s/4s, capped at ``attempts``).
+    ``FATAL_DB_ERRORS`` are never retried.
     """
 
     @wraps(fn)
@@ -197,8 +152,8 @@ def with_db_retry(
             try:
                 return fn(*args, **kwargs)
             except FATAL_DB_ERRORS:
-                # Fail fast - retrying bad SQL or bad data is wasteful.
-                raise
+                raise  # bad SQL / bad data: fail fast.
+
             except Exception as exc:
                 last_err = exc
                 if _is_deadlock(exc):
@@ -226,8 +181,6 @@ def with_db_retry(
     return _wrapper
 
 def reset_pools_for_tests() -> None:
-    """Clear the pool registry. Test-only -- production code never
-    needs to reset pools because connection settings are immutable
-    after process boot."""
+    """Test-only: clear the pool registry."""
     with _POOLS_LOCK:
         _POOLS.clear()

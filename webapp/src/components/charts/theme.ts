@@ -1,18 +1,9 @@
-/**
- * Shared Recharts theme. Every chart primitive spreads these props directly
- * so series colouring, axes, gridlines, and tooltips stay visually identical
- * across the app. Derived from `tokens.chart` — do not introduce chart-local
- * overrides, extend the token instead.
- */
+/** Shared Recharts theme; derived from tokens.chart -- extend the token, never override locally. */
 import { tokens } from "@/theme/tokens";
 
 const { chart, color } = tokens;
 
-/**
- * Series palette, indexable by position. Index 0 is the Yaumi crimson
- * (brand-600), index 1 is the Yaumi gold (accent-500). All values are
- * pulled from the scales in `tokens.ts` — no parallel hex lives here.
- */
+/** Series palette (index 0 = crimson, 1 = gold). Pulled from tokens.ts -- no local hex. */
 export const CHART_PALETTE: readonly string[] = [
   color.brand[600],
   color.accent[500],
@@ -24,11 +15,7 @@ export const CHART_PALETTE: readonly string[] = [
   color.brand[300],
 ] as const;
 
-/**
- * Semantic chart colours — use these for single-series bar/line charts that
- * need a tone (e.g. success/danger/warning) rather than a palette index.
- * Kept in sync with `tokens.ts` so every chart colour comes from one source.
- */
+/** Semantic chart colours for tone-driven single-series charts. */
 export const CHART_COLOR = {
   brandPrimary: color.brand[600],
   brandBand:    color.brand[100],

@@ -1,21 +1,19 @@
-"""Canonical helper to enrich any forecast frame with the reconciled
-van-load column.
+"""Canonical reconciliation chain for forecast frames.
 
-This is the **single implementation** of:
-    forecast row + bias + opening-stock  ->  recommended load
+Pipeline:
+  Predicted -> forecast_corrected (BiasService: calibration_ratio > bias_pct)
+            -> expected_demand (pattern envelope: z-score band OR class factors)
+            -> recommended_load = max(0, expected_demand - opening_stock)
+            -> leftover_to_next_day (carry sim with actual/forecast demand priority)
 
-Used by every consumer that needs a reconciled value:
-    * data_import.services.eda_service          (forecast-rows, business-kpis)
-    * demand_forecasting_pipeline.api.routes.predictions
-    * demand_forecasting_pipeline.services.accuracy_service
-    * recommended_order.data.manager
+Carry-chain invariant: leftover_to_next_day[d] == opening_stock[d+1] same pair.
 
-Process-wide singletons:
-    * BiasService -- its own mtime cache over demand_forecast.csv
-    * ReconciliationEngine -- stateless
-    * Closing-stock index -- mtime-keyed cache so the CSV is parsed once
-      per process per file revision, regardless of how many endpoints
-      call this helper.
+Demand source priority: real actuals -> activity guard -> forecast fallback.
+forecast_dormant: True if zero sales across last N route-trip days; zeroes expected_demand
+but leaves opening_stock untouched (carry flows, new-fresh suppressed).
+
+Used by eda_service, predictions, accuracy_service, recommended_order; singletons
+(BiasService, engine, closing-stock index) shared process-wide.
 """
 from __future__ import annotations
 
@@ -32,16 +30,12 @@ from demand_forecasting_pipeline.observability import L4_DISABLED
 
 logger = logging.getLogger(__name__)
 
-# Process-wide flag so the "L4 disabled" warning fires once per process.
-# The Prometheus counter still increments on every call so monitoring sees
-# the rate -- only the log line is rate-limited.
+# Once-per-process WARN flag; Prometheus counter still increments every call.
 _L4_WARNED = False
 _L4_WARN_LOCK = threading.Lock()
 
 def _warn_l4_disabled_once(reason: str) -> None:
-    """Emit a single WARNING per process when reconciliation degrades to
-    V5_b because L4 inputs (q_low / q_high) are missing from the forecast
-    frame. Bumps the Prometheus counter every time."""
+    """Single WARN per process on V5_b degrade from missing L4 inputs."""
     global _L4_WARNED
     L4_DISABLED.inc()
     with _L4_WARN_LOCK:
@@ -53,22 +47,23 @@ def _warn_l4_disabled_once(reason: str) -> None:
         extra={"reason": reason, "fallback": "V5_b"},
     )
 
-# ----------------------------------------------------------------------
-# Lazy-loaded engine + bias -- one instance per process.
-# ----------------------------------------------------------------------
+# Lazy-loaded engine + bias singletons, keyed by ``id(settings)``. Keying on
+# identity (not value) lets tests / hot-reload paths pass a fresh Settings and
+# get a fresh engine; production keeps one entry since ``get_settings()`` is
+# ``@lru_cache``-d and returns the same instance every time.
 
 _ENGINE_LOCK = threading.Lock()
-_ENGINE_READY: bool = False
-_BIAS: Any = None
-_ENGINE: Any = None
+_ENGINE_CACHE: dict[int, tuple[Any, Any]] = {}
 
 def _load_engine(settings: Settings) -> tuple[Any, Any]:
     """Return ``(bias_service, engine)`` -- both ``None`` if unavailable."""
-    global _ENGINE_READY, _BIAS, _ENGINE
+    key = id(settings)
     with _ENGINE_LOCK:
-        if _ENGINE_READY:
-            return _BIAS, _ENGINE
-        _ENGINE_READY = True
+        cached = _ENGINE_CACHE.get(key)
+        if cached is not None:
+            return cached
+        bias: Any = None
+        engine: Any = None
         try:
             # Local imports avoid a circular reference back to the
             # ``__init__`` re-exports that pull this module in.
@@ -78,11 +73,12 @@ def _load_engine(settings: Settings) -> tuple[Any, Any]:
             from demand_forecasting_pipeline.services.reconciliation.engine import (
                 ReconciliationEngine,
             )
-            _BIAS = BiasService(settings)
-            _ENGINE = ReconciliationEngine(settings=settings)
+            bias = BiasService(settings)
+            engine = ReconciliationEngine(settings=settings)
         except Exception as exc:
             logger.warning("enrich_with_load: engine unavailable (%s)", exc)
-    return _BIAS, _ENGINE
+        _ENGINE_CACHE[key] = (bias, engine)
+        return bias, engine
 
 # ----------------------------------------------------------------------
 # Closing-stock helpers

@@ -11,26 +11,14 @@ interface Props {
   onChange: (next: DashboardFilters) => void;
   period: ReportingPeriod;
   onPeriodChange: (next: ReportingPeriod) => void;
-  /** Inclusive upper bound for the period picker. Drawers pass
-   *  lastActiveDate so weekends past the data go grey in the calendar. */
+  /** Inclusive upper bound for the period picker (drawers pass lastActiveDate). */
   maxDate?: string;
-  // Hide controls that are redundant in the calling context (e.g. the
-  // VanLoad "Past analysis" drawer is already scoped to one route, so
-  // showing Warehouse + Route again would just clutter the strip).
+  // Hide controls when they're redundant (e.g. drawer already scoped to one route).
   hideWarehouse?: boolean;
   hideRoute?: boolean;
 }
 
-/**
- * Cascading multi-select filter strip for the Dashboard. Order is enforced
- * left-to-right (Warehouse → Route → Category → Item); each downstream
- * dropdown only shows options compatible with every upstream pick.
- *
- * Out-of-range selections are auto-trimmed when an upstream change makes
- * them invalid -- the user never has to manually clean up after themselves.
- *
- * Empty selection === "all" by convention (matches backend semantics).
- */
+/** Cascading Warehouse → Route → Category → Item filter strip; []="all". Auto-trims invalid picks. */
 export default function DashboardFilterBar({
   value,
   onChange,
@@ -47,10 +35,7 @@ export default function DashboardFilterBar({
   const categories = dims.data?.categories ?? [];
   const items = dims.data?.items ?? [];
 
-  // Auto-trim invalid selections by reading ``trimmed_selections`` from
-  // the backend response. Server already validated each code against
-  // the cascaded option sets -- the client just applies the cleaned
-  // vector when it differs from the current state.
+  // Apply server-trimmed selections when they differ from the current state.
   useEffect(() => {
     if (dims.loading || !dims.data) return;
     const trimmed = dims.data.trimmed_selections;
@@ -66,10 +51,7 @@ export default function DashboardFilterBar({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [dims.data, dims.loading]);
 
-  // The "N filters active" badge is a presentation count of the user's
-  // own UI state (length of each selection array). Not a calculation
-  // on business data -- the underlying values are what the user just
-  // picked in the dropdowns.
+  // Presentation count of the user's own selections (not business data).
   const activeCount =
     value.warehouse_codes.length +
     value.route_codes.length +
@@ -77,9 +59,7 @@ export default function DashboardFilterBar({
     value.item_codes.length;
 
   function update<K extends keyof DashboardFilters>(key: K, next: string[]) {
-    // Cascade reset: changing an upstream level clears every downstream
-    // selection so the user starts fresh in the new scope. The auto-trim
-    // effect above is a safety net; this is the primary intent.
+    // Cascade reset: upstream change wipes everything downstream.
     const out: DashboardFilters = { ...value, [key]: next };
     if (key === "warehouse_codes") {
       out.route_codes = [];

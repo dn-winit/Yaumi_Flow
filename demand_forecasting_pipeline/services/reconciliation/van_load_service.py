@@ -1,19 +1,7 @@
-"""Assemble the actual van composition for one (route, date), and emit
-per-day aggregates for the past-performance chart.
+"""Assemble actual van composition per (route, date) + past-performance daily aggregates.
 
-For yesterday-and-earlier the data comes from the shared CSVs that
-``data_import`` refreshes nightly. For today (live) the same shape is
-fetched from data_import's ``/eda/live-van-composition`` endpoint via
-HTTP -- one round-trip, 60-s-cached at the data_import side.
-
-Every per-item record has the same shape regardless of source:
-
-    {
-        item_code, item_name, category_code, category_name,
-        past_leftover, today_allocation, van_load,
-        sold_qty, bad_return_qty, good_return_qty,
-        leftover_now, end_closing,
-    }
+Historical via shared CSVs (data_import nightly refresh); live (today) via
+data_import /eda/live-van-composition HTTP. Per-item shape identical across sources.
 """
 from __future__ import annotations
 
@@ -47,17 +35,11 @@ class VanLoadService:
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
-        # Cache sizes/TTLs come from Settings so an ops change doesn't
-        # require a redeploy. Cached on the instance so a reconfigured
-        # service after restart picks the new values up immediately.
+        # Settings-driven cache TTLs; live changes require a process restart to apply.
         self._max_cache_entries: int = int(self._s.van_load_max_cache_entries)
         self._csv_cache_ttl_seconds: int = int(self._s.van_load_csv_cache_ttl_seconds)
         self._live_cache_ttl_seconds: int = int(self._s.van_load_live_cache_ttl_seconds)
-        # Short TTL for csv-fallback responses (live endpoint timed out
-        # or unreachable). Keeps the stale-fallback envelope small so
-        # the next read after the live endpoint recovers picks up
-        # fresh data within seconds, rather than serving the fallback
-        # for the full csv TTL window.
+        # Short TTL for csv-fallback so next read picks up live recovery promptly.
         self._csv_fallback_cache_ttl_seconds: int = int(
             getattr(self._s, "van_load_csv_fallback_cache_ttl_seconds",
                     self._live_cache_ttl_seconds),
@@ -73,11 +55,7 @@ class VanLoadService:
 
     def get(self, route_code: str, date: str) -> dict[str, Any]:
         date_n = self._normalise_date(date)
-        # TTL is decided AFTER the fetch from the response's ``source``
-        # field so a csv-fallback response (live endpoint unreachable)
-        # is cached for a short window only -- the moment data_import
-        # comes back, the next read switches back to live without
-        # waiting out the full CSV TTL.
+        # TTL decided per-response so csv-fallback gets a short window.
         return self._cached(
             f"{route_code}::{date_n}",
             lambda: self._fetch(route_code, date_n),
@@ -85,13 +63,7 @@ class VanLoadService:
         )
 
     def _ttl_for(self, value: dict[str, Any], date_n: str) -> int:
-        """Pick the right cache TTL based on the source of the fetched
-        payload. Source classification:
-          * 'csv_fallback' -- live endpoint failed/timed out. Short TTL
-            so we re-attempt live promptly on next read.
-          * 'live'         -- fresh from data_import. Live TTL.
-          * 'csv'          -- historical date, no live source. CSV TTL.
-        """
+        """TTL by source: csv_fallback (short) / live / csv."""
         source = (value or {}).get("source")
         if source == "csv_fallback":
             return self._csv_fallback_cache_ttl_seconds
@@ -132,7 +104,7 @@ class VanLoadService:
         def _route_dates(df: pd.DataFrame) -> set[pd.Timestamp]:
             if df.empty or "TrxDate" not in df.columns:
                 return set()
-            return set(df[df.RouteCode.astype(str) == rcode].TrxDate.unique())
+            return set(df[df.RouteCode == rcode].TrxDate.unique())
 
         all_active = sorted(_route_dates(alloc) | _route_dates(sales) | _route_dates(returns))
         active = [d for d in all_active if start <= d <= end]
@@ -162,7 +134,7 @@ class VanLoadService:
         target = pd.Timestamp(as_of).normalize()
         start  = target - pd.Timedelta(days=lookback_days)
         sub = alloc[
-            (alloc.RouteCode.astype(str) == str(route_code))
+            (alloc.RouteCode == str(route_code))
             & (alloc.TrxDate >= start) & (alloc.TrxDate < target)
         ]
         if sub.empty:
@@ -271,7 +243,7 @@ class VanLoadService:
             from demand_forecasting_pipeline.services.reconciliation.enrich import (
                 forward_fill_closing,
             )
-            route_closing = closing[closing.RouteCode.astype(str) == rcode]
+            route_closing = closing[closing.RouteCode == rcode]
             if not route_closing.empty:
                 closing = forward_fill_closing(
                     route_closing,
@@ -293,21 +265,21 @@ class VanLoadService:
             return entry
 
         if not closing.empty:
-            prev = closing[(closing.RouteCode.astype(str) == rcode)
+            prev = closing[(closing.RouteCode == rcode)
                            & (closing.TrxDate == prior)]
             for _, r in prev.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
                             r.get("CategoryCode"), r.get("CategoryName"))
                 e["past_leftover"] = safe_float(r.ClosingQty)
 
-            today_close = closing[(closing.RouteCode.astype(str) == rcode)
+            today_close = closing[(closing.RouteCode == rcode)
                                   & (closing.TrxDate == target)]
             for _, r in today_close.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"))
                 e["end_closing"] = safe_float(r.ClosingQty)
 
         if not alloc.empty:
-            sub = alloc[(alloc.RouteCode.astype(str) == rcode)
+            sub = alloc[(alloc.RouteCode == rcode)
                         & (alloc.TrxDate == target)]
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
@@ -315,7 +287,7 @@ class VanLoadService:
                 e["today_allocation"] = safe_float(r.AllocatedPC)
 
         if not sales.empty:
-            sub = sales[(sales.RouteCode.astype(str) == rcode)
+            sub = sales[(sales.RouteCode == rcode)
                         & (sales.TrxDate == target)]
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
@@ -323,7 +295,7 @@ class VanLoadService:
                 e["sold_qty"] = safe_float(r.TotalQuantity)
 
         if not returns.empty:
-            sub = returns[(returns.RouteCode.astype(str) == rcode)
+            sub = returns[(returns.RouteCode == rcode)
                           & (returns.TrxDate == target)]
             for _, r in sub.iterrows():
                 e = _ensure(r.ItemCode, r.get("ItemName"),
@@ -405,6 +377,20 @@ class VanLoadService:
                 df = pd.read_csv(path, low_memory=False)
                 if "TrxDate" in df.columns:
                     df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce").dt.normalize()
+                # Pre-cast join keys + label columns ONCE at load time.
+                # pandas infers RouteCode / ItemCode as int64 from the
+                # CSV; downstream comparisons (``df.RouteCode == "9105"``)
+                # need ``str`` semantics so every consumer used to call
+                # ``.astype(str)`` on the hot path. Each such call hit
+                # the Arrow string-conversion path and was the dominant
+                # CPU sink in the past-performance profile. Doing it
+                # once here -- behind the mtime-keyed cache -- means
+                # consumers can compare directly with no per-request
+                # conversion. Same values, same dtype semantics, no
+                # behavioural change for any caller.
+                for _col in ("RouteCode", "ItemCode", "CategoryName"):
+                    if _col in df.columns:
+                        df[_col] = df[_col].astype(str)
             except Exception as exc:
                 logger.error("VanLoadService: failed to read %s: %s", path, exc)
                 return pd.DataFrame()

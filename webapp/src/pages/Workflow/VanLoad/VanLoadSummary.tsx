@@ -6,15 +6,11 @@ import { fmtNum, fmtCurrency, fmtBps, AT_RISK_CONFIDENCE } from "@/lib/format";
 import type { VanLoadSummaryView } from "@/api/forecast";
 
 interface Props {
-  /** Pre-computed summary from the backend page-view endpoint. The
-   *  server has already enforced van_load_qty == carried_qty +
-   *  issued_qty, so the tile and the chart on this page cannot disagree. */
+  /** Server-pre-computed; van_load_qty == carried_qty + issued_qty by construction. */
   summary: VanLoadSummaryView;
 }
 
 export default function VanLoadSummary({ summary }: Props) {
-  // Plain-number render -- the per-(item, date) breakdown popover was
-  // removed by request, so every KPI is just the wire total formatted.
   const num = (value: number) => (
     <span className="tabular-nums">{fmtNum(value)}</span>
   );

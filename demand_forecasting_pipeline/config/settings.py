@@ -1,7 +1,4 @@
-"""
-Application settings from environment variables.
-Pipeline-specific ML params stay in config.yaml -- this handles server/API/paths.
-"""
+"""Application settings from env vars. Pipeline ML params live in config.yaml."""
 
 from __future__ import annotations
 
@@ -12,23 +9,18 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
-from common.settings_base import read_allow_origins as _read_allow_origins
+from common.sales_vocab import SALES_VOCAB as _VOCAB
+from common.settings_base import data_root as _shared_data_root, read_allow_origins as _read_allow_origins
 
 _PIPELINE_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _PIPELINE_ROOT.parent
 
 
 def _data_root() -> Path:
-    """Resolve the unified on-disk data root. ``YF_DATA_ROOT`` env var
-    moves every service's filesystem layout in lockstep; defaults to
-    ``<project>/data`` for fresh checkouts."""
-    raw = os.getenv("YF_DATA_ROOT", "").strip()
-    return Path(raw).resolve() if raw else _PROJECT_ROOT / "data"
+    return _shared_data_root(_PROJECT_ROOT)
 
 
-# Public constant: NVARCHAR widths matching the schema in
-# scripts/create_tables.sql + scripts/migrations/0001_add_reconciliation_cols.sql.
-# Imported by DbPusher so there is exactly one source of truth.
+# NVARCHAR widths matching scripts/create_tables.sql + migrations; single source of truth for DbPusher.
 DEFAULT_STR_LIMITS: dict[str, int] = {
     "route_code": 50,
     "item_code": 50,
@@ -50,41 +42,25 @@ class DbSettings(BaseSettings):
     password: str = Field(default="")
     driver: str = Field(default="{ODBC Driver 17 for SQL Server}")
     connection_timeout: int = Field(default=120, ge=10)
-    # Per-query (cursor) timeout for the bulk forecast push. Larger than
-    # the connect handshake budget because executemany batches thousands
-    # of rows in one round-trip.
+    # Cursor timeout for bulk forecast push; larger than connect handshake budget.
     query_timeout: int = Field(default=300, ge=10)
     retry_attempts: int = Field(default=3, ge=1)
     retry_delay: int = Field(default=2, ge=1)
-    # Rows per ``cursor.executemany`` batch. Large enough to amortise the
-    # round-trip cost, small enough that a transient failure inside one
-    # batch leaves a bounded amount of pending work to roll back.
+    # Rows per executemany batch; large enough to amortise round-trip cost.
     executemany_chunk_size: int = Field(default=1000, ge=1)
-    # MERGE upsert isolation level. SERIALIZABLE prevents the classic
-    # SQL Server MERGE phantom-row race when two writers target the
-    # same key set; READ COMMITTED is the default if you want to trade
-    # safety for shorter lock windows on a single-writer deployment.
+    # SERIALIZABLE prevents the MERGE phantom-row race when two writers target the same key set.
     merge_isolation_level: str = Field(
         default="SERIALIZABLE",
-        description="MERGE transaction isolation: SERIALIZABLE (safest), "
-                    "REPEATABLE READ, READ COMMITTED, READ UNCOMMITTED.",
+        description="MERGE transaction isolation level.",
     )
-    # NVARCHAR truncation widths applied before the upsert -- defends
-    # against "String or binary data would be truncated" errors when
-    # an upstream string (verbose model name, long item label) exceeds
-    # the column. Single source of truth: ``DEFAULT_STR_LIMITS`` defined
-    # at module level above; DbPusher imports the same constant.
+    # NVARCHAR truncation widths applied before upsert; defends against truncation errors.
     str_limits: dict[str, int] = Field(
         default_factory=lambda: dict(DEFAULT_STR_LIMITS),
     )
-    # Hints applied to the MERGE target table. ``HOLDLOCK, UPDLOCK``
-    # is Microsoft's recommended pair for atomic MERGE upserts -- holds
-    # the key range against inserters and acquires update locks so
-    # contending readers don't escalate to deadlocks.
+    # HOLDLOCK+UPDLOCK is MS's recommended pair for atomic MERGE upserts.
     merge_target_lock_hints: str = Field(
         default="HOLDLOCK, UPDLOCK",
-        description="Lock hints applied to MERGE target. Empty disables "
-                    "hints entirely (single-writer-per-split deployments).",
+        description="Lock hints for MERGE target; empty disables hints.",
     )
 
     @field_validator("merge_isolation_level")
@@ -117,7 +93,7 @@ class DbSettings(BaseSettings):
         )
 
 class Settings(BaseSettings):
-    """Server and path settings -- all from env vars with sensible defaults."""
+    """Server and path settings, all env-driven with sensible defaults."""
 
     model_config = {"env_prefix": "DF_", "extra": "ignore"}
 
@@ -133,13 +109,9 @@ class Settings(BaseSettings):
     # Pipeline config (YAML path)
     pipeline_config: str = Field(default=str(_PIPELINE_ROOT / "config" / "config.yaml"))
 
-    # Filesystem paths -- everything lives under the unified ``YF_DATA_ROOT``.
-    # ``imports/`` holds DB-mirror CSVs (written by data_import); ``forecast/``
-    # holds non-DB training artifacts (models, metrics, explainability) that
-    # have no SQL representation. Predictions are NOT in ``forecast/`` -- the
-    # API reads them from ``imports/demand_forecast.csv`` (DB-canonical via
-    # data_import) so the stack has a single source of truth for forecasts.
-    raw_data_path: str = Field(default_factory=lambda: str(_data_root() / "imports" / "demand_data_merged.csv"))
+    # Filesystem paths under YF_DATA_ROOT. ``imports/`` holds DB-mirror CSVs; ``forecast/`` holds
+    # non-DB training artifacts. Predictions live in ``imports/demand_forecast.csv`` (DB-canonical),
+    # not in ``forecast/``. Raw-data path is in config.yaml::paths.raw_data, not here.
     artifacts_dir: str = Field(default_factory=lambda: str(_data_root() / "forecast"))
     models_dir: str = Field(default_factory=lambda: str(_data_root() / "forecast" / "models"))
     predictions_dir: str = Field(default_factory=lambda: str(_data_root() / "forecast" / "predictions"))
@@ -156,128 +128,97 @@ class Settings(BaseSettings):
     pair_classes_file: str = Field(default="pair_classes.csv")
     pair_explainability_file: str = Field(default="pair_explainability.csv")
     data_quality_file: str = Field(default="data_quality.json")
-    # Persisted target-encoding map. Written at training time (from the
-    # train window only -- the leakage-free source) and loaded verbatim
-    # at inference. Without persistence the encoding silently drifts as
-    # new history accumulates between retrains, making inference features
-    # diverge from the matrix the model was fit on.
+    # Target-encoding map fit on train window only; persistence prevents drift between retrains.
     target_encoding_file: str = Field(default="target_encoding.json")
-    # Auxiliary artifact filenames. Surfaced as settings so deployment
-    # overrides don't need to track string literals scattered across the
-    # codebase. ``outlier_bounds.csv`` is written by training (fit on
-    # train_window only) and loaded verbatim at inference. ``conformal_
-    # offsets.csv`` is the per-pair calibration map. ``pair_coverage.csv``
-    # is the inference-time forecasted/dropped audit.
+    # Per-pair earliest-observed date; keeps ``periods_since_start`` date-anchored across inference windows.
+    pair_origins_file: str = Field(default="pair_origins.json")
+    # Aux artifacts: outlier bounds (train-fit), conformal offsets, inference forecast/dropped audit.
     outlier_bounds_file: str = Field(default="outlier_bounds.csv")
     conformal_offsets_file: str = Field(default="conformal_offsets.csv")
     pair_coverage_file: str = Field(default="pair_coverage.csv")
 
-    # Outbound HTTP request timeout (van composition pull from
-    # data_import). Bounds how long a blocking call to the upstream
-    # service can take before a request handler abandons it.
+    # Upper bound on blocking HTTP calls (van composition pull from data_import).
     http_request_timeout_seconds: float = Field(default=30.0, gt=0.0, le=300.0)
 
-    # Pagination + read limits. Surfaced here so ops can tune memory
-    # ceilings without touching code.
+    # Pagination + read limits, env-tunable.
     default_page_limit: int = Field(default=5000, ge=1, le=100_000)
     summary_test_predictions_limit: int = Field(default=50_000, ge=1)
     reconciliation_forecast_limit: int = Field(default=10_000, ge=1)
     reconciliation_default_lookback_days: int = Field(default=14, ge=1, le=365)
     reconciliation_min_lookback_days: int = Field(default=1, ge=1)
     reconciliation_max_lookback_days: int = Field(default=90, ge=1, le=365)
-    # Drift tolerance for the past-performance items[] sum vs totals
-    # identity check. Totals are emitted at 2dp; max accumulated rounding
-    # drift across thousands of items is on the order of 0.005 * N, so a
-    # 0.5u threshold flags real bugs while staying quiet for the
-    # rounding-only case.
+    # Drift tolerance for items[] sum vs totals identity (totals emitted at 2dp).
     reconciliation_items_drift_threshold: float = Field(default=0.5, ge=0.0)
-    # Probability threshold below which a per-day class probability is
-    # flagged as "risky" on the van-load page-view's at_risk count.
-    # Owned server-side so frontend never re-derives the rule.
+    # Probability threshold below which a per-day class probability is "risky" (server-owned rule).
     at_risk_prob_threshold: float = Field(default=0.7, ge=0.0, le=1.0)
 
-    # Daily reconciliation refresh cron. Recomputes the four
-    # ``yf_demand_forecast`` reconciliation columns (recommended_load,
-    # forecast_corrected, bias_pct, opening_stock) for the rolling
-    # forecast window using the latest closing_stock + load_allocation
-    # values, so the API and ``recommended_order`` can both consume the
-    # same pre-computed reconciled van load without recomputing.
-    #
-    # Schedule (Asia/Dubai by default):
-    #   03:00  data_import     -- refreshes closing_stock, load_allocation, ...
-    #   03:30  this cron       -- re-reconciles forward window with fresh inputs
-    #   04:00  recommended_order generation -- consumes reconciled van load
-    # The 30-minute gap absorbs slow nightly imports without crowding the
-    # downstream consumer. Override per environment via the env vars.
+    # Daily reconciliation refresh cron. Schedule (Asia/Dubai default):
+    #   03:00 data_import; 03:30 this cron; 04:00 recommended_order generation.
     reconciliation_refresh_enabled: bool = Field(default=True)
     reconciliation_refresh_timezone: str = Field(default="Asia/Dubai")
     reconciliation_refresh_hour: int = Field(default=3, ge=0, le=23)
     reconciliation_refresh_minute: int = Field(default=30, ge=0, le=59)
-    # ``horizon_days_behind`` for the daily cron. Default 30 (= refresh
-    # the last month every morning). Two motivations on top of the
-    # adjacent-pass chain identity that already required 1+:
-    #
-    #   * YaumiLive late-posts invoices, returns, and closing-stock
-    #     corrections days after the original trip date. With a narrow
-    #     horizon, the cron writes a date's row once, then never re-
-    #     touches it; the row freezes against whatever state YL had
-    #     at write time, and any retroactive update silently drifts
-    #     into a CSV-vs-DB mismatch. A 30-day rolling window means
-    #     every morning rewrites all month-old rows against the
-    #     current YL state, catching late posts automatically. The
-    #     daily cron self-heals the entire visible window without any
-    #     manual ``/refresh`` call.
-    #   * The cross-pass chain identity ``leftover_to_next_day[d] ==
-    #     opening_stock[d+1]`` -- documented in enrich.py:752 -- still
-    #     holds because every adjacent-day boundary inside the window
-    #     is written by the SAME simulation pass.
-    #
-    # Cost: each cron tick scans ~30 days of forecast + actuals and
-    # cascades recommended_order generation for the same window
-    # (~30 min wall-clock at current 12-route × ~60-item scale on the
-    # nightly worker). The window runs once at 03:30 Asia/Dubai, well
-    # before any UI traffic, so the cost is invisible to users.
-    #
-    # Override per environment via DF_RECONCILIATION_REFRESH_HORIZON_DAYS.
-    # The ceiling is bumped to 90 so ops can backfill a full quarter
-    # without an env-var clamp; the daily default stays at 30 because
-    # wider windows are exponentially more expensive for diminishing
-    # late-post coverage (most YL corrections land within 1-2 weeks).
-    reconciliation_refresh_horizon_days: int = Field(default=30, ge=0, le=90)
 
-    # Log rotation. The rotating file handler in ``observability.py``
-    # reads these so ops can adjust retention without redeploying.
+    # Auto-cascade controls: one POST /pipeline/train can drive pre-train data refresh,
+    # train+inference, and post-inference reconciliation; each is opt-out via env.
+    auto_data_refresh_before_train: bool = Field(default=True)
+    auto_data_refresh_lookback_days: int = Field(default=30, ge=1, le=730)
+    auto_reconcile_after_inference: bool = Field(default=True)
+    auto_reconcile_horizon_days: int = Field(default=30, ge=1, le=365)
+    # Rolling refresh window. Default 30 days lets the cron self-heal YaumiLive late-posts
+    # (returns/closing-stock corrections) without manual /refresh. Ceiling 90 for ops backfills.
+    reconciliation_refresh_horizon_days: int = Field(default=30, ge=0, le=90)
+    # Freeze model-side columns (recommended_load, opening_stock, leftover_to_next_day,
+    # forecast_corrected, bias_pct, etc.) for past dates. Without this, a retrain
+    # would silently rewrite yesterday's "what we recommended" history -- past-performance
+    # drawer shows different numbers for the same date before vs after retrain.
+    # Rep-side columns (actual_sold, yaumi_*) keep updating so late returns still flow in.
+    # Turn off for legitimate full-history backfills.
+    reconciliation_freeze_past_model_cols: bool = Field(default=True)
+    # Dedup window for the cron-context (force=False) reconciliation backstop.
+    # If a successful refresh ran within this many seconds, the cron tick is
+    # a no-op. Default 30min matches the 03:00 cascade -> 03:30 backstop gap.
+    reconciliation_cron_dedup_window_seconds: int = Field(default=1800, ge=60, le=86400)
+    # Cascade window padding: the data_import refresh after a reconciliation
+    # write covers ``max(horizon_days_behind + pad, min_days)``. Smaller pad
+    # means tighter mirror refresh; larger gives more catch-up on late-arriving
+    # rows. Defaults preserve the prior hardcoded ``max(horizon+2, 7)``.
+    reconciliation_cascade_lookback_pad_days:  int = Field(default=2,  ge=0, le=30)
+    reconciliation_cascade_lookback_min_days:  int = Field(default=7,  ge=1, le=90)
+
+    # YaumiLive transaction-type vocab. Defaults come from the shared
+    # ``common.sales_vocab.SALES_VOCAB`` so this service and data_import
+    # can't drift on the strings; env overrides (DF_*_TRX_TYPE) still work.
+    sales_item_type:         str = Field(default=_VOCAB.sales_item_type)
+    sales_invoice_trx_type:  str = Field(default=_VOCAB.sales_invoice_trx_type)
+    bad_return_trx_type:     str = Field(default=_VOCAB.bad_return_trx_type)
+    good_return_trx_type:    str = Field(default=_VOCAB.good_return_trx_type)
+
+    # Log rotation knobs read by observability.py.
     log_file_max_bytes: int = Field(default=10 * 1024 * 1024, ge=1024)
     log_file_backup_count: int = Field(default=5, ge=0)
+    # IANA zone for log timestamps. Default Asia/Dubai matches every other
+    # service in the stack (cron schedulers, supervision tick TZ) so log
+    # timestamps and cron-audit rows correlate without a +1.5h offset.
+    log_timezone: str = Field(default="Asia/Dubai")
 
-    # Stale-train threshold for /health/ready. A trained model older
-    # than this flips readiness to 503 so a frozen pipeline can't keep
-    # serving stale predictions silently.
+    # Stale-train threshold for /health/ready; flips readiness to 503 past this age.
     stale_train_threshold_seconds: int = Field(default=7 * 24 * 3600, ge=60)
-    # Floor on the data_import probe timeout. Readiness probes should
-    # fail fast even when the general HTTP timeout is generous.
+    # Floor on data_import probe timeout so readiness fails fast.
     health_probe_timeout_seconds: float = Field(default=5.0, gt=0.0, le=60.0)
 
-    # Cascade-call (post-push trigger to data_import). Dataset name and
-    # path mirror data_import's registry contract; timeout is the upper
-    # bound on how long a pipeline thread waits for the cascade to
-    # acknowledge before giving up.
+    # Cascade call (post-push trigger to data_import); mirrors data_import's registry contract.
     data_import_dataset: str = Field(default="demand_forecast")
     data_import_path: str = Field(default="/api/v1/data/import")
     data_import_cascade_timeout_seconds: float = Field(default=60.0, gt=0.0, le=600.0)
     training_cascade_lookback_days: int = Field(default=365, ge=30, le=1825,
         description=(
-            "Refresh window passed to data_import after a training push. "
-            "Training rewrites a rolling block (Test rows back, forecast "
-            "horizon forward); pure-append cascade would miss UPDATEs on "
-            "dates already mirrored. 365 covers the full Test+Forecast "
-            "span with headroom."
+            "Refresh window for post-train cascade; must cover the full "
+            "Test+Forecast span to catch UPDATEs."
         ),
     )
 
-    # Drift-detection window. The retrain scheduler scores the last N
-    # calendar days of live predictions vs actual sales to detect drift
-    # against the training-time baseline.
+    # Drift-detection window: scheduler scores last N days of live vs actuals against baseline.
     drift_cache_ttl_seconds: int = Field(default=300, ge=0)
     drift_lookback_days: int = Field(default=7, ge=1, le=365)
 
@@ -285,43 +226,23 @@ class Settings(BaseSettings):
     van_load_max_cache_entries: int = Field(default=500, ge=1)
     van_load_csv_cache_ttl_seconds: int = Field(default=300, ge=0)
     van_load_live_cache_ttl_seconds: int = Field(default=60, ge=0)
-    # Short TTL for csv-fallback responses (live endpoint unreachable).
-    # Keeps the stale-fallback envelope small so the moment data_import
-    # recovers, the next read switches back to live. Setting too low
-    # adds redundant fetches; too high lets a transient outage poison
-    # the cache for the full csv TTL window. 10s is the empirical
-    # sweet spot -- one rep-UI tick.
+    # Short TTL for csv-fallback responses so next read switches back when data_import recovers.
     van_load_csv_fallback_cache_ttl_seconds: int = Field(default=10, ge=0,
-        description="TTL for csv-fallback responses; short by design so "
-                    "the fallback doesn't persist past a live-endpoint recovery.")
+        description="TTL for csv-fallback responses; short by design.")
 
-    # Refusal threshold for stale demand-forecast inputs. The
-    # reconciliation cron refuses to refresh against a model whose
-    # newest forecast row is older than this many days -- a stale
-    # model produces stale carry diagnostics, and silently propagating
-    # them to the UI is worse than serving the previous day's view.
-    # Env-overridable so a deliberate week-off retraining cadence
-    # doesn't trip the guard.
+    # Refuse to reconcile if newest forecast row is older than this many days.
     forecast_stale_threshold_days: int = Field(default=14, ge=1, le=180,
-        description="Refuse to reconcile if MAX(yf_demand_forecast.trx_date) "
-                    "is older than this many days vs today.")
+        description="Refuse to reconcile if MAX(yf_demand_forecast.trx_date) is older than this.")
 
-    # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var read by
-    # every service. Wildcard ``*`` is never used with credentials
-    # (browsers reject that combination). Default factory bypasses
-    # pydantic-settings' JSON-only env-list parser.
+    # CORS allow-list -- shared YF_ALLOW_ORIGINS read by every service. No ``*`` with credentials.
     allow_origins: list[str] = Field(default_factory=_read_allow_origins)
 
     # ------------------------------------------------------------------
-    # Reconciliation layer (V5_b: bias-correct + clamped carry-over)
-    # All knobs are dynamic and route- / item-agnostic. There are no
-    # per-route or per-item overrides anywhere in the layer -- if a
-    # number needs tuning, it lives here.
+    # Reconciliation layer (V5_b: bias-correct + clamped carry-over).
+    # All knobs are global; no per-route / per-item overrides exist.
     # ------------------------------------------------------------------
-    # Decision-band ratio thresholds for the "vs typical" allocation
-    # label on the reconciliation response. ``ratio = recommended_load /
-    # typical_alloc``; below LOW = "LESS", above HIGH = "MORE", else
-    # "SAME". Tunable so ops can widen the SAME band without redeploying.
+    # "vs typical" decision band: ratio = recommended_load / typical_alloc;
+    # below LOW = LESS, above HIGH = MORE, else SAME.
     typical_alloc_band_low: float = Field(default=0.70, gt=0.0, lt=1.0,
         description="Ratio under which the engine flags 'LESS than typical'.")
     typical_alloc_band_high: float = Field(default=1.30, gt=1.0, le=10.0,
@@ -330,76 +251,39 @@ class Settings(BaseSettings):
         description="Rolling window over which per (route, item) bias is averaged.")
     bias_cap_pct: float = Field(default=0.50, ge=0.05, le=1.0,
         description="Hard cap on |bias| so a single anomalous day cannot dominate.")
+    # CSV-mirror pre-refresh window for /reconciliation/refresh; must cover
+    # bias_lookback_days back + full forecast horizon forward.
+    forecast_csv_refresh_lookback_days: int = Field(default=60, ge=14, le=365)
     opening_stock_lookback_days: int = Field(default=7, ge=1, le=30,
         description=(
-            "Forward-fill window for prev-day closing stock per (route, "
-            "item). When closing_stock.csv has a calendar gap (route did "
-            "not run that day, or the data pipeline missed a row), the "
-            "engine looks back up to this many days for the most recent "
-            "closing entry before falling back to opening = 0. Without "
-            "this, ~54% of (route, item, day) cells fleet-wide silently "
-            "fall to opening = 0 -- the engine then treats the truck as "
-            "empty and recommends the full forecast, inflating fresh by "
-            "~20%. 7 days handles weekly route schedules cleanly while "
-            "keeping long-dormant SKUs (>7 days idle) at opening = 0 "
-            "where they belong."
+            "Forward-fill window for prev-day closing stock per (route, item). "
+            "Handles weekly route schedules; keeps long-dormant SKUs at opening=0."
         ),
     )
     calibration_cold_start_ratio: float = Field(default=0.85, ge=0.5, le=1.0,
         description=(
-            "Default calibration ratio applied to (route, item) pairs "
-            "with no calibration history. Without this, cold-start pairs "
-            "fall through to the legacy bias path which produces raw "
-            "forecast (no dampening) -- the worst possible behaviour for "
-            "the highest-uncertainty rows. 0.85 (15% conservative "
-            "shrink) trims fresh issuance on unproven pairs until the "
-            "bias service has accumulated enough history. ge=0.5 -- "
-            "anything lower would force severe under-loading on "
-            "legitimate new SKUs."
+            "Default calibration ratio for pairs with no history; 0.85 trims "
+            "fresh issuance on unproven pairs until bias accumulates."
         ),
     )
     bias_calibration_cap: float = Field(default=2.0, ge=1.0, le=10.0,
         description=(
-            "Upper bound on the per-(route, item) calibration ratio "
-            "(sum_actual / sum_predicted, recency-weighted). Without a "
-            "cap, a single high-sale day on a sparse-history item can "
-            "push the ratio to 5-80x and the engine then multiplies the "
-            "model's prediction by that factor for every future day -- "
-            "producing tens of thousands of phantom-demand units. 2.0x "
-            "leaves a 100% safety buffer above the model and clips the "
-            "tail of the ratio distribution. Pairs the cap actually "
-            "binds on (~6.7% fleet-wide) are exactly the ones whose raw "
-            "ratio is unreliable. ge=1.0 -- a cap below 1.0 would invert "
-            "the meaning (forced under-correction)."
+            "Upper bound on per-(route, item) calibration ratio; clips tail of "
+            "the ratio distribution to prevent phantom-demand inflation."
         ),
     )
     carry_floor_pct: float = Field(default=0.50, ge=0.0, le=1.0,
         description="Lower clamp: never reduce load below this fraction of the corrected forecast.")
 
     # ------------------------------------------------------------------
-    # Reconciliation v2 -- two adaptive layers on top of the V5_b kernel.
-    # Audit on 12 routes 2026-04-27..2026-05-04 measured each layer's
-    # marginal contribution; only the layers that pulled weight are
-    # kept. All knobs live here, all are env-overridable, all default
-    # to the values that produced the best fleet outcome.
-    #
-    #   L1b -- Pair-maturity bias shrinkage
-    #          effective_bias = bias_pct * min(1, n_active / threshold)
-    #          Stops noisy bias estimates on low-history pairs from
-    #          over-correcting. Cheap, defensive, always-on.
-    #
-    #   L4  -- Quantile loading (class-aware newsvendor approximation)
-    #          target = interpolate(q_low, q50, q_high) at class_quantile
-    #          Lumpy and erratic items load at a quantile below the
-    #          mean, deliberately trading lost-sales risk for less
-    #          overnight stock. Smooth items load at the mean (q50)
-    #          -- identical to V5_b.
+    # Reconciliation v2: adaptive layers on top of V5_b kernel.
+    #   L1b -- Pair-maturity bias shrinkage (always-on, defensive).
+    #   L4  -- Quantile loading (class-aware newsvendor approximation).
     # ------------------------------------------------------------------
 
     # L1b knobs.
     pair_maturity_threshold_days: float = Field(default=14.0, ge=1.0, le=90.0,
-        description="Pairs at or above this many sale-days get full bias correction; "
-                    "below, correction is shrunk proportionally.")
+        description="Pairs at or above this many sale-days get full bias correction; below, shrunk.")
     maturity_shrinkage_enabled: bool = Field(default=True)
 
     # L4 knobs (per-class quantile target).
@@ -410,56 +294,28 @@ class Settings(BaseSettings):
     loading_quantile_default: float = Field(default=0.50, ge=0.05, le=0.95)
     quantile_loading_enabled: bool = Field(default=True)
 
-    # Class-aware bias trim caps. The bias-correction step (forecast_corrected
-    # = predicted * (1 - bias_pct), or its calibration-ratio equivalent) can
-    # amplify model swings on erratic / lumpy items where the trailing bias
-    # is noisy. Capping the |bias_pct| applied for these classes -- and the
-    # equivalent deviation of calibration_ratio from 1.0 -- prevents a
-    # single noisy window from pushing the corrected forecast far from the
-    # historical pattern. Smooth and intermittent items keep the raw bias
-    # since their patterns are stable.
+    # Class-aware bias trim caps: only erratic/lumpy get capped; smooth/intermittent pass through.
     bias_trim_cap_erratic_pct: float = Field(default=0.10, ge=0.0, le=1.0,
-        description="Max |bias_pct| applied to demand_class='erratic' rows.")
+        description="Max |bias_pct| applied to erratic rows.")
     bias_trim_cap_lumpy_pct: float = Field(default=0.10, ge=0.0, le=1.0,
-        description="Max |bias_pct| applied to demand_class='lumpy' rows.")
+        description="Max |bias_pct| applied to lumpy rows.")
 
-    # Sanity-flag thresholds. ``forecast_below_recent`` is set True when the
-    # corrected forecast for a row falls below ``forecast_below_recent_factor``
-    # of the item's recent per-selling-day average over the last
-    # ``forecast_below_recent_window_days`` working days. Both thresholds are
-    # read at refresh time so ops can tune them without code changes.
+    # Sanity flag: forecast_below_recent fires when corrected forecast < factor * recent avg.
     forecast_below_recent_factor: float = Field(default=0.5, gt=0.0, le=1.0,
-        description="Forecast falls below this fraction of recent_avg_per_selling_day -> flag. "
-                    "Fallback when the demand_class has no class-specific override.")
+        description="Fallback factor when class has no class-specific override.")
     forecast_below_recent_window_days: int = Field(default=28, ge=7, le=365,
-        description="Trailing window (working days) used to compute recent per-selling-day average.")
+        description="Trailing window (working days) for recent per-selling-day average.")
 
-    # Class-aware ``forecast_below_recent`` thresholds. Stable items
-    # (smooth / intermittent) should flag earlier because their pattern
-    # is reliable -- a 30% drop already signals trouble. Erratic / lumpy
-    # items legitimately swing wider so the threshold must be looser to
-    # avoid alarm fatigue. The scalar ``forecast_below_recent_factor``
-    # above remains the fallback when the row's class is unknown.
+    # Class-aware below-recent thresholds; stable classes flag earlier, volatile ones looser.
     forecast_below_recent_factor_smooth:       float = Field(default=0.7, gt=0.0, le=1.0)
     forecast_below_recent_factor_intermittent: float = Field(default=0.7, gt=0.0, le=1.0)
     forecast_below_recent_factor_erratic:      float = Field(default=0.5, gt=0.0, le=1.0)
     forecast_below_recent_factor_lumpy:        float = Field(default=0.5, gt=0.0, le=1.0)
 
     # ------------------------------------------------------------------
-    # Pattern envelope (class-aware floor/ceiling around recent average).
+    # Pattern envelope: clip forecast_corrected against recent_avg * factor on both sides.
+    # expected_demand = clip(forecast_corrected, floor, ceiling); class-aware widths.
     # ------------------------------------------------------------------
-    # The bias-corrected forecast (``forecast_corrected``) is clipped
-    # against ``recent_avg_per_selling_day * factor`` on BOTH sides:
-    #   floor   = recent_avg * pattern_floor_factor[class]
-    #   ceiling = recent_avg * pattern_ceiling_factor[class]
-    #   expected_demand = clip(forecast_corrected, floor, ceiling)
-    # The engine then loads against ``expected_demand`` instead of
-    # ``forecast_corrected``, so a stable item the model under-shoots
-    # (or a wild item the model over-shoots) gets pulled toward its
-    # recent pattern. Class-aware because stable items shouldn't deviate
-    # as much from their pattern, while erratic / lumpy items have
-    # legitimate high variance that a tight envelope would over-clip.
-    # All values env-overridable via DF_PATTERN_*_FACTOR_<CLASS>.
     pattern_floor_factor_smooth:       float = Field(default=0.7, ge=0.0, le=1.0)
     pattern_floor_factor_intermittent: float = Field(default=0.6, ge=0.0, le=1.0)
     pattern_floor_factor_erratic:      float = Field(default=0.4, ge=0.0, le=1.0)
@@ -471,55 +327,28 @@ class Settings(BaseSettings):
 
     # ------------------------------------------------------------------
     # Per-(route, item) z-score envelope (preferred path).
+    # floor/ceiling = recent_avg -/+ z[class] * recent_std; falls back to
+    # multiplicative class factors when active days < min threshold.
     # ------------------------------------------------------------------
-    # The multiplicative class factors above (smooth=0.7..1.5, etc.)
-    # apply the SAME width to every item in a class -- ignoring per-pair
-    # variance. Two smooth items can have wildly different std; a tight
-    # 0.7..1.5 collar on a noisy smooth item over-clips legitimate dips
-    # / spikes, and a loose 0.3..3.0 collar on a quiet lumpy item misses
-    # outlier days. The z-score envelope replaces those factors with
-    #     floor   = max(0, recent_avg - z[class] * recent_std)
-    #     ceiling = recent_avg + z[class] * recent_std
-    # so the envelope width is driven by the pair's OWN std. Class
-    # tuning then lives in the z multiplier alone: stable classes get a
-    # tight envelope in std-units (smaller z), volatile classes get a
-    # looser one. Pairs with < ``pattern_envelope_min_active_days``
-    # selling days in the recent window fall back to the multiplicative
-    # factors above -- those remain the cold-start safety net.
     pattern_envelope_z_smooth:       float = Field(default=1.5, ge=0.0, le=10.0)
     pattern_envelope_z_intermittent: float = Field(default=2.0, ge=0.0, le=10.0)
     pattern_envelope_z_erratic:      float = Field(default=2.5, ge=0.0, le=10.0)
     pattern_envelope_z_lumpy:        float = Field(default=3.0, ge=0.0, le=10.0)
-    # Minimum selling days observed in the recent window required to
-    # trust the per-(route, item) std. Below this we fall back to
-    # the multiplicative class factors.
+    # Below this many selling days, std is untrustworthy; revert to class factors.
     pattern_envelope_min_active_days: int = Field(default=5, ge=1, le=365)
 
     # ------------------------------------------------------------------
-    # Dormancy guard (zero expected demand for cold (route, item) pairs).
+    # Dormancy guard: zero expected_demand for cold (route, item) pairs BEFORE
+    # leftover subtraction so no fresh load is added; opening_stock still flows.
     # ------------------------------------------------------------------
-    # When the rep has not sold an item across the last N trip days of a
-    # route's journey plan, the engine treats the pair as dormant: its
-    # ``expected_demand`` is zeroed BEFORE the leftover-subtraction step
-    # so no fresh load is recommended. ``opening_stock`` (carry) still
-    # flows through unchanged -- we stop ADDING fresh, not pretend the
-    # carry doesn't exist. Universally applied to every (route, item)
-    # the engine evaluates; no class gating in v1 (a class-specific
-    # threshold knob can be added later if needed).
     dormancy_enabled: bool = Field(default=True)
     dormancy_zero_sale_threshold_trip_days: int = Field(
         default=7, ge=1, le=90,
-        description=(
-            "A (route, item) is marked dormant if it has zero sales "
-            "across the trailing N route-trip days. Reuses the existing "
-            "sales_recent + journey_plan indices."
-        ),
+        description="Mark (route, item) dormant if zero sales over trailing N route-trip days.",
     )
 
     def loading_quantile_for_class(self, demand_class: str | None) -> float:
-        """Return per-class loading quantile. Falls back to the default
-        for unknown / missing classes so a sparse classifier never
-        crashes the layer."""
+        """Per-class loading quantile; falls back to default for unknown classes."""
         key = (demand_class or "").strip().lower()
         return {
             "smooth": self.loading_quantile_smooth,
@@ -529,11 +358,7 @@ class Settings(BaseSettings):
         }.get(key, self.loading_quantile_default)
 
     def bias_trim_cap_for_class(self, demand_class: str | None) -> float | None:
-        """Return the |bias_pct| cap for a given demand_class, or ``None``
-        when the class is trustworthy (smooth / intermittent) and bias
-        should pass through unchanged. Driven entirely by the
-        ``bias_trim_cap_*_pct`` settings so ops can tune without code
-        changes."""
+        """|bias_pct| cap per class; ``None`` for smooth/intermittent (pass through)."""
         key = (demand_class or "").strip().lower()
         if key == "erratic":
             return float(self.bias_trim_cap_erratic_pct)
@@ -542,11 +367,7 @@ class Settings(BaseSettings):
         return None
 
     def pattern_floor_factor_for_class(self, demand_class: str | None) -> float:
-        """Multiplier on ``recent_avg_per_selling_day`` for the envelope
-        lower bound. Unknown / missing classes use the smooth factor as
-        the safe default -- pulling under-shoots up to 70% of recent
-        pattern is the most defensive behaviour we'd want for a row we
-        cannot otherwise classify."""
+        """Envelope lower-bound multiplier on recent_avg; smooth factor is the safe default."""
         key = (demand_class or "").strip().lower()
         return {
             "smooth":       float(self.pattern_floor_factor_smooth),
@@ -556,11 +377,7 @@ class Settings(BaseSettings):
         }.get(key, float(self.pattern_floor_factor_smooth))
 
     def pattern_ceiling_factor_for_class(self, demand_class: str | None) -> float:
-        """Multiplier on ``recent_avg_per_selling_day`` for the envelope
-        upper bound. Unknown / missing classes fall back to the smooth
-        factor (1.5x) -- a tight cap is the safe default; erratic /
-        lumpy rows opt into a wider ceiling explicitly via their class
-        label."""
+        """Envelope upper-bound multiplier on recent_avg; smooth (1.5x) is the safe default."""
         key = (demand_class or "").strip().lower()
         return {
             "smooth":       float(self.pattern_ceiling_factor_smooth),
@@ -570,11 +387,7 @@ class Settings(BaseSettings):
         }.get(key, float(self.pattern_ceiling_factor_smooth))
 
     def pattern_envelope_z_for_class(self, demand_class: str | None) -> float:
-        """Z multiplier on per-(route, item) recent_std for the z-score
-        envelope. Tighter for stable classes, looser for volatile ones.
-        Unknown classes use the smooth z (tight) as the safe default --
-        a row we can't classify gets the most conservative collar so a
-        spurious bias correction can't blow it past a plausible band."""
+        """Z multiplier on per-(route, item) recent_std; smooth (tight) is the safe default."""
         key = (demand_class or "").strip().lower()
         return {
             "smooth":       float(self.pattern_envelope_z_smooth),
@@ -584,10 +397,7 @@ class Settings(BaseSettings):
         }.get(key, float(self.pattern_envelope_z_smooth))
 
     def forecast_below_recent_factor_for_class(self, demand_class: str | None) -> float:
-        """Class-aware threshold for the ``forecast_below_recent`` flag.
-        Falls back to the legacy scalar ``forecast_below_recent_factor``
-        for unknown / missing classes so a sparse classifier never
-        crashes the sanity flag."""
+        """Class-aware threshold for forecast_below_recent flag; falls back to scalar setting."""
         key = (demand_class or "").strip().lower()
         return {
             "smooth":       float(self.forecast_below_recent_factor_smooth),
@@ -597,7 +407,7 @@ class Settings(BaseSettings):
         }.get(key, float(self.forecast_below_recent_factor))
     bias_table_file: str = Field(default="bias_table.parquet",
         description="Persisted bias cache; recomputed only when forecast CSV mtime changes.")
-    # Shared CSVs produced by data_import that the layer reads.
+    # Shared CSVs produced by data_import.
     closing_stock_file: str = Field(default="closing_stock.csv")
     load_allocation_file: str = Field(default="load_allocation.csv")
     sales_recent_file: str = Field(default="sales_recent.csv")
@@ -608,18 +418,17 @@ class Settings(BaseSettings):
     journey_plan_file: str = Field(default="journey_plan.csv")
     shared_data_dir: str = Field(default_factory=lambda: str(_data_root() / "imports"))
 
-    # Journey-aware concentration guard: zero recommended_load on dates
-    # the dominant buyer of a whale-driven (route, item) is absent from
-    # journey_plan, preventing phantom van capacity no customer can buy.
+    # Journey-aware concentration guard: zero recommended_load on dates the dominant buyer
+    # of a whale-driven (route, item) is absent from journey_plan.
     concentration_guard_enabled: bool = Field(default=True)
     concentration_threshold: float = Field(default=0.80, ge=0.5, le=1.0,
         description="Min share of recent units top_k buyers must own to flag concentrated.")
     concentration_top_k: int = Field(default=2, ge=1, le=5,
-        description="Top-N buyers counted toward share; 2 catches dyadic patterns without ordinary items.")
+        description="Top-N buyers counted toward share.")
     concentration_window_days: int = Field(default=90, ge=14, le=365,
         description="Trailing window for buyer-share measurement.")
     concentration_min_units: float = Field(default=50.0, ge=0.0,
-        description="Pairs below this volume are skipped -- share is statistical noise.")
+        description="Pairs below this volume are skipped (share is noise).")
 
     @property
     def data_import_configured(self) -> bool:
@@ -633,79 +442,68 @@ class Settings(BaseSettings):
     retrain_config_path: str = Field(default=str(_PIPELINE_ROOT / "data" / "retrain_config.json"))
     drift_warn_threshold: float = Field(default=3.0, ge=0)
     drift_alert_threshold: float = Field(default=7.0, ge=0)
-    # Maximum number of past auto-retrain run records persisted in
-    # retrain_config.json. Older entries are dropped so the file stays
-    # small and the rolling-median baseline stays bounded.
+    # Max retained past auto-retrain run records (bounds rolling-median baseline).
     retrain_history_max: int = Field(default=10, ge=2, le=365)
-    # Default frequency at which auto-retrain becomes due. Overridden
-    # per-deployment via /retrain/config; this is the seed value when
-    # the config file is created fresh.
+    # Seed value when retrain_config.json is created fresh; overridden via /retrain/config.
     retrain_default_frequency_days: int = Field(default=14, ge=1, le=365)
-    # Convergence tolerance (percentage points) for the rolling-median
-    # baseline rotation. A new median within this delta of the current
-    # baseline is treated as a no-op so a flat history doesn't churn
-    # the persisted file every tick.
+    # Convergence tolerance (pp) for rolling-median baseline rotation; prevents churn on flat history.
     baseline_rotation_convergence_pp: float = Field(default=0.01, ge=0.0, le=10.0)
-    # Baseline rotation: once we have at least ``baseline_min_history``
-    # successful auto-retrain entries with an ``accuracy_after`` value,
-    # the persisted baseline rotates from cold-start ``initialized`` to
-    # the median of the trailing ``baseline_history_window`` values.
-    # Median (not mean) so a single bad run can't poison the reference;
-    # window-bounded so the baseline tracks the model's actual behaviour
-    # over time rather than freezing on the day-1 number.
+    # Baseline rotates from cold-start to trailing median once min_history accuracy_after entries exist.
+    # Median (not mean) to resist single bad runs; window-bounded to track drift over time.
     baseline_history_window: int = Field(default=30, ge=3, le=365)
     baseline_min_history: int = Field(default=5, ge=2)
 
-    # Drift-accelerated auto-retrain.
-    # When ``retrain_on_drift_alert_enabled`` is True, the auto-retrain
-    # tick fires a retrain BEFORE the time-based ``frequency_days``
-    # cadence if compute_drift_status reports status="significant"
-    # (recent accuracy below baseline by ``drift_alert_threshold``).
-    #
-    # The cooldown between drift-accelerated retrains is computed
-    # DYNAMICALLY from the operator-selected ``frequency_days`` so the
-    # accelerator scales with the chosen cadence:
-    #
-    #   cooldown_days = max(retrain_cooldown_min_days,
-    #                       round(frequency_days * retrain_cooldown_fraction))
-    #
-    # Examples at the default 0.25 fraction:
-    #   frequency=7   -> cooldown=2  (~ a quarter of a week)
-    #   frequency=14  -> cooldown=4
-    #   frequency=21  -> cooldown=5
-    #   frequency=30  -> cooldown=8
-    #
-    # This avoids the hardcoded mismatch where an operator who picked
-    # a 21-day cadence would still see drift accelerators firing every
-    # 2 days. Both knobs are env-overridable; defaults work for any
-    # frequency the UI exposes.
+    # Drift-accelerated auto-retrain. Cooldown scales with operator-selected frequency_days:
+    #   cooldown_days = max(retrain_cooldown_min_days, round(frequency_days * retrain_cooldown_fraction))
     retrain_on_drift_alert_enabled: bool = Field(default=True)
     retrain_cooldown_fraction: float = Field(default=0.25, ge=0.0, le=1.0,
-        description="Cooldown after a retrain, as a fraction of the "
-                    "operator's chosen frequency_days. Drift "
-                    "accelerator is suppressed until this many days "
-                    "(rounded) have elapsed.")
+        description="Cooldown after a retrain, as a fraction of frequency_days.")
     retrain_cooldown_min_days: int = Field(default=1, ge=1, le=30,
-        description="Absolute floor on the drift-accelerator cooldown. "
-                    "Even at frequency_days=1, the accelerator cannot "
-                    "fire more than once per this many days.")
+        description="Absolute floor on the drift-accelerator cooldown.")
+
+    # Model versioning -- artifact registry retention.
+    # ModelRegistry snapshots live artifacts after each retrain; oldest pruned beyond cap,
+    # active version always preserved. Default 10 ~ 20 weeks at 14-day cadence.
+    model_retention_max_versions: int = Field(default=10, ge=1, le=100,
+        description="Max versioned artifact snapshots under versions/; oldest pruned, active preserved.")
+
+    # Scheduler leader-election lock path. One worker per host acquires this and starts
+    # cron schedulers; others run as followers. Filesystem-scoped (multi-host needs distributed lease).
+    scheduler_lock_path: str = Field(
+        default_factory=lambda: str(_data_root() / "forecast" / "scheduler.lock"),
+        description="Filesystem path for scheduler leader-election lock.",
+    )
+
+    # Drop predictions whose trx_date is within N days of today; same-day invoices still in flight.
+    # Default 2 covers typical invoice-upload SLA; set to 0 for dev fixtures.
+    accuracy_settlement_window_days: int = Field(default=2, ge=0, le=14,
+        description="Drop in-flight predictions within this many days of today from accuracy scoring.")
+
+    # Champion-challenger promotion gate: reject auto-retrains that regress beyond threshold;
+    # snapshot still recorded, but current.json pointer held back. 1.0pp absorbs natural variance.
+    champion_challenger_enabled: bool = Field(default=True,
+        description="When True, reject auto-retrains that regress beyond challenger_max_regression_pp.")
+    challenger_max_regression_pp: float = Field(default=1.0, ge=0.0, le=100.0,
+        description="Max allowed accuracy regression (pp) for a challenger to be promoted.")
 
     # DB push (target table for demand predictions)
     db: DbSettings = Field(default_factory=DbSettings)
     demand_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_demand_forecast]")
 
-    # After a successful inference push, optionally call the data_import
-    # service so it refreshes ``data/demand_forecast.csv`` from the table
-    # we just wrote. Empty -> cascade is skipped (production deployments
-    # that orchestrate data_import separately leave this unset).
-    data_import_url: str = Field(default="", description="Base URL of the data_import service, e.g. http://localhost:8005")
+    # Post-push cascade to data_import to refresh demand_forecast.csv. Empty disables.
+    data_import_url: str = Field(default="", description="Base URL of the data_import service.")
 
-    # Forward cascade -- POST recommended_order /generate after each
-    # reconciliation_refresh. Empty skips the cascade.
+    # Forward cascade -- POST recommended_order /generate after reconciliation_refresh. Empty disables.
     recommended_order_url: str = Field(default="", description="e.g. http://localhost:8001")
     recommended_order_generate_timeout_seconds: float = Field(default=600.0, ge=10.0)
 
-    # YaumiLive (read-only) -- for live actual sales lookup
+    # Forward cascade -- POST sales_supervision /session/internal/invalidate-day after
+    # reconciliation_refresh so open supervisor sessions drop their stale rec snapshot
+    # and the next reconcile tick rebuilds from the fresh DB state. Empty disables.
+    sales_supervision_url: str = Field(default="", description="e.g. http://localhost:8004")
+    sales_supervision_cascade_timeout_seconds: float = Field(default=10.0, ge=1.0)
+
+    # YaumiLive (read-only) for live actual sales lookup
     live_db_host: str = Field(default="")
     live_db_port: int = Field(default=1433)
     live_db_database: str = Field(default="YaumiLive")
@@ -737,14 +535,24 @@ class Settings(BaseSettings):
             raise ValueError(f"Invalid log_level: {v}")
         return v
 
+    @field_validator("log_timezone")
+    @classmethod
+    def _validate_log_timezone(cls, v: str) -> str:
+        """Reject unknown IANA zone at boot via zoneinfo lookup."""
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+        try:
+            ZoneInfo(v)
+        except ZoneInfoNotFoundError as exc:
+            raise ValueError(
+                f"Invalid log_timezone {v!r}: not a known IANA zone "
+                f"(zoneinfo lookup failed: {exc})"
+            ) from exc
+        return v
+
     @field_validator("live_route_codes", mode="before")
     @classmethod
     def _coerce_route_codes(cls, v):
-        """Defensive coercion: route codes ship as JSON in some .env layouts
-        (``[9105, 9108, ...]``) and pydantic v2 parses bare integers as int.
-        The field is typed list[str]; without this, the service refuses to
-        boot when env is pre-loaded by a shell wrapper. Stringify so the
-        downstream SQL bindings always see strings."""
+        """Coerce shell-loaded route-code lists (incl. bare ints) to list[str]."""
         if v is None:
             return []
         if isinstance(v, (list, tuple)):

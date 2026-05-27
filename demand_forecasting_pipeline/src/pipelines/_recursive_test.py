@@ -58,7 +58,7 @@ def recursive_test_predict(
     granularity: str,
     forecast_horizon: int,
     feature_cols_by_class: dict[str, list[str]],
-    pair_routes: dict[tuple, Any] | None = None,
+    pair_best_models: dict[tuple, str] | None = None,
 ) -> pd.DataFrame:
     """Run recursive multi-step prediction across the test window.
 
@@ -77,8 +77,15 @@ def recursive_test_predict(
         (the production-grade contract -- never recompute).
       feature_cols_by_class: per-class feature column list as written
         to training_summary.json.
-      pair_routes: optional per-pair best-model lookup (training has
-        this; respect it so each pair is scored against its own winner).
+      pair_best_models: optional dict mapping ``pair_key -> best_model_name``
+        as decided by ``_per_pair_evaluate`` during the direct-pass.
+        Required for apples-to-apples direct-vs-recursive metrics: if
+        the recursive pass uses a different model per pair than the
+        direct pass did, the ``regime=recursive`` rows in
+        model_metrics.csv compare model+regime confounded, not regime
+        alone. Pairs absent from this map fall through to the class's
+        first captured model (legacy behaviour, used only when no
+        per-pair selection ran).
 
     Returns:
       DataFrame with columns ``group_keys + [date_col, prediction, class,
@@ -149,21 +156,59 @@ def recursive_test_predict(
             ] if cls_pair_keys else cur.iloc[0:0]
             if cls_cur.empty:
                 continue
+            # Pair-tuple -> per-pair DataFrame in a single groupby pass.
+            # Earlier ``np.logical_and.reduce`` per-pair mask was O(P * R)
+            # in Python where P~6000 pairs / class and R~5000 cls_cur rows.
+            # groupby + dict gets us O(R) plus one O(1) lookup per pair.
+            pair_groups = {
+                key: grp for key, grp in cls_cur.groupby(group_keys, sort=False)
+            }
             for pk in cls_pair_keys:
-                pair_rows = cls_cur[
-                    np.logical_and.reduce(
-                        [cls_cur[k].astype(str) == str(v) for k, v in zip(group_keys, pk)]
-                    )
-                ]
-                if pair_rows.empty:
+                # groupby emits scalar key for length-1 group_keys and tuple
+                # for length>=2; normalise the lookup so callers can pass
+                # either shape transparently.
+                lookup_key = pk if len(group_keys) > 1 else pk[0]
+                pair_rows = pair_groups.get(lookup_key)
+                if pair_rows is None or pair_rows.empty:
                     continue
-                # Pick model: pair-specific winner if a routing/lookup is
-                # supplied; otherwise the first model in the captured dict
-                # for the class.
+                # Pick model: pair-specific winner from the per-pair
+                # best-model lookup if available; otherwise the first
+                # model in the captured dict for the class. Using a
+                # dict[tuple, str] (not Route objects) so the lookup
+                # is direct and unambiguous -- the previous code did
+                # ``getattr(Route, 'best_model', None)`` against a
+                # Route dataclass that has NO ``best_model`` field, so
+                # every pair silently fell through to the class
+                # default, confounding direct-vs-recursive metrics.
+                #
+                # Ensemble pairs are SKIPPED from recursive evaluation:
+                # the ensemble is a weighted average of multiple
+                # component predictions, so a faithful recursive
+                # re-run would need to recurse each component
+                # individually and re-weight, which the captured
+                # ``val_fit_models_by_class`` doesn't structure for.
+                # Falling back to the class default for ensemble pairs
+                # would confound model + regime in model_metrics.csv,
+                # which is exactly the bug this module fixes. Skipping
+                # with a debug log is the conservative choice -- the
+                # direct metric row for ensemble pairs still exists in
+                # model_metrics.csv; we just don't emit a recursive
+                # row for them.
+                requested = (
+                    pair_best_models.get(pk)
+                    if pair_best_models else None
+                )
+                if requested == "ensemble":
+                    logger.debug(
+                        "recursive_test_predict: skipping pair %s "
+                        "(best_model=ensemble; recursive re-run not "
+                        "supported for composite models)", pk,
+                    )
+                    continue
                 best_name = None
-                if pair_routes and pk in pair_routes:
-                    best_name = getattr(pair_routes[pk], "best_model", None)
-                if best_name is None or best_name not in models_by_name:
+                if isinstance(requested, str) and requested in models_by_name:
+                    best_name = requested
+                if best_name is None:
                     best_name = next(iter(models_by_name.keys()))
                 mdl = models_by_name.get(best_name)
                 if mdl is None:

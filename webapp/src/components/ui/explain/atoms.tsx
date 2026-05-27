@@ -1,7 +1,4 @@
-/**
- * Shared building blocks for explainability modals (forecast / recommendation).
- * One source of truth so layout & style stay identical across modals.
- */
+/** Shared building blocks for explainability modals (forecast + recommendation). */
 import React from "react";
 
 export function num(v: unknown): number | null {
@@ -14,10 +11,7 @@ export function str(v: unknown): string {
   return v == null ? "" : String(v);
 }
 
-/** Tolerant boolean coercion for wire/CSV-mirror values. The CSV-mirror
- *  sometimes ships booleans as "True"/"False" strings and sometimes as
- *  1/0, so we accept the canonical JSON shape plus those legacy forms.
- *  Anything else collapses to false -- callers never see undefined. */
+/** Tolerant bool coercion; accepts true | 1 | "true" | "True" (CSV-mirror legacy). */
 export function bool(v: unknown): boolean {
   return v === true || v === 1 || v === "true" || v === "True";
 }
@@ -43,16 +37,9 @@ export function Stat({
   label: string;
   value: React.ReactNode;
   hint?: React.ReactNode;
-  /** When true, the value renders as wrapping prose (multi-line, no
-   *  truncate, secondary-text weight). Use for narrative cells that hold
-   *  a sentence rather than a numeric KPI -- keeps the outer Stat shell
-   *  identical so the grid alignment doesn't break. */
+  /** Wrapping prose mode for narrative cells; keeps the Stat shell aligned. */
   prose?: boolean;
-  /** When true, the card draws the eye to its value: bolder left border
-   *  in the brand colour and a brand-tinted, larger value. Reserved for
-   *  the headline KPI of each modal (the predicted quantity in the
-   *  forecast modal, the recommended quantity in the recommendation
-   *  modal). Other Stats stay neutral so the highlight stands out. */
+  /** Brand-tinted headline mode; reserved for the modal's primary KPI. */
   highlight?: boolean;
 }) {
   const borderClass = highlight ? "border-brand-500" : "border-brand-100";

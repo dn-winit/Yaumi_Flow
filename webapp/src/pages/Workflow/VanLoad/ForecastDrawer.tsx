@@ -22,9 +22,7 @@ interface Props {
   itemCodes?: string[];
 }
 
-/** Adapter: wrap a ForecastDrawerTableRow into the legacy Row shape
- *  the ExplainabilityModal reads. The server already supplies the
- *  engine intermediates the modal renders inside ``explain``. */
+/** Adapter to the legacy Row shape ExplainabilityModal reads; explain carries the intermediates. */
 function toLegacyRow(r: ForecastDrawerTableRow, routeCode: string | undefined): Row {
   return {
     ItemCode: r.item_code,

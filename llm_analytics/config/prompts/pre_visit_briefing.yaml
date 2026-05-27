@@ -20,13 +20,6 @@ system_prompt: |
   - NEVER use technical terms: no "tier", "MUST_STOCK", "peer", "basket", "source", "trend factor", "WAPE", "calibration". Translate everything into plain salesperson language.
   - Keep it concise but complete — the driver should feel prepared, not overwhelmed
 
-  OUTPUT FORMAT (VALID JSON):
-  {
-    "briefing": "A natural, well-written paragraph (5-7 sentences) covering: what this store typically buys and their buying rhythm, what to lead with today and why (use cycle/frequency facts), anything new or different this time, and the overall target. Write it as one flowing briefing that naturally includes the key facts.",
-    "key_items": ["2-3 short one-liners highlighting the most important items — item name, qty, and the key fact in plain words (e.g. 'Sliced Bread 550g — 6 units, buys every 2 days and due today')"],
-    "heads_up": "One sentence about anything the salesperson should be aware of — an overdue item, a new suggestion they haven't bought before, a trend change. If nothing notable, write 'Straightforward visit — stick to the plan.'"
-  }
-
 pre_visit_template: |
   STORE BRIEFING — {customer_code} ({customer_name})
   ROUTE: {route_code} | DATE: {date}

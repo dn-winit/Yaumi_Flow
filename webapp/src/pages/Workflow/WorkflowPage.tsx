@@ -7,29 +7,17 @@ import { WorkflowProvider, useWorkflow, useWorkflowNavigate } from "./workflowCo
 import VanLoadTab from "./VanLoad/VanLoadTab";
 import VisitTab from "./Visit/VisitTab";
 
-/**
- * Two-step supervisor flow rendered as a connected stepper, not as
- * independent tabs. Step 1 (Plan) picks the van load for a route; step 2
- * (Visit) reviews per-customer recommendations and runs the live session.
- * The (route, date) scope is shared across both steps via WorkflowContext
- * so a pick made in Plan carries straight into Visit.
- */
+/** Two-step Plan -> Visit stepper; (route, date) scope shared via WorkflowContext. */
 function WorkflowStepper() {
-  // Workflow-aware navigate keeps ?route=…&date=… across step jumps so a
-  // refresh on Visit doesn't bounce back to Plan's route picker.
   const navigate = useWorkflowNavigate();
   const location = useLocation();
   const { routeCode } = useWorkflow();
 
-  // Visit is only reachable once the supervisor has picked a route in
-  // Plan -- direct jumps would skip the Van Load review step that
-  // primes the visit context. The stepper, the keyboard shortcut, and
-  // the URL guard in WorkflowPage all enforce the same rule.
+  // Visit requires a route picked in Plan; stepper, shortcut, and URL guard all enforce this.
   const canEnterVisit = Boolean(routeCode);
   const tabEnabled = (key: string) => key !== "visit" || canEnterVisit;
 
-  // Keyboard shortcuts: 1 jumps to Plan; 2 jumps to Visit only if the
-  // route has been picked.
+  // Shortcuts: 1 -> Plan; 2 -> Visit (only when route is picked).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
       if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
@@ -40,22 +28,16 @@ function WorkflowStepper() {
     return () => window.removeEventListener("keydown", handler);
   }, [navigate, canEnterVisit]);
 
-  // Which step is the user currently on.
   const activeIndex = WORKFLOW_TABS.findIndex((t) =>
     location.pathname.startsWith(t.path),
   );
-  // Steps are "done" when they are behind the active step. The connector
-  // between two steps lights up brand-coloured once the right-hand step
-  // has been reached, so the row "fills in" left-to-right as the
-  // supervisor advances.
+  // Steps left of active are "done"; the row fills in left-to-right.
   const stepStatus = (i: number): "done" | "active" | "idle" => {
     if (i < activeIndex) return "done";
     if (i === activeIndex) return "active";
     return "idle";
   };
-  // Connector between steps i and i+1 also lights up when the workflow
-  // scope (route) is set -- so the row reads "data flows from Plan into
-  // Visit" even when the supervisor is still browsing Plan.
+  // Connector also lights up when route is set, so the row reads "Plan -> Visit" early.
   const connectorActive = (i: number): boolean => {
     if (stepStatus(i + 1) !== "idle") return true;
     return Boolean(routeCode);
@@ -68,9 +50,7 @@ function WorkflowStepper() {
         const enabled = tabEnabled(tab.key);
         const next = WORKFLOW_TABS[i + 1];
         const nextActive = next ? connectorActive(i) : false;
-        // Subtitle is dynamic so the stepper itself reflects the active
-        // scope -- no need for a separate "Workflow for Route X" strip
-        // since the user can read scope directly off the stepper.
+        // Subtitle reflects active scope; avoids a redundant "Workflow for Route X" strip.
         const subtitle = !enabled
           ? "Pick a route in Plan first"
           : routeCode
@@ -162,12 +142,7 @@ function Connector({ active }: { active: boolean }) {
   );
 }
 
-/**
- * URL guard: Visit is reachable only after a route has been picked in
- * Plan. Direct hits to /workflow/visit (typed URL, stale bookmark, the
- * old /orders or /supervision aliases) bounce back to Plan so the
- * supervisor never lands on an empty session shell.
- */
+/** URL guard: Visit requires a picked route; direct hits bounce to Plan. */
 function VisitGuard() {
   const { routeCode } = useWorkflow();
   if (!routeCode) return <Navigate to={ROUTES.workflowPlan} replace />;
@@ -192,8 +167,7 @@ export default function WorkflowPage() {
             <Route index element={<Navigate to={ROUTES.workflowPlan} replace />} />
             <Route path="plan" element={<VanLoadTab />} />
             <Route path="visit" element={<VisitGuard />} />
-            {/* Backward-compat: every alias funnels through Plan so the
-                Plan -> Van Load -> Visit ordering is preserved. */}
+            {/* Backward-compat: aliases funnel through Plan to preserve ordering. */}
             <Route path="van-load" element={<Navigate to={ROUTES.workflowPlan} replace />} />
             <Route path="orders" element={<Navigate to={ROUTES.workflowPlan} replace />} />
             <Route path="supervision" element={<Navigate to={ROUTES.workflowPlan} replace />} />

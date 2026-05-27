@@ -20,16 +20,7 @@ interface Props {
   height?: number;
 }
 
-/**
- * Shared full-width daily trend card with a Revenue / Quantity toggle.
- * Showing one series at a time keeps the y-axis honest -- mixing AED and
- * units on a shared axis distorts whichever one is smaller.
- *
- * Toggle state is component-local so each instance (Dashboard page,
- * VanLoad "Past analysis" drawer, etc.) tracks its own active metric.
- * Bar chart, not line -- same chart family the AccuracyDrawer uses, so
- * the visual language across the app is unified.
- */
+/** Daily trend card with Revenue/Quantity toggle; one series at a time keeps the y-axis honest. */
 export default function DashboardDailyTrend({ data, loading, height = 300 }: Props) {
   const [metric, setMetric] = useState<TrendMetric>("revenue");
 

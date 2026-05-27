@@ -1,6 +1,4 @@
-"""
-FastAPI application factory.
-"""
+"""FastAPI application factory."""
 
 from __future__ import annotations
 
@@ -16,18 +14,10 @@ from data_import.config.settings import Settings, get_settings
 
 def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> None:
     """POST demand_forecasting's ``/reconciliation/refresh`` after a fresh
-    CSV import lands. The forecast service's reconciliation cron is the
-    sole writer of the CSV-only diagnostic columns
-    (``recent_avg_per_selling_day``, ``expected_demand``,
-    ``pattern_floor_applied`` / ``pattern_ceiling_applied``,
-    ``forecast_below_recent``). Without this hop, those columns stay
-    absent on the freshly-imported mirror until the next 03:30 Dubai
-    cron, and the van-load explainability modal shows misleading zeros
-    next to a real ``recommended_load``.
-
-    Best-effort: a missing or unreachable forecast service logs a
-    warning and returns -- the import itself succeeded and the
-    diagnostic columns will eventually be patched by the scheduled cron.
+    CSV import lands so CSV-only diagnostic columns (recent_avg,
+    expected_demand, pattern_*_applied, forecast_below_recent) are patched
+    in the same tick. Best-effort: an unreachable forecast service logs
+    and returns; the scheduled cron picks it up later.
     """
     base = (settings.forecast_url or "").rstrip("/")
     if not base:
@@ -39,9 +29,7 @@ def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> 
         return
     url = f"{base}/api/v1/forecast/reconciliation/refresh"
     try:
-        # httpx is already in the venv (used by demand_forecasting). We
-        # only need a POST + JSON parse so the import is local; avoids
-        # paying its import cost on every cold dependency import.
+        # Local import: avoids paying httpx cost on every cold import.
         import httpx
         resp = httpx.post(
             url,
@@ -78,30 +66,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         _logger.info("Data Import Service starting -- data_dir=%s", settings.data_dir)
 
-        # Pre-warm EDA aggregations so the first dashboard request is instant
-        # (otherwise the user pays for the 50MB CSV parse on initial load).
+        # Pre-warm EDA aggregations so first dashboard request is instant.
+        # Leader election: only the worker that owns the scheduler lock runs
+        # the full-import probe, otherwise ``workers>1`` would have N workers
+        # all racing the same CSV ``os.replace`` and hammering YaumiLive.
         try:
             from data_import.api.dependencies import get_eda_service, get_importer
+            from common.leader_election import try_acquire_leader_lock
             import threading
             from datetime import datetime, timedelta
             from pathlib import Path
 
+            startup_is_leader = (
+                settings.scheduler_enabled
+                and try_acquire_leader_lock(settings.scheduler_lock_path)
+            )
+            if not startup_is_leader and settings.scheduler_enabled:
+                _logger.info(
+                    "data_import startup refresh skipped: another worker holds the leader lease",
+                )
+
             def _startup_refresh() -> None:
-                """Check CSV freshness on boot. If any dataset is stale (max
-                date < today), run a full import before warming the EDA cache.
-                This covers the case where the server was down overnight and
-                the scheduled cron missed its window. Runs off the request
-                path so startup isn't blocked."""
-                # Default-stale so any failure in the freshness probe falls
-                # through to a refresh + cache invalidate, never to NameError
-                # in the warm-up block below.
+                """Run a full import on boot if any dataset is stale (covers
+                missed overnight cron), then warm the EDA cache. Off the
+                request path so startup is not blocked."""
+                # Default-stale: any probe failure falls through to refresh
+                # rather than NameError'ing in the warm-up block below.
                 stale = True
                 try:
                     importer = get_importer()
                     today = datetime.now().strftime("%Y-%m-%d")
 
-                    # Quick freshness check: peek at the most recent date in
-                    # sales_recent.csv (the fastest-changing dataset).
+                    # Freshness probe: most recent date in sales_recent.csv
+                    # (fastest-changing dataset).
                     sales_csv = Path(settings.data_dir) / "sales_recent.csv"
                     if sales_csv.exists():
                         import pandas as pd
@@ -119,15 +116,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         results = importer.import_all("full")
                         new_rows = sum(r.get("new_rows", 0) for r in results.values())
                         _logger.info("Startup import complete: %d new rows across all datasets", new_rows)
-                        # Reverse cascade: after the fresh CSV mirror lands,
-                        # ask demand_forecasting to re-patch the CSV-only
-                        # diagnostic columns (recent_avg, expected_demand,
-                        # pattern_floor/ceiling_applied, forecast_below_recent)
-                        # so the van-load explainability modal renders the
-                        # real engine intermediates, not the silent zeros
-                        # that ``_first_present`` falls back to when those
-                        # columns are missing. Best-effort: a warning if the
-                        # forecast service is unreachable, never a hard fail.
+                        # Reverse cascade so diagnostic columns are re-patched in this tick.
                         _cascade_reconciliation_refresh(settings, _logger)
                     else:
                         _logger.info("Data is fresh — skipping startup import")
@@ -135,11 +124,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as exc:
                     _logger.warning("Startup data refresh failed: %s", exc)
 
-                # Warm the EDA cache (always, regardless of import). The two
-                # date-windowed surfaces (sales_overview, business_kpis) need
-                # a real (start_date, end_date) anchor now -- warm them with
-                # the same trailing-30-day window the dashboard defaults to
-                # on cold mount, so the first user request is a cache hit.
+                # Warm EDA cache (always) using the same trailing-30-day
+                # window the dashboard defaults to, so first request is a hit.
                 try:
                     svc = get_eda_service()
                     if stale:
@@ -165,12 +151,40 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as exc:
                     _logger.warning("EDA warm-up skipped: %s", exc)
 
-            threading.Thread(target=_startup_refresh, daemon=True, name="startup-refresh").start()
+            # Skip the import + cascade on followers; EDA cache warm-up still
+            # runs because it only reads the local CSV mirror that the leader
+            # populated.
+            if startup_is_leader:
+                threading.Thread(target=_startup_refresh, daemon=True, name="startup-refresh").start()
+            else:
+                # Followers warm EDA against whatever CSVs the leader produced;
+                # the inline block matches the no-stale branch of _startup_refresh.
+                def _warm_eda_only() -> None:
+                    try:
+                        svc = get_eda_service()
+                        today_dt = datetime.now()
+                        today = today_dt.strftime("%Y-%m-%d")
+                        start = (today_dt - timedelta(days=29)).strftime("%Y-%m-%d")
+                        for label, runner in (
+                            ("sales_overview", lambda: svc.get_sales_overview(start, today)),
+                            ("item_catalog", lambda: svc.get_item_catalog()),
+                            ("business_kpis", lambda: svc.get_business_kpis(start, today)),
+                            ("last_active_date", lambda: svc.get_last_active_date()),
+                        ):
+                            try:
+                                runner()
+                            except Exception as exc:
+                                _logger.warning("EDA warm-up skipped %s: %s", label, exc)
+                    except Exception as exc:
+                        _logger.warning("EDA warm-up skipped: %s", exc)
+                threading.Thread(target=_warm_eda_only, daemon=True, name="startup-warm-eda").start()
         except Exception as exc:
             _logger.warning("Startup refresh scheduling failed: %s", exc)
 
         sched = None
-        if settings.scheduler_enabled:
+        # Only the leader (that already booted the import thread above) fires
+        # the daily cron. Followers stay scheduler-less.
+        if settings.scheduler_enabled and startup_is_leader:
             from data_import.scheduler import start_scheduler
             sched = start_scheduler(settings)
         yield
@@ -186,9 +200,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         lifespan=lifespan,
     )
 
-    # CORS pinned to the configured webapp origins -- never ``*`` with
-    # credentials, which browsers silently block. Override via the
-    # shared ``YF_ALLOW_ORIGINS`` env var.
+    # CORS pinned to configured origins (never ``*`` with credentials).
+    # Override via ``YF_ALLOW_ORIGINS``.
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.allow_origins,

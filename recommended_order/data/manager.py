@@ -1,14 +1,5 @@
-"""
-Data manager -- single in-memory source for demand, customer, and journey data.
-
-Single-source architecture: this service *never* hits the source DB for data.
-All three datasets are read from shared CSVs under ``data/`` that are produced
-by ``data_import``. The only DB interaction RO has is writing generated
-recommendations back to ``yf_recommended_orders`` via ``db_pusher``.
-
-Boot flow:
-    1. Load all three CSVs into memory (takes seconds).
-    2. Scheduler at 03:30 Dubai re-reads from CSVs after data_import's 03:00 job.
+"""Data manager -- in-memory cache over shared CSVs produced by data_import.
+RO never hits the source DB; the only DB write is the rec push via db_pusher.
 """
 
 from __future__ import annotations
@@ -18,7 +9,7 @@ import logging
 import math
 import os
 import threading
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -29,15 +20,8 @@ from recommended_order.config.settings import Settings, get_settings
 logger = logging.getLogger(__name__)
 
 
-# Wire-column names on ``sales_transactions.csv`` (the DB mirror of
-# ``yf_sales_transactions``) used by the van-load fast path. Derived
-# from the canonical wire-schema map in
-# ``demand_forecasting_pipeline.services.storage.file_storage.
-# SALES_TRANSACTIONS_RENAME`` so a column rename on the producer side
-# propagates here automatically (failing loudly via KeyError rather
-# than silently turning into NaN). We expose only the five fields the
-# loader actually touches; the PascalCase form is what the rest of
-# recommended_order already uses for the demand frame.
+# Wire columns from the canonical rename map so a producer-side schema
+# change propagates here automatically (loud KeyError vs silent NaN).
 from demand_forecasting_pipeline.services.storage.file_storage import (
     SALES_TRANSACTIONS_RENAME as _DF_RENAME,
 )
@@ -49,18 +33,18 @@ _SX_COL_ROUTE_CODE    = _SX_WIRE["route_code"]
 _SX_COL_ITEM_CODE     = _SX_WIRE["item_code"]
 _SX_COL_OPENING_STOCK = _SX_WIRE["opening_stock"]
 _SX_COL_FRESH_LOAD    = _SX_WIRE["fresh_load"]
+# Yesterday's leftover = today's opening (see enrich.py:611-617); Tier-2
+# fallback uses this when today's row hasn't landed in sales_transactions yet.
+_SX_COL_LEFTOVER_NEXT = _SX_WIRE["leftover_to_next_day"]
 _SX_REQUIRED_COLS = frozenset({
     _SX_COL_TRX_DATE, _SX_COL_ROUTE_CODE, _SX_COL_ITEM_CODE,
     _SX_COL_OPENING_STOCK, _SX_COL_FRESH_LOAD,
+    _SX_COL_LEFTOVER_NEXT,
 })
 
 
 class DataManager:
-    """Loads data from shared CSVs and caches in memory for fast access.
-
-    Watches CSV modification times so it auto-reloads when data_import writes
-    newer files — no manual refresh needed, no race conditions on startup.
-    """
+    """Loads + caches shared CSVs; auto-reloads on mtime change."""
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._settings = settings or get_settings()
@@ -75,13 +59,8 @@ class DataManager:
         self._meta_path = Path(self._settings.shared_data_dir) / ".ro_manager_meta.json"
 
     def _write_meta(self, meta: Dict[str, Any]) -> None:
-        # Atomic write: serialise to a sibling .tmp then os.replace
-        # onto the canonical path. Without this, two concurrent
-        # refresh threads racing into ``write_text`` could leave a
-        # half-written JSON that a downstream reader's
-        # ``json.loads`` then raises on. ``os.replace`` is atomic on
-        # both POSIX and Windows -- a reader sees either the old
-        # complete file or the new complete file, never a partial.
+        # Atomic .tmp + os.replace so concurrent refreshes can't leave a
+        # half-written JSON for the reader.
         try:
             self._meta_path.parent.mkdir(parents=True, exist_ok=True)
             tmp_path = self._meta_path.with_suffix(self._meta_path.suffix + ".tmp")
@@ -103,13 +82,7 @@ class DataManager:
         return self._load_from_shared_csvs()
 
     def ensure_fresh(self) -> None:
-        """Auto-reload if any source CSV was modified since the last load.
-
-        Called before every generation run so the engine always works with
-        current data — even if data_import's startup import finished after
-        this service booted. The mtime check is O(1) per file (stat call
-        only, no read) so calling it on every request is cheap.
-        """
+        """Auto-reload if any source CSV's mtime changed (stat-only O(1))."""
         loaders = {
             "demand":   self._settings.demand_forecast_file,
             "customer": self._settings.customer_data_file,
@@ -151,12 +124,8 @@ class DataManager:
                     threshold = self._settings.demand_probability_threshold
                     df = df[pd.to_numeric(df["DemandProbability"], errors="coerce") >= threshold]
 
-                # Edge case (Sprint-3, Theme C.1): returns.
-                # Customer history occasionally contains negative TotalQuantity
-                # rows -- these are returns, not buys. Averaging them in drags
-                # the recency-weighted mean down and can mask real demand. Drop
-                # them at load so every downstream consumer (calibration,
-                # priority, quantity, peer matrix) sees a net-of-returns view.
+                # Drop return rows (TotalQuantity<=0) so downstream consumers
+                # see a net-of-returns view of customer history.
                 if name == "customer" and "TotalQuantity" in df.columns:
                     qty = pd.to_numeric(df["TotalQuantity"], errors="coerce")
                     n_before = len(df)
@@ -177,7 +146,8 @@ class DataManager:
                 errors.append(f"{name}: {exc}")
                 logger.error("Failed to load %s: %s", name, exc)
 
-        now = datetime.now()
+        # UTC-aware so /health's last_refresh carries an explicit offset.
+        now = datetime.now(timezone.utc)
         with self._lock:
             self._last_refresh = now
 
@@ -194,13 +164,8 @@ class DataManager:
     # Getters
     # ------------------------------------------------------------------
 
-    # ``_load_from_shared_csvs`` swaps ``_demand_df`` / ``_customer_df``
-    # / ``_journey_df`` references under ``self._lock``. The getters
-    # take the SAME lock just long enough to snapshot the reference,
-    # then release before slicing -- so a concurrent refresh cannot
-    # leave a reader holding a half-swapped attribute. Once we own a
-    # local reference, the underlying frame is immutable for the slice
-    # (refresh produces NEW frames and rebinds, never mutates in place).
+    # Getters take ``self._lock`` only long enough to snapshot the frame
+    # reference (refresh rebinds new frames; never mutates in place).
     def get_demand_data(self, route_code: Optional[str] = None) -> pd.DataFrame:
         with self._lock:
             df = self._demand_df
@@ -238,42 +203,13 @@ class DataManager:
         return df
 
     def get_van_items(self, route_code: str, target_date: str) -> Dict[str, int]:
-        """Return ``{ItemCode: van_load_quantity}`` for one (route, date).
+        """Return ``{ItemCode: van_load_quantity}`` for one (route, date),
+        where van_load = opening_stock + fresh_load (full physical capacity).
 
-        ``van_load_quantity`` is the rep's **complete physical capacity
-        for the day** = ``opening_stock`` (yesterday's closing + today's
-        depot allocation) + ``fresh_load`` (the V5_b fresh-issuance the
-        engine adds on top). Without ``opening_stock`` in the sum, an
-        item already covered by leftover stock (``fresh_load == 0``)
-        would be invisible to the recommendation engine -- the rep has
-        physical units to sell but nothing would get recommended.
-
-        Two-tier source resolution:
-
-          1. **Past + today** -- read directly from ``sales_transactions.csv``
-             which mirrors ``yf_sales_transactions`` (carry chain +
-             reconciliation outputs written by the daily refresh cron).
-             ``opening_stock`` there reflects the policy's accumulated
-             leftover walked across the multi-day horizon, NOT a fresh
-             day-1-zero recompute. Re-running ``enrich_with_load`` on a
-             single-day slice here would reset the simulation to day 1
-             and silently produce opening = 0 for every row, which would
-             understate van capacity. The sales-transactions CSV stops
-             at ``today`` by design (no actuals for the future).
-
-          2. **Future horizon** -- ``sales_transactions.csv`` has no
-             row for tomorrow+. Fall through to an inline enrich on the
-             day's forecast slice. Day-1 of the slice starts at
-             opening = 0 (the engine has no historical anchor in that
-             single-day frame), so the resulting van quantity is
-             effectively ``fresh_load`` only. This is the intended
-             contract: no carry chain exists for future dates.
-
-        The forecast frame is the single SOT for which (route, item)
-        pairs exist on a given day -- the lookup keys the
-        sales-transactions join. Forecast and Test splits are unioned
-        upstream in ``van_load_view``; here we just take the demand
-        slice for the requested date.
+        Tier-1 reads past+today from sales_transactions.csv (cron-written
+        carry chain). Tier-2 inline-enriches the forecast slice for future
+        dates (no carry chain exists there); when today's sx row is missing,
+        a walk-back carry seed restores yesterday's leftover.
         """
         demand = self.get_demand_data(route_code)
         if demand.empty:
@@ -284,15 +220,12 @@ class DataManager:
         if same_day.empty:
             return {}
 
-        # ---- Tier 1: past + today -- sales_transactions.csv is canonical ----
+        # Tier 1: past + today -- sales_transactions.csv is canonical.
         sx_idx = self._sales_transactions_index()
         if sx_idx:
             key_date = pd.Timestamp(target_dt)
-            # Restrict to items that the forecast actually surfaces for
-            # this (route, date). Items present in sales_transactions but
-            # absent from today's forecast are stale leftovers -- the
-            # rep may still have them on the van, but they shouldn't be
-            # recommended for sale today.
+            # Restrict to items the forecast surfaces today; stale leftovers
+            # on the van shouldn't be recommended for sale.
             items_today = same_day["ItemCode"].astype(str).unique()
             route_key = str(route_code)
             out: Dict[str, int] = {}
@@ -302,24 +235,18 @@ class DataManager:
                 if row is None:
                     continue
                 hits += 1
-                fresh, opening = row
+                fresh, opening, _leftover_next = row
                 total = max(0.0, float(fresh) + float(opening))
                 if total > 0:
-                    # Ceil so a 35.28-unit truck capacity reads as 36,
-                    # not 35. Matches the DB-canonical contract that
-                    # quantity columns round to the next whole unit and
-                    # the van_load_lower_bound / van_load_upper_bound
-                    # rounding in the engine, so forecast (FLOAT) and
-                    # rec (INT) surfaces align byte-for-byte.
+                    # Ceil so forecast (float) and rec (int) align (35.28 -> 36).
                     out[str(item)] = int(math.ceil(total))
             if hits > 0:
                 return out
-            # Index loaded but had no rows for this (route, date) =>
-            # the request is on the forecast horizon (future). Fall
-            # through to the inline-enrich path which handles future
-            # dates with opening = 0 by construction.
+            # Future request: index has no row -> fall through to Tier 2.
 
-        # ---- Tier 2: future horizon -- inline enrich (no carry chain) ----
+        # Tier 2: inline enrich + carry seed. Single-day slices open at 0
+        # by construction; the seed walks back to recover yesterday's
+        # leftover when today's sx row is still missing.
         agg_map = {"Predicted": "max"}
         for col in ("LowerBound", "UpperBound"):
             if col in same_day.columns:
@@ -332,46 +259,57 @@ class DataManager:
             .assign(RouteCode=str(route_code), TrxDate=target_dt)
         )
         enriched = self.reconcile_demand_frame(per_item)
-        # ``enrich_with_load`` populates ``recommended_load`` (snake_case)
-        # as the output column and ``opening_stock`` as a diagnostic. The
-        # diagnostic is 0 for future dates by design (no historical
-        # anchor in a single-day slice). Use ``Predicted`` if the engine
-        # was unavailable and the helper degraded to the no-op path.
+        # enrich_with_load emits ``recommended_load`` + ``opening_stock``;
+        # fall back to Predicted if the helper degraded to a no-op.
         load_col = "recommended_load" if "recommended_load" in enriched.columns else "Predicted"
         has_opening_col = "opening_stock" in enriched.columns
+        # Weekend-aware carry seed via shared walk-back (also used by the
+        # page-view override) so semantics stay aligned across consumers.
+        from common.carry_lookup import lookup_prior_leftover
+        route_key = str(route_code)
+        target_ts = pd.Timestamp(target_dt)
+        lookback_days = int(getattr(self._settings, "carry_chain_lookback_days", 14))
         out: Dict[str, int] = {}
         for r in enriched.itertuples(index=False):
+            # item_key defined per-row regardless of walk-back firing
+            # (test_tier2_multi_item_no_unbound_or_key_leak locks this in).
+            item_key = str(r.ItemCode)
             fresh = float(getattr(r, load_col) or 0.0)
             opening = float(getattr(r, "opening_stock", 0.0) or 0.0) if has_opening_col else 0.0
+            if opening == 0.0 and sx_idx:
+                # leftover_pos=2 -> tuple shape (fresh, opening, leftover_next).
+                seeded, _src = lookup_prior_leftover(
+                    sx_idx, route_key, item_key, target_ts,
+                    lookback_days=lookback_days, leftover_pos=2,
+                )
+                opening = seeded
             total = max(0.0, fresh + opening)
             if total > 0:
-                out[str(r.ItemCode)] = int(math.ceil(total))
+                # Ceil to keep integer surfaces consistent (a van holds 31, not 30.7).
+                out[item_key] = int(math.ceil(total))
         return out
 
-    # ------------------------------------------------------------------
-    # Sales-transactions index (mtime-cached)
-    # ------------------------------------------------------------------
-    #
-    # The carry chain + reconciliation outputs moved from
-    # ``yf_demand_forecast`` into ``yf_sales_transactions``. We mirror
-    # the latter to ``data/imports/sales_transactions.csv`` via
-    # data_import. This index is parsed once per file revision per
-    # process so every ``get_van_items`` call is O(1) lookups.
-    # ------------------------------------------------------------------
+    # Sales-transactions index (mtime-cached) so every get_van_items()
+    # call is O(1) lookups against yf_sales_transactions's CSV mirror.
 
     _SX_LOCK = threading.Lock()
-    _SX_INDEX: Optional[Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]]] = None
+    _SX_INDEX: Optional[Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float, float]]] = None
     _SX_MTIME: Optional[float] = None
     _SX_SIZE: Optional[int] = None
 
     def _sales_transactions_index(
         self,
-    ) -> Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]]:
-        """Per-(route, item, date) -> (fresh_load, opening_stock) lookup.
+    ) -> Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float, float]]:
+        """Per-(route, item, date) -> (fresh_load, opening_stock, leftover_next) lookup.
 
         Returns an empty dict if the mirror CSV is missing / empty /
         unparseable -- callers must treat that as "fall through to the
         inline enrich path", not as "no van today".
+
+        ``leftover_next`` is yesterday-aware: callers that miss today's
+        row (Tier-2 fallback) read ``idx[(route, item, target - 1d)][2]``
+        to seed today's ``opening_stock`` from the prior day's carry,
+        instead of silently dropping it to zero.
         """
         filename = getattr(self._settings, "sales_transactions_file", "sales_transactions.csv")
         path = Path(self._settings.shared_data_dir) / filename
@@ -396,9 +334,7 @@ class DataManager:
                 exc,
             )
             return {}
-        # Schema guard: any required column missing means the mirror is
-        # malformed or the canonical schema drifted -- log loudly and
-        # degrade to inline enrich rather than silently mis-aligning.
+        # Schema guard: missing required columns -> log + degrade to inline enrich.
         missing = _SX_REQUIRED_COLS - set(df.columns)
         if missing:
             logger.warning(
@@ -407,39 +343,40 @@ class DataManager:
             )
             return {}
         if df.empty:
-            empty: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]] = {}
+            empty: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float, float]] = {}
             with self._SX_LOCK:
                 DataManager._SX_INDEX = empty
                 DataManager._SX_MTIME = stat.st_mtime
                 DataManager._SX_SIZE = stat.st_size
             return empty
-        # Normalise join keys identical to the way ``_normalize`` treats
-        # the demand frame so the (route, item, date) tuple lookup hits.
+        # Normalise join keys exactly like the demand frame.
         df[_SX_COL_ROUTE_CODE] = df[_SX_COL_ROUTE_CODE].astype(str).str.strip()
         df[_SX_COL_ITEM_CODE]  = df[_SX_COL_ITEM_CODE].astype(str).str.strip()
         df[_SX_COL_TRX_DATE]   = pd.to_datetime(df[_SX_COL_TRX_DATE], errors="coerce").dt.normalize()
         df = df.dropna(subset=[_SX_COL_TRX_DATE])
         df[_SX_COL_FRESH_LOAD]    = pd.to_numeric(df[_SX_COL_FRESH_LOAD],    errors="coerce").fillna(0.0)
         df[_SX_COL_OPENING_STOCK] = pd.to_numeric(df[_SX_COL_OPENING_STOCK], errors="coerce").fillna(0.0)
-        # Defensive dedup: the upstream cron emits one row per
-        # (route, item, date); if a backfill ever produces dupes, we
-        # take the max so a partial overwrite never loses the larger
-        # van quantity. Matches the ``"max"`` agg the legacy fast path
-        # used on the forecast frame.
+        df[_SX_COL_LEFTOVER_NEXT] = pd.to_numeric(df[_SX_COL_LEFTOVER_NEXT], errors="coerce").fillna(0.0)
+        # Defensive dedup with max() so backfill dupes never shrink van qty.
         agg = (
             df.groupby(
                 [_SX_COL_ROUTE_CODE, _SX_COL_ITEM_CODE, _SX_COL_TRX_DATE],
                 sort=False,
             )
-            .agg({_SX_COL_FRESH_LOAD: "max", _SX_COL_OPENING_STOCK: "max"})
+            .agg({
+                _SX_COL_FRESH_LOAD:    "max",
+                _SX_COL_OPENING_STOCK: "max",
+                _SX_COL_LEFTOVER_NEXT: "max",
+            })
         )
-        idx: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float]] = {
-            (str(r), str(i), pd.Timestamp(d)): (float(f), float(o))
-            for (r, i, d), (f, o) in zip(
+        idx: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, float, float]] = {
+            (str(r), str(i), pd.Timestamp(d)): (float(f), float(o), float(ln))
+            for (r, i, d), (f, o, ln) in zip(
                 agg.index,
                 zip(
                     agg[_SX_COL_FRESH_LOAD].to_numpy(),
                     agg[_SX_COL_OPENING_STOCK].to_numpy(),
+                    agg[_SX_COL_LEFTOVER_NEXT].to_numpy(),
                 ),
             )
         }
@@ -449,37 +386,20 @@ class DataManager:
             DataManager._SX_SIZE = stat.st_size
         return idx
 
-    # ------------------------------------------------------------------
-    # Bulk reconciliation -- thin wrapper around the single canonical
-    # helper. Engine fallback, closing-stock caching, and the V5_b
-    # formula all live there. This module just hands off the frame.
-    # ------------------------------------------------------------------
+    # Bulk reconciliation -- thin wrapper over the canonical enrich helper.
 
     @staticmethod
     def reconcile_demand_frame(df: pd.DataFrame) -> pd.DataFrame:
-        """Return a copy of ``df`` with a ``recommended_load`` column.
-
-        ``df`` must carry ``RouteCode``, ``ItemCode``, ``TrxDate`` and
-        ``Predicted``. The helper fills ``recommended_load`` with the
-        clipped raw forecast if the engine can't load, so callers never
-        need a separate fallback path. Output column name matches the
-        snake_case convention ``enrich_with_load`` uses by default, which
-        in turn matches the alias the artifact_service's van_load_view
-        emits -- one shared name across the whole stack.
-        """
+        """Return a copy of ``df`` with a ``recommended_load`` column;
+        engine-unavailable falls back to the clipped raw forecast."""
         if df is None or df.empty:
             return df
         from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
         return enrich_with_load(df, output_col="recommended_load")
 
     def get_item_names(self, route_code: Optional[str] = None) -> Dict[str, str]:
-        """Return {ItemCode: ItemName} lookup.
-
-        Merges the demand and customer frames so an item missing a name in one
-        source is filled from the other. Route-scoped for locality; if the
-        route-filtered frames are empty we fall back to the global frames so
-        we still resolve names.
-        """
+        """Return {ItemCode: ItemName}; merges demand+customer frames and
+        falls back to the global frames if route-scoped are empty."""
         def _extract(df: pd.DataFrame) -> Dict[str, str]:
             if df.empty or "ItemName" not in df.columns:
                 return {}
@@ -494,8 +414,12 @@ class DataManager:
             for code, name in _extract(source).items():
                 names.setdefault(code, name)
 
-        if not names:  # route may be missing -- fall back to global frames
-            for source in (self._demand_df, self._customer_df):
+        if not names:  # route missing -- fall back to global frames
+            # Snapshot under the lock so a concurrent reload can't swap mid-iteration.
+            with self._lock:
+                demand_snapshot = self._demand_df
+                customer_snapshot = self._customer_df
+            for source in (demand_snapshot, customer_snapshot):
                 if source is None:
                     continue
                 for code, name in _extract(source).items():
@@ -511,12 +435,7 @@ class DataManager:
         return df.drop_duplicates("CustomerCode").set_index("CustomerCode")["CustomerName"].to_dict()
 
     def get_item_prices(self, route_code: Optional[str] = None) -> Dict[str, float]:
-        """Return {ItemCode: avg unit price} from customer sales data.
-
-        Averaged across all rows for each item so a single outlier invoice
-        can't skew the lookup. Zero/NaN prices are dropped -- the caller
-        should treat a missing key as "price unknown".
-        """
+        """Return {ItemCode: avg unit price}; zero/NaN prices dropped."""
         df = self.get_customer_data(route_code)
         if df.empty or "ItemCode" not in df.columns or "AvgUnitPrice" not in df.columns:
             return {}
@@ -541,7 +460,9 @@ class DataManager:
 
     @property
     def last_refresh(self) -> Optional[datetime]:
-        return self._last_refresh
+        # Lock guards against /health observing a half-published write.
+        with self._lock:
+            return self._last_refresh
 
     # ------------------------------------------------------------------
     # Freshness guard (Sprint-1)
@@ -554,10 +475,15 @@ class DataManager:
         return None if pd.isna(m) else m
 
     def freshness(self) -> Dict[str, Optional[str]]:
-        """Return max date per dataset, for /health and logging."""
-        j = self._max_date(self._journey_df, "JourneyDate")
-        c = self._max_date(self._customer_df, "TrxDate")
-        d = self._max_date(self._demand_df, "TrxDate")
+        """Return max date per dataset for /health."""
+        # Snapshot all three frames under one lock to avoid mixed-vintage reads.
+        with self._lock:
+            journey_snapshot = self._journey_df
+            customer_snapshot = self._customer_df
+            demand_snapshot = self._demand_df
+        j = self._max_date(journey_snapshot, "JourneyDate")
+        c = self._max_date(customer_snapshot, "TrxDate")
+        d = self._max_date(demand_snapshot, "TrxDate")
         return {
             "journey_max_date": None if j is None else str(j.date()),
             "customer_max_date": None if c is None else str(c.date()),
@@ -565,24 +491,45 @@ class DataManager:
         }
 
     def assert_fresh(self, target_date: str) -> None:
-        """Raise ``RuntimeError`` if the journey plan is older than ``target_date``.
+        """Raise ``RuntimeError`` if any input CSV is older than ``target_date``.
 
-        Friday is the UAE weekend and legitimately has no journey; skip the
-        check in that case.
+        Checks ALL three input streams: journey_plan (today's planned visits),
+        customer_data (purchase history that feeds frequency/cycle), demand_forecast
+        (model output for the target date). Previously only journey was checked --
+        a stale customer history silently produced wrong recs the day after a
+        partial import failure. Friday (UAE weekend) is allowed to have no
+        journey_plan row.
         """
         target = pd.to_datetime(target_date).normalize()
-        # UAE weekend -- no journey plan expected
-        if target.weekday() == 4:  # Friday
-            return
-        j_max = self._max_date(self._journey_df, "JourneyDate")
-        if j_max is None:
+        is_friday = target.weekday() == 4
+
+        if not is_friday:
+            j_max = self._max_date(self._journey_df, "JourneyDate")
+            if j_max is None:
+                raise RuntimeError(
+                    "Journey data is empty -- run data_import before generating."
+                )
+            if j_max.normalize() < target:
+                raise RuntimeError(
+                    f"Stale journey data: max JourneyDate={j_max.date()} < target={target.date()}. "
+                    f"Run data_import to refresh CSVs."
+                )
+
+        # Customer history and demand forecast must cover up to AT LEAST the
+        # day before target (customer history is real sales; demand_forecast
+        # has a forward horizon so target itself should be present).
+        prior_day = (target - pd.Timedelta(days=1)).normalize()
+        c_max = self._max_date(self._customer_df, "TrxDate")
+        if c_max is not None and c_max.normalize() < prior_day:
             raise RuntimeError(
-                "Journey data is empty -- run data_import before generating."
+                f"Stale customer data: max TrxDate={c_max.date()} < {prior_day.date()}. "
+                f"Run data_import to refresh customer_data.csv."
             )
-        if j_max.normalize() < target:
+        d_max = self._max_date(self._demand_df, "TrxDate")
+        if d_max is not None and d_max.normalize() < target:
             raise RuntimeError(
-                f"Stale journey data: max JourneyDate={j_max.date()} < target={target.date()}. "
-                f"Run data_import to refresh CSVs."
+                f"Stale demand forecast: max TrxDate={d_max.date()} < target={target.date()}. "
+                f"Run data_import / retrain to refresh demand_forecast.csv."
             )
 
     # ------------------------------------------------------------------

@@ -1,16 +1,22 @@
-"""Helpers used by every service's ``config/settings.py``.
-
-Currently a single canonical reader for the shared
-``YF_ALLOW_ORIGINS`` env var so every FastAPI service interprets it
-identically (comma / semicolon list, JSON array, or default to
-``http://localhost:3000``). Five services previously duplicated this
-function verbatim.
-"""
+"""Helpers shared across every service's ``config/settings.py`` (single
+canonical reader for ``YF_ALLOW_ORIGINS`` so all FastAPI services parse it
+identically)."""
 
 from __future__ import annotations
 
 import json
 import os
+from pathlib import Path
+
+
+def data_root(project_root: Path) -> Path:
+    """Unified on-disk data root: ``YF_DATA_ROOT`` if set, else ``<project_root>/data``.
+
+    Single canonical resolver so every service plants files under the same root.
+    ``project_root`` is the caller's repo root (typically ``Path(__file__).resolve().parent.parent.parent``).
+    """
+    raw = os.getenv("YF_DATA_ROOT", "").strip()
+    return Path(raw).resolve() if raw else project_root / "data"
 
 
 def read_allow_origins() -> list[str]:

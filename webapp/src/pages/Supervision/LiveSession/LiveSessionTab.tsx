@@ -26,10 +26,7 @@ import { pluralise } from "./RedistributionSection";
 import { GOOD_SCORE_THRESHOLD, fmtNum } from "@/lib/format";
 import { fmtDate } from "@/lib/date";
 
-// Cap on parallel auto-visit POSTs. Each call queues a backend background
-// task that writes three tables; spraying 30+ at once on mount would
-// queue against the supervision DB pool and slow the first user
-// interaction. Drained naturally as visits settle and the effect re-fires.
+// Cap on parallel auto-visit POSTs; prevents pool starvation on mount-time bursts.
 const AUTO_VISIT_MAX_INFLIGHT = 8;
 
 interface LiveSessionTabProps {
@@ -37,18 +34,9 @@ interface LiveSessionTabProps {
   sessionData: SessionSummary | null;
   routeCode: string;
   date: string;
-  /**
-   * Optional workflow-level actions injected into the ContextStrip --
-   * e.g. "Last 30 days" / "Upcoming week" drawer triggers from the
-   * Visit step. Kept generic so this component stays unaware of the
-   * specific drawers its parent owns.
-   */
+  /** ContextStrip actions injected by the parent (e.g. drawer triggers). */
   extraActions?: ReactNode;
-  /**
-   * Called when the supervisor wants to pick a different route. Each
-   * visit auto-persists to the supervision tables, so leaving the
-   * session is purely a navigation action -- no save step in between.
-   */
+  /** Pure navigation; each visit auto-persists so no save step is needed. */
   onPickAnotherRoute?: () => void;
 }
 
@@ -56,10 +44,8 @@ interface CustomerItem {
   itemCode: string;
   itemName?: string;
   recommendedQty: number;
-  // The original PascalCase rec from recommended_order, carried verbatim
-  // through the supervision session payload. Single source of truth for
-  // the explainability modal AND for the analytics-API payloads -- the
-  // frontend never derives a parallel camelCase shadow.
+  // Original PascalCase rec from recommended_order; single source of truth for
+  // the explainability modal + analytics payloads (no camelCase shadow).
   rec: Record<string, unknown>;
 }
 
@@ -67,9 +53,7 @@ interface CustomerData {
   customerCode: string;
   customerName: string;
   items: CustomerItem[];
-  /** Server-pre-computed unit total for the customer's plan. Lifted
-   *  from ``customer_tiles[*].total_units`` so downstream renderers
-   *  never sum ``items[*].recommendedQty`` themselves. */
+  /** Server-pre-computed; pulled from customer_tiles[*].total_units. */
   totalUnits: number;
 }
 
@@ -83,15 +67,9 @@ interface VisitRecord {
   score: { score: number; coverage: number; accuracy: number };
   actualQty: number;
   recommendedQty: number;
-  // Per-item actuals so a drill-in/drill-out cycle re-renders the
-  // visited view from the same data the freshly-completed visit
-  // produced -- without re-querying the warehouse.
+  // Per-item actuals so drill-in/out re-renders without re-querying.
   actualSales: Record<string, number>;
-  // Structured redistribution view (per-item groups of recipient
-  // entries + ``keptOnTruck``) produced by ``process_visit`` and
-  // re-emitted on saved hydration. Carried alongside the score so the
-  // drill-in view renders the full visit context from one source.
-  // Server owns the grouping; the client renders verbatim.
+  // Server-owned grouping (process_visit); client renders verbatim.
   redistributions: RedistributionView;
   alsoBought: AlsoBoughtRecord[];
 }
@@ -113,11 +91,8 @@ export default function LiveSessionTab({
   const [custCtx, setCustCtx] = useState<CustomerAnalysisContext | null>(null);
   const [routeModalOpen, setRouteModalOpen] = useState(false);
 
-  // Hydrate already-visited customers from the supervision tables on
-  // mount: each prior-day or earlier-today visit lands as a row in
-  // visits[code] so the green dot + score render immediately, and the
-  // per-customer initialVisit prop lets CustomerVisit skip the
-  // briefing -> mark-visited dance for them.
+  // Hydrate already-visited customers so the green dot + score render immediately
+  // and CustomerVisit skips the briefing dance via initialVisit.
   const { data: savedVisitsData } = useSavedVisits(routeCode, date);
   const savedVisits: Record<string, SavedVisit> = useMemo(
     () => savedVisitsData?.visits ?? {},
@@ -128,15 +103,10 @@ export default function LiveSessionTab({
     const entries = Object.entries(savedVisits);
     if (entries.length === 0) return;
     setVisits((prev) => {
-      // Live in-session edits beat the saved snapshot -- otherwise a
-      // fresh visit would briefly flicker back to the stored value
-      // when this query reruns.
+      // Live in-session writes win over the saved snapshot (load-bearing guard;
+      // prevents flicker when this query reruns after a fresh /visit).
       const next = { ...prev };
       for (const [code, sv] of entries) {
-        // Live in-session writes win: a fresh visit just wrote a
-        // RedistributionView with the per-item groups for this customer,
-        // and we MUST NOT clobber it with the saved snapshot on the
-        // next hydration tick. The guard below is load-bearing.
         if (next[code] != null) continue;
         next[code] = {
           customerCode: code,
@@ -145,10 +115,7 @@ export default function LiveSessionTab({
           recommendedQty: sv.totalRecommended,
           actualSales: sv.actualSales,
           redistributions: sv.redistributions,
-          // Hydrated from yf_supervision_items rows where
-          // original_recommended_qty=0 and actual_qty>0 -- same off-plan
-          // chip strip the live /visit response surfaces, so a refresh
-          // never loses the supervisor's view of what was bought.
+          // Off-plan rows (original_recommended_qty=0) survive refresh.
           alsoBought: sv.alsoBought ?? [],
         };
       }
@@ -156,19 +123,11 @@ export default function LiveSessionTab({
     });
   }, [savedVisits]);
 
-  // Auto-fire bookkeeping. The actual effect runs further down where
-  // ``liveVisitedSet``, ``customers`` and ``handleVisitComplete`` are
-  // already in scope. Tracking is held in a ref so an in-flight code
-  // doesn't trigger a re-render while the request is open.
+  // Ref so an in-flight code doesn't trigger a re-render mid-request.
   const autoVisitInflight = useRef<Set<string>>(new Set());
 
-  // Customers come pre-grouped from the server (qty>0 items only,
-  // empty customers dropped). Wire-level snake_case is mapped to the
-  // existing camelCase shape this file already passes downstream --
-  // pure presentation rename, no aggregation, no filtering.
-  // ``customer_tiles`` carries the per-customer ``total_units`` count
-  // pre-computed server-side; we join by customer_code so downstream
-  // renderers never sum recommendedQty themselves.
+  // Server-grouped customers + server-pre-computed total_units joined by code;
+  // snake_case -> camelCase rename only, no aggregation/filtering.
   const customers = useMemo<CustomerData[]>(() => {
     if (!sessionData) return [];
     const grouped = sessionData.customers_grouped ?? [];
@@ -182,9 +141,7 @@ export default function LiveSessionTab({
       items: g.items.map((rec) => ({
         itemCode: String(rec.ItemCode ?? ""),
         itemName: rec.ItemName as string | undefined,
-        // ``EffectiveRecommended`` reflects supervisor adjustments;
-        // ``RecommendedQuantity`` is the engine's original. The table
-        // shows what the rep should load today, so prefer effective.
+        // Prefer EffectiveRecommended (supervisor-adjusted) over engine original.
         recommendedQty: Number(rec.EffectiveRecommended ?? rec.RecommendedQuantity ?? 0),
         rec,
       })),
@@ -198,11 +155,8 @@ export default function LiveSessionTab({
     customers_count: 0,
   };
 
-  // Seeded from /session/initialize (which synchronously runs the
-  // reconciler's Phase 1) so the tiles render the correct counts
-  // immediately. Saved-visits polls keep it fresh; the monotonic
-  // accept blocks a slow poll from dragging the tile backwards behind
-  // a fresher /visit response.
+  // Seeded from /session/initialize; saved-visits polls keep it fresh.
+  // Monotonic accept prevents a slow poll from rewinding behind a fresh /visit.
   const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>(() =>
     sessionData?.visit_totals ?? {
       visited_count: 0,
@@ -220,25 +174,53 @@ export default function LiveSessionTab({
     );
   }, [savedVisitsData?.visit_totals]);
 
-  // Single readiness gate for every UI element that renders the live
-  // visit count or avg score. While this is false, the lazy-seeded
-  // ``visitTotals`` may be behind the canonical DB state if the cron
-  // ran between /session/initialize and the first /session/saved poll;
-  // the gate hides the number everywhere on the page (badge, tiles,
-  // resume banner) until ``/session/saved`` confirms, then they all
-  // paint the same final value in the same frame.
-  const countsReady = savedVisitsData != null;
+  // Live-visited codes from /session/unplanned (LIVE tier).
+  const { data: unplannedData } = useUnplannedVisits(sessionId);
+  const liveVisitedSet = useMemo(
+    () => new Set(unplannedData?.planned_visited_codes ?? []),
+    [unplannedData?.planned_visited_codes],
+  );
+
+  // Both /saved AND /unplanned must land before any count renders -- avoids the
+  // flicker where /saved arrives first and the badge ticks up as /unplanned folds in.
+  const countsReady = savedVisitsData != null && unplannedData != null;
+
+  // Visited count = UNION(DB-persisted visits, live YaumiLive invoices today).
+  // Shows the full count from first paint instead of ticking up as the cron syncs.
+  const effectiveVisitedCount = useMemo(() => {
+    const plannedSet = new Set(customers.map((c) => c.customerCode));
+    const savedCodes = Object.keys(savedVisits);
+    const liveCodes = unplannedData?.planned_visited_codes ?? [];
+    const union = new Set<string>();
+    for (const c of savedCodes) {
+      if (plannedSet.has(c)) union.add(c);
+    }
+    for (const c of liveCodes) {
+      if (plannedSet.has(c)) union.add(c);
+    }
+    // Floor at visitTotals.visited_count so a fresh /visit can't be regressed by a stale poll.
+    return Math.max(union.size, visitTotals.visited_count);
+  }, [customers, savedVisits, unplannedData?.planned_visited_codes, visitTotals.visited_count]);
+
+  // Average over the local visits dict (not visitTotals.avg_score) so the tile
+  // doesn't tick per /visit response. Returns null when no scored customers exist.
+  const effectiveAvgScore = useMemo<number | null>(() => {
+    const entries = Object.values(visits);
+    if (entries.length === 0) {
+      return visitTotals.avg_score ?? null;
+    }
+    const scores = entries.map((v) => Number(v.score?.score ?? 0));
+    const mean = scores.reduce((s, x) => s + x, 0) / scores.length;
+    return Math.round(mean * 100) / 100;
+  }, [visits, visitTotals.avg_score]);
+
   const allVisited =
     countsReady &&
     recommendationTotals.customers_count > 0 &&
-    visitTotals.visited_count === recommendationTotals.customers_count;
+    effectiveVisitedCount === recommendationTotals.customers_count;
 
   const handleVisitComplete = (customer: CustomerData, visit: VisitResultPayload) => {
-    // Every numeric here is server-computed (``actualQty`` is sum of
-    // ``min(rec, act)``, ``recommendedQty`` is ``sum(rec)``, etc.).
-    // ``sessionTotals`` is the cumulative aggregate INCLUDING this
-    // latest visit, so the tile row updates without re-summing the
-    // local visits map.
+    // All numerics server-computed; sessionTotals already folds in this visit.
     setVisits((prev) => ({
       ...prev,
       [customer.customerCode]: {
@@ -257,12 +239,7 @@ export default function LiveSessionTab({
 
   const routeAnalysisCtx: RouteAnalysisContext | null = useMemo(() => {
     if (!routeCode || !date) return null;
-    // ``totalCustomers`` reads from the server-pre-computed
-    // recommendation totals (the planned-customer count after the
-    // qty>0 filter). ``totalActual`` / ``totalRecommended`` come from
-    // the server-pushed visit totals. The visited-customer rows
-    // serialise the live visits map for the LLM payload -- a wire
-    // adapter, not aggregation.
+    // Counts come from server-pre-computed totals; this is a wire adapter, not aggregation.
     const visitedArr = Object.values(visits).map((v) => ({
       customer_code: v.customerCode,
       score: v.score.score,
@@ -293,39 +270,29 @@ export default function LiveSessionTab({
     savedVisitsData?.routeAnalysis,
   ]);
 
-  // Live-visited codes drive the small "visited live" indicator on planned
-  // customer cards. Reuses the same React Query key as VisitsTabs / UnplannedVisits
-  // so only one network request runs per polling cycle.
-  const { data: unplannedData } = useUnplannedVisits(sessionId);
-  const liveVisitedSet = useMemo(
-    () => new Set(unplannedData?.planned_visited_codes ?? []),
-    [unplannedData?.planned_visited_codes],
-  );
+  // Initial backlog snapshot (captured once after both hydrations land).
+  // The cron handles the backlog; FE only auto-fires for NEW invoices
+  // that arrive while the page is open -- otherwise the tile would tick 0..N on mount.
+  const initialLiveBacklogRef = useRef<Set<string> | null>(null);
 
-  // Auto-fire ``process_visit`` for new YaumiLive invoices that arrived
-  // AFTER the page was opened. The session-init endpoint synchronously
-  // reconciles the route with YaumiLive before responding, so on first
-  // render the saved snapshot already reflects every customer invoiced
-  // so far -- this loop only catches incremental arrivals. Without the
-  // ``savedVisitsData`` gate it would race the hydration query and tick
-  // the counter up 1 -> 2 -> 3 in front of the supervisor for a route
-  // that was already mid-shift.
-  //
-  // Concurrency-bounded: we cap in-flight calls at AUTO_VISIT_MAX_INFLIGHT
-  // so a burst of new invoices can't fan out N parallel DB writes.
+  // Auto-fire /visit for invoices that land AFTER page-open; capped at AUTO_VISIT_MAX_INFLIGHT.
   useEffect(() => {
     if (!sessionId || customers.length === 0) return;
-    if (savedVisitsData == null) return; // wait for hydration before firing
+    // BOTH /saved and /unplanned must land before snapshotting the backlog --
+    // otherwise /unplanned arriving later would treat every code as "new".
+    if (savedVisitsData == null) return;
+    if (unplannedData == null) return;
+    // Snapshot on first observation after hydration; stable for the component lifetime.
+    if (initialLiveBacklogRef.current === null) {
+      initialLiveBacklogRef.current = new Set(liveVisitedSet);
+      return;
+    }
     const customerByCode = new Map(customers.map((c) => [c.customerCode, c]));
     for (const code of liveVisitedSet) {
       if (autoVisitInflight.current.size >= AUTO_VISIT_MAX_INFLIGHT) break;
-      // Skip codes the backend already counts visited. Checking
-      // ``visits[code]`` alone races the hydration effect (its
-      // setVisits is scheduled but not committed in the same render
-      // that fires this effect), so also check ``savedVisits[code]``
-      // direct from the snapshot. Both checks needed -- without the
-      // second one, /visit fires for every already-persisted customer
-      // and the tile ticks 1, 2, 3 in front of the supervisor.
+      // Skip backlog (cron's job). Skip already-visited; check savedVisits too
+      // because the hydration setVisits hasn't committed in the same render.
+      if (initialLiveBacklogRef.current.has(code)) continue;
       if (visits[code] || savedVisits[code]) continue;
       if (autoVisitInflight.current.has(code)) continue;
       const cust = customerByCode.get(code);
@@ -344,7 +311,33 @@ export default function LiveSessionTab({
         });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [liveVisitedSet, visits, savedVisits, sessionId, customers, savedVisitsData]);
+  }, [liveVisitedSet, visits, savedVisits, sessionId, customers, savedVisitsData, unplannedData]);
+
+  // Lazy-fetch on customer open for live-but-not-persisted backlog codes; one /visit
+  // so the modal renders real data. Same inflight gate as the auto loop -> no double-process.
+  useEffect(() => {
+    if (!selectedCustomerCode) return;
+    if (!sessionId) return;
+    if (visits[selectedCustomerCode]) return;
+    if (savedVisits[selectedCustomerCode]) return;
+    if (!liveVisitedSet.has(selectedCustomerCode)) return;
+    if (autoVisitInflight.current.has(selectedCustomerCode)) return;
+    const cust = customers.find((c) => c.customerCode === selectedCustomerCode);
+    if (!cust) return;
+    autoVisitInflight.current.add(selectedCustomerCode);
+    supervisionApi
+      .processVisit(sessionId, selectedCustomerCode)
+      .then((res) => {
+        if (res?.success && res.visit) {
+          handleVisitComplete(cust, res.visit);
+        }
+      })
+      .catch(() => {/* logged server-side; modal renders placeholder */})
+      .finally(() => {
+        autoVisitInflight.current.delete(selectedCustomerCode);
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedCustomerCode, sessionId, liveVisitedSet, visits, savedVisits, customers]);
 
   return (
     <div className="space-y-6">
@@ -358,7 +351,7 @@ export default function LiveSessionTab({
             value: (
               <Badge variant={allVisited ? "success" : "warning"}>
                 {countsReady
-                  ? `${visitTotals.visited_count} / ${recommendationTotals.customers_count}`
+                  ? `${effectiveVisitedCount} / ${recommendationTotals.customers_count}`
                   : `... / ${recommendationTotals.customers_count}`}
               </Badge>
             ),
@@ -376,10 +369,7 @@ export default function LiveSessionTab({
         }
       />
 
-      {/* Metric row -- every value is server-pre-computed. Static
-          recommendation counts come from session.summary().recommendation_totals;
-          live visit aggregates ride on session.summary().visit_totals
-          and update via /visit responses. */}
+      {/* Metric row -- every value server-pre-computed. */}
       <KpiRow>
         <MetricCard
           label="Different items"
@@ -394,7 +384,7 @@ export default function LiveSessionTab({
         <MetricCard
           label="Visited"
           loading={!countsReady}
-          value={`${visitTotals.visited_count} / ${recommendationTotals.customers_count}`}
+          value={`${effectiveVisitedCount} / ${recommendationTotals.customers_count}`}
           subtitle={(() => {
             const base = allVisited ? "All done" : "In progress";
             const dropIns = unplannedData?.unplanned_count ?? 0;
@@ -408,19 +398,19 @@ export default function LiveSessionTab({
           label="Avg visit score"
           loading={!countsReady}
           value={
-            visitTotals.avg_score != null
-              ? `${visitTotals.avg_score.toFixed(1)}%`
+            effectiveAvgScore != null
+              ? `${effectiveAvgScore.toFixed(1)}%`
               : "--"
           }
           subtitle={
-            visitTotals.avg_score != null
+            effectiveAvgScore != null
               ? "Planned customers only"
               : "No planned visits yet"
           }
           trend={
-            visitTotals.avg_score != null && visitTotals.avg_score >= GOOD_SCORE_THRESHOLD
+            effectiveAvgScore != null && effectiveAvgScore >= GOOD_SCORE_THRESHOLD
               ? "up"
-              : visitTotals.avg_score != null
+              : effectiveAvgScore != null
               ? "down"
               : undefined
           }
@@ -486,11 +476,7 @@ export default function LiveSessionTab({
                         }
                       : undefined
                   }
-                  // Briefing hydrates for EVERY planned customer
-                  // (visited or not). The auto-visit cron writes the
-                  // briefing for the whole planned set; we just plumb
-                  // the saved value through so the modal renders
-                  // without a fresh LLM call.
+                  // Briefing hydrates for every planned customer; modal skips a fresh LLM call.
                   initialBriefing={
                     savedVisitsData?.briefings?.[selected.customerCode] ?? null
                   }
@@ -511,15 +497,8 @@ export default function LiveSessionTab({
             );
           }
 
-          // Green-dot semantic: "bought something today" -- either
-          // ``actualQty > 0`` in the current live session, or
-          // ``totalActual > 0`` in the saved snapshot (covers off-plan
-          // purchases now persisted in yf_supervision_items), or the
-          // customer is in ``liveVisitedSet`` (YaumiLive has a positive-
-          // qty invoice line today). A customer whose visit was
-          // processed but actuals came back all-zero (rare race) will
-          // NOT show the dot, eliminating the "green tick + zero
-          // everywhere" confusion.
+          // Green-dot = "bought something today": actualQty>0 in session OR totalActual>0 in saved.
+          // Zero-actual customers stay un-dotted to avoid "green tick + zero everywhere".
           const serverTiles = sessionData?.customer_tiles ?? [];
           const tiles: CustomerStat[] = serverTiles.map((t) => {
             const live = visits[t.customer_code];
@@ -554,7 +533,7 @@ export default function LiveSessionTab({
       />
 
       {/* Route review trigger -- available once at least one visit exists */}
-      {countsReady && visitTotals.visited_count > 0 && (
+      {countsReady && effectiveVisitedCount > 0 && (
         <Card
           title={allVisited ? "Route complete" : "Route in progress"}
           actions={
@@ -566,7 +545,7 @@ export default function LiveSessionTab({
           <p className="text-body text-text-secondary">
             {allVisited
               ? `All ${recommendationTotals.customers_count} customers visited. Each visit is already saved -- review the AI summary or pick another route.`
-              : `${visitTotals.visited_count} of ${recommendationTotals.customers_count} visited. Each visit auto-saves; pull an interim route review whenever you like.`}
+              : `${effectiveVisitedCount} of ${recommendationTotals.customers_count} visited. Each visit auto-saves; pull an interim route review whenever you like.`}
           </p>
         </Card>
       )}
@@ -586,12 +565,7 @@ export default function LiveSessionTab({
   );
 }
 
-/**
- * Two-tab shell: "Planned" (static-per-session) + "Unplanned" (polled live).
- *
- * Unplanned count in the tab label comes from the same React Query key that
- * UnplannedVisits consumes -- single network request, single cache entry.
- */
+/** Two-tab shell: Planned (static) + Unplanned (polled live; shared query key). */
 function VisitsTabs({
   sessionId,
   plannedCount,

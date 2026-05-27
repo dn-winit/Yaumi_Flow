@@ -201,6 +201,54 @@ cd webapp && npm run build       # outputs to webapp/dist/
 docker compose up --build        # all 5 services + nginx-proxied webapp
 ```
 
+### Testing
+
+```bash
+# Default: skip slow tests + tests that need a live DB
+pytest tests/
+
+# Per-module
+pytest tests/data_import/  tests/sales_supervision/  ...
+
+# Include LLM calls / full reconciliation refreshes
+pytest tests/ -m "slow or not slow"
+
+# Verbose + stop on first failure
+pytest tests/ -vx
+```
+
+Markers (registered in `tests/pytest.ini`):
+- `slow` — calls real LLM endpoints or triggers a multi-minute reconciliation
+- `requires_db` — needs a live YaumiAIML connection (auto-skip when unset)
+- `requires_live_data` — needs today's plan on at least one configured route
+
+CI runs `python -m compileall` + webapp `tsc -b --noEmit` on every push to `staged` / `main`. Pytest, ruff, and end-to-end checks run locally before push (the live DB isn't reachable from GitHub-hosted runners).
+
+### Lint / format
+
+```bash
+pip install ruff
+ruff check .          # E, F, W, I, B, UP rules from pyproject.toml
+ruff format .         # in-place formatter
+```
+
+---
+
+## Multi-worker deployment
+
+Every scheduler-bearing service uses **filesystem leader-election** (`common.leader_election`) so under `uvicorn --workers N` only ONE worker per host fires the cron. Followers boot the API but skip the scheduler.
+
+| Service | Lock path (default) | Env override |
+|---|---|---|
+| `data_import` | `<data-root>/imports/scheduler.lock` | `DI_SCHEDULER_LOCK_PATH` |
+| `demand_forecasting` | `<data-root>/forecast/scheduler.lock` | `DF_SCHEDULER_LOCK_PATH` |
+| `recommended_order` | `<data-root>/recommendations/scheduler.lock` | `RO_SCHEDULER_LOCK_PATH` |
+| `sales_supervision` | `<data-root>/supervision/scheduler.lock` | `SS_SCHEDULER_LOCK_PATH` |
+
+Filesystem-scoped advisory lock (POSIX `flock` / Windows `msvcrt.locking`); kernel releases on process exit. **Multi-host deployments need a distributed lease layered on top** — current lock only coordinates workers within one host. Set `YF_LEADER_LOCK_DISABLE=1` only for single-worker dev / tests where the lock file is unavailable.
+
+The scheduler-audit listener (`common.scheduler_audit.attach_audit`) writes one row per cron fire into `yf_scheduler_log` so operations can confirm crons actually fired on time (independent of job duration).
+
 ---
 
 ## Project structure

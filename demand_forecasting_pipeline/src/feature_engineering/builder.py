@@ -58,6 +58,22 @@ def _pair_history_lengths(df, group_keys, target_col):
     return df.groupby(group_keys)[target_col].transform("count").astype(int)
 
 
+def _validate_lags(lags: list[int]) -> None:
+    """Reject lag=0 (target self-reference -> shift(0) is the target itself,
+    direct leakage) and any non-positive lag (negative lags shift the
+    target FORWARD in time, producing a future-looking feature). Bad
+    config should fail at feature-build time, not silently corrupt the
+    model. Validation is unconditional -- runs whether or not the
+    horizon-safe filter is also enabled."""
+    bad = [l for l in lags if not isinstance(l, int) or l < 1]
+    if bad:
+        raise ValueError(
+            f"lags must be positive integers (>=1) to avoid target leakage; "
+            f"got {bad}. Lag 0 references the target row itself; negative "
+            f"lags shift FORWARD and look at unobservable future values."
+        )
+
+
 def _horizon_safe_lags(lags: list[int], forecast_horizon: int) -> list[int]:
     """Keep only lags whose reference point stays strictly before the test
     window at every test row. With test_horizon ``H``, a lag ``L`` is
@@ -67,7 +83,16 @@ def _horizon_safe_lags(lags: list[int], forecast_horizon: int) -> list[int]:
     lags that reference data from before the forecast origin can be computed
     from actuals. Lags < H would require predictions-of-predictions - safe in
     a recursive scheme, not in the current direct-lookup pipeline.
+
+    Raises ``ValueError`` if ``forecast_horizon < 1`` or any lag is <=0;
+    those configurations cannot produce a valid feature matrix.
     """
+    if not isinstance(forecast_horizon, int) or forecast_horizon < 1:
+        raise ValueError(
+            f"forecast_horizon must be a positive integer (>=1); got "
+            f"{forecast_horizon!r}"
+        )
+    _validate_lags(lags)
     if forecast_horizon <= 1:
         return list(lags)
     return [lag for lag in lags if lag >= forecast_horizon]
@@ -96,6 +121,10 @@ def _build_per_class_features(
         out["pair_history_len"] = _pair_history_lengths(out, group_keys, target_col)
 
     lags = fe_cfg["lags"].get(cls, fe_cfg["lags"].get("smooth", []))
+    # Validate even when horizon-safe filtering is disabled: lag=0 and
+    # negative lags are misconfiguration in EVERY mode (target leakage
+    # or future-looking feature), not just under horizon-safety.
+    _validate_lags(list(lags))
     if fe_cfg.get("horizon_safe_lags", False):
         safe_lags = _horizon_safe_lags(list(lags), forecast_horizon)
         if len(safe_lags) != len(lags):
@@ -107,16 +136,31 @@ def _build_per_class_features(
         lags = safe_lags
     out = add_lag_features(out, group_keys, target_col, lags)
 
+    # Rolling + intermittent features must shift by ``forecast_horizon``,
+    # not by a hardcoded 1, so the window only sees values observable at
+    # the forecast origin. Without this, every H>1 retrain reports a
+    # falsely-low test WAPE because the rolling features at the test rows
+    # silently reference unobservable target values. The same horizon-safe
+    # config flag that gates lag filtering also gates the rolling shift --
+    # operators who explicitly want H=1 semantics (e.g. recursive
+    # forecasting) leave the flag off and keep shift=1.
+    roll_shift = (
+        int(forecast_horizon) if fe_cfg.get("horizon_safe_lags", False) else 1
+    )
+
     roll_cfg = fe_cfg["rolling"].get(cls, fe_cfg["rolling"].get("smooth"))
     out = add_rolling_features(
         out, group_keys, target_col,
         roll_cfg["windows"], roll_cfg["stats"],
         min_periods_fraction=roll_cfg.get("min_periods_fraction", 0.5),
+        shift_horizon=roll_shift,
     )
 
     if cls in ("intermittent", "lumpy"):
         out = add_intermittent_features(
-            out, group_keys, target_col, fe_cfg.get("intermittent_specific", {})
+            out, group_keys, target_col,
+            fe_cfg.get("intermittent_specific", {}),
+            shift_horizon=roll_shift,
         )
     return out
 
@@ -170,6 +214,7 @@ def build_features(
     full_date_range=None,
     target_encoding_source: pd.DataFrame | None = None,
     target_encoding_artifact: tuple[pd.DataFrame, float] | None = None,
+    pair_origins: pd.DataFrame | None = None,
     forecast_horizon: int = 1,
 ) -> pd.DataFrame:
     """Top-level feature assembly.
@@ -189,7 +234,17 @@ def build_features(
          window only and write it to disk for inference.
       6. NaN policy on target-derived features.
     """
-    merged = df.merge(
+    # ``build_features`` must be idempotent: callers like the recursive
+    # multi-step test evaluator hand us a panel that has ALREADY been
+    # through ``build_features`` once (so it carries a ``class`` column
+    # from the prior pass). A naive merge would produce ``class_x`` /
+    # ``class_y`` suffixed columns and the downstream ``merged["class"]``
+    # access would KeyError. Dropping any pre-existing ``class`` first
+    # makes the merge authoritative -- the canonical ``classes_df`` is
+    # always the source of truth, no matter how many times the function
+    # has run on this frame before.
+    df_for_merge = df.drop(columns=["class"]) if "class" in df.columns else df
+    merged = df_for_merge.merge(
         classes_df.reset_index()[group_keys + ["class"]],
         on=group_keys, how="left",
     )
@@ -227,6 +282,7 @@ def build_features(
         out = add_temporal_features(
             out, date_col, temporal_cfg,
             group_keys=group_keys, granularity=granularity,
+            pair_origins=pair_origins,
         )
 
     if holiday_cfg and holiday_cfg.get("enabled", False):

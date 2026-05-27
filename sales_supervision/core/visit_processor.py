@@ -1,10 +1,8 @@
 """
-Visit processor -- handles a single customer visit (apply actuals + score).
+Visit processor -- apply actuals + score for a single customer visit.
 
-The legacy in-session redistribution adjuster has been retired. The
-redistribution view shown to the supervisor is the pure, deterministic
-output of :func:`shape_redistribution_view`; it is computed at request
-time and never mutates session state.
+Redistribution view is computed at request time by ``shape_redistribution_view``
+and never mutates session state.
 """
 
 from __future__ import annotations
@@ -47,10 +45,7 @@ class VisitProcessor:
             customer.visited = True
             customer.visit_sequence = session.visit_sequence_counter + 1
 
-        # Apply actual quantities. Actuals come straight from YaumiLive
-        # via data_import, so `was_edited` (manual override) is always
-        # False in this flow -- left at the dataclass default rather than
-        # being conflated with `was_sold`.
+        # Actuals come from YaumiLive via data_import; was_edited stays default (no manual override).
         unsold: Dict[str, int] = {}
         for item in customer.items:
             qty = actual_sales.get(item.item_code, 0)

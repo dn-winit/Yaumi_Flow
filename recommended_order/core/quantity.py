@@ -1,17 +1,6 @@
-"""
-Quantity calculator.
-
-Sprint-1 overhaul:
-  * Recency-weighted average (exp decay at calibration half-life).
-  * Apply trend factor to estimate expected actual purchase.
-  * Clamp recommended / expected to the supervision "perfect zone" center
-    [qty_center_lo, qty_center_hi] -- this is the sweet spot that
-    sales_supervision scores as 100% accurate.
-  * Emit a qty_derivation Signal explaining the math.
-
-The supervision perfect-zone definition is IMPORTED from
-``sales_supervision.config.constants`` so both services agree.
-"""
+"""Quantity calculator: recency-weighted avg * trend, clamped to the
+supervision ``[qty_center_lo, qty_center_hi]`` perfect zone (the band
+sales_supervision scores 100%). Emits a qty_derivation Signal."""
 
 from __future__ import annotations
 
@@ -61,11 +50,8 @@ class QuantityCalculator:
         if qtys.size == 0:
             return 0
 
-        # Recency weights: exp-decay at the customer's personal half-life
-        # when supplied (engine derives it from this customer's median
-        # inter-visit gap), else the route default. A frequent visitor's
-        # last-week purchase outweighs an occasional visitor's last-week
-        # purchase under the same calibration.
+        # Recency weights: exp-decay at customer half-life (override) else
+        # route default.
         target = pd.Timestamp(target_date).to_datetime64()
         ages = ((target - dates) / np.timedelta64(1, "D")).astype(float)
         ages = np.clip(ages, 0.0, None)
@@ -75,12 +61,8 @@ class QuantityCalculator:
 
         raw_avg = float(np.mean(qtys))
 
-        # Edge case (Sprint-3, Theme C.5): bulk-buy outliers.
-        # A single qty=200 purchase shouldn't dominate the recency-weighted
-        # mean for a product that normally moves 8 units. Winsorise the values
-        # used for averaging to the configured upper percentile. The original
-        # ``item_history`` is NOT mutated -- we only clamp a local copy of the
-        # qty array.
+        # Winsorise bulk-buy outliers (e.g. one qty=200 in an 8-unit SKU)
+        # so they don't dominate the recency-weighted mean.
         qtys_for_avg = qtys
         if qtys.size >= 4:
             upper = float(
@@ -108,16 +90,12 @@ class QuantityCalculator:
         # Safety clamp to perfect-zone endpoints (never pitch outside)
         proposed = max(expected * lo, min(expected * hi, proposed))
 
-        # Quantity contract: round UP to next whole unit ("you can't sell
-        # 17.4 of a SKU"). Banker's ``round`` would silently drop ~half a
-        # unit on average, divergent from the rest of the chain.
+        # Ceil to whole units to match the engine/van/supervision contract.
         qty = max(1, int(np.ceil(proposed)))
         qty = min(qty, int(van_qty))
 
-        # Emit qty_derivation signal (single source for the sentence). The
-        # ``half_life_days`` field exposes which decay we actually used --
-        # route default vs customer-personalised -- so a downstream auditor
-        # can reconstruct the weighted average byte-for-byte.
+        # Emit qty_derivation signal; ``half_life_source`` records whether
+        # the route default or the customer override was applied.
         explanation.add_quantity_signal(Signal(
             kind=KIND_QTY_DERIVATION,
             detail=detail_qty_recency(raw_avg, weighted_avg, trend_factor, qty),

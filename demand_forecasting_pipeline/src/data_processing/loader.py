@@ -19,8 +19,26 @@ def load_raw(
     *,
     dtypes: dict[str, str] | None = None,
     low_memory: bool = False,
+    allow_empty: bool = False,
 ) -> pd.DataFrame:
-    """Read a CSV, parse ``date_col``, drop rows with unparseable dates."""
+    """Read a CSV, parse ``date_col``, drop rows with unparseable dates.
+
+    Raises ``ValueError`` if the resulting frame is empty unless
+    ``allow_empty=True``. An empty source is almost always a data_import
+    failure (DB connectivity issue, route filter too narrow, date range
+    outside the data window). Failing here surfaces the issue at the
+    earliest, most actionable point rather than letting the pipeline
+    crash deep in feature engineering with a cryptic "no data" error.
+    """
     df = pd.read_csv(path, low_memory=low_memory, dtype=dtypes or None)
     df[date_col] = pd.to_datetime(df[date_col], errors="coerce")
-    return df.dropna(subset=[date_col]).reset_index(drop=True)
+    df = df.dropna(subset=[date_col]).reset_index(drop=True)
+    if df.empty and not allow_empty:
+        raise ValueError(
+            f"Source {str(path)!r} contained no rows with a parseable "
+            f"{date_col!r}. This is almost always an upstream data_import "
+            f"failure - check the import status endpoint, the route/item "
+            f"filter, and the data date range. Pass allow_empty=True only "
+            f"when an empty source is a legitimate state (e.g. unit tests)."
+        )
+    return df

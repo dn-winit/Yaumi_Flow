@@ -11,12 +11,29 @@ export interface DataSummary {
   last_updated: string | null;
 }
 
+export interface TrainingClassWinner {
+  /** SBC class name (lowercase: ``smooth``/``intermittent``/``erratic``/``lumpy``). */
+  demand_class: string;
+  /** Best model's name for this class (e.g. ``"xgboost"``). */
+  best_model: string;
+  /** Best model's tolerance-adjusted WAPE for this class, rounded to 1dp.
+   *  Accuracy is rendered as ``100 - wape`` in the per-class subtitle. */
+  wape: number;
+  /** How many candidate models competed in this class's tournament. */
+  models_competed: number;
+}
+
 export interface TrainingOverview {
   trained_at?: string | null;
   test_date_start?: string | null;
   test_date_end?: string | null;
   test_routes?: number | null;
   test_items?: number | null;
+  /** Per-class winners with their WAPE. Server-sorted by class name --
+   *  the subtitle re-sorts by descending WAPE/accuracy presentation. */
+  class_winners?: TrainingClassWinner[] | null;
+  total_models_trained?: number | null;
+  feature_count?: number | null;
 }
 
 export interface ForecastSummary {

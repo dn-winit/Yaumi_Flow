@@ -15,16 +15,7 @@ import type { SessionSummary } from "@/types/supervision";
 import AdoptionDrawer from "./AdoptionDrawer";
 import UpcomingPlanDrawer from "./UpcomingPlanDrawer";
 
-/**
- * Visit step of the supervisor workflow.
- *
- * Reached only via Plan -> Van Load -> "Continue to Visit". The route
- * code is therefore guaranteed to be set (enforced by the VisitGuard
- * in WorkflowPage); a missing route would have bounced the user back
- * to Plan before this component mounted. Visit auto-fetches the recs
- * for the active (route, date) and spins up the live supervision
- * session as soon as they land.
- */
+/** Visit step; entered with route+date guaranteed (enforced by VisitGuard in WorkflowPage). */
 export default function VisitTab() {
   const navigate = useWorkflowNavigate();
   const { date, routeCode, resetRoute } = useWorkflow();
@@ -45,12 +36,7 @@ export default function VisitTab() {
   );
 }
 
-// ---------------------------------------------------------------------------
-//  Session shell: fetches recs for the picked route and auto-initializes
-//  the live session. Renders LiveSessionTab once an active session exists,
-//  with drawer-trigger buttons injected into the ContextStrip.
-// ---------------------------------------------------------------------------
-
+// Session shell: fetch recs, auto-init session, render LiveSessionTab with drawer triggers.
 function VisitSession({
   routeCode,
   date,
@@ -78,13 +64,7 @@ function VisitSession({
 
   const recordings = recs.data?.data ?? [];
 
-  // Auto-init: fire ``initSession`` in parallel with the recs query
-  // instead of waiting for recs to land. The server fetches its own
-  // recs from recommended_order (TTL-cached, effectively free after
-  // the cron has warmed it), so the client doesn't need to forward
-  // them in the body. This drops the page-open critical path from
-  // ``recs + init`` (serial) to ``max(recs, init)`` (parallel).
-  // ``initRef`` keeps the auto-init idempotent across re-renders.
+  // Auto-init runs in parallel with recs (server fetches its own recs); initRef makes it idempotent.
   const initRef = useRef<{ key: string; promise: Promise<void> } | null>(null);
   useEffect(() => {
     if (sessionId) return;
@@ -117,9 +97,7 @@ function VisitSession({
     }
   };
 
-  // Drawer triggers + back-to-Plan link handed to LiveSessionTab so they
-  // render in the same ContextStrip row as Save -- one toolbar, no
-  // orphan button strips.
+  // Drawer triggers + back-to-Plan handed to LiveSessionTab for the same ContextStrip row.
   const sessionExtraActions = (
     <>
       <Button variant="ghost" size="sm" onClick={() => navigate(ROUTES.workflowPlan)}>
@@ -137,9 +115,7 @@ function VisitSession({
   // ----- States before the session is live -----
 
   if (recs.loading) {
-    // Layout-shaped skeleton: header strip + customer cards. Matches
-    // the height of the live LiveSessionTab so the page doesn't jump
-    // when recs land. Real content fades in via ``animate-fade-in``.
+    // Layout-shaped skeleton; same height as LiveSessionTab to avoid jump on swap.
     return (
       <div className="space-y-4">
         <Skeleton className="h-12" />
@@ -199,8 +175,7 @@ function VisitSession({
   }
 
   if (!sessionId) {
-    // Brief gap between recs landing and supervision /initialize completing.
-    // Same shape as the recs-loading skeleton above so the swap is invisible.
+    // Brief gap between recs landing and /initialize completing.
     return (
       <div className="space-y-4">
         <Skeleton className="h-12" />

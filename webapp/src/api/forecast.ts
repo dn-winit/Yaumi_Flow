@@ -13,29 +13,13 @@ import type { ForecastSummary } from "@/types/common";
 export interface ForecastRouteSummary {
   route_code: string;
   skus: number;
-  /**
-   * Total van load for the route = ``opening_stock + recommended_load``
-   * summed across the route's items. Same number ``VanLoadSummary``
-   * shows when the route is selected, so the tile and the summary
-   * always agree. Backend contract is reconciled-only -- no raw-
-   * forecast field on the wire.
-   */
+  /** Reconciled total van load for the route (opening_stock + recommended_load). */
   predicted_qty: number;
-  /**
-   * Day with the highest van-load total in the response window. Equals
-   * the requested date when scoped to one day; surfaces the busiest
-   * forward-day when the request is for the full horizon.
-   */
+  /** Peak day inside the response window (== request date when scoped to one day). */
   peak_day?: string | null;
 }
 
-/**
- * Top-level response shape for ``/predictions/forecast/route-summary``.
- * The ``reconciled`` flag is true when V5_b produced reconciled values
- * for every row in the response; false when the backend degraded to
- * raw forecast (bias table missing / cold start). The UI shows a
- * warning chip on the tiles when this is false.
- */
+/** Response for /predictions/forecast/route-summary. `reconciled=false` -> UI warning chip. */
 export interface ForecastRouteSummaryResponse {
   success: boolean;
   date?: string | null;
@@ -45,10 +29,7 @@ export interface ForecastRouteSummaryResponse {
 
 /* ---- VanLoad page view (one fetch per page state) ---- */
 
-/**
- * KPI tile values for the VanLoad summary row. Server-computed and
- * server-checked: van_load_qty == carried_qty + issued_qty.
- */
+/** KPI tile values; server-checked: van_load_qty == carried_qty + issued_qty. */
 export interface VanLoadSummaryView {
   van_load_qty: number;
   van_load_items: number;
@@ -69,20 +50,9 @@ export interface VanLoadChartItem {
 }
 
 /**
- * One row in the 'Van load items' table. Pre-sorted desc by total
- * truck weight. Carry-aware: pure-carry rows (no fresh load but
- * yesterday's leftover is on the truck) surface here so the table
- * sum matches the tile.
- *
- * Two distinct quantity fields:
- *   - ``units_to_load``        = fresh allocation the depot issues today
- *                                (engine recommendation, ceil to integer)
- *   - ``recommended_van_load`` = TOTAL truck weight for the item
- *                                = ceil(opening_stock) + units_to_load.
- *                                The modal headline shows this.
- *
- * ``has_real_confidence`` is the server's verdict on whether the
- * badge should render (real probability vs synthetic 0/1).
+ * One row in 'Van load items', pre-sorted desc by total truck weight.
+ * `units_to_load` = fresh allocation; `recommended_van_load` = total truck weight
+ * (= ceil(opening_stock) + units_to_load). `has_real_confidence` controls badge rendering.
  */
 export interface VanLoadTableRow {
   item_code: string;
@@ -94,11 +64,8 @@ export interface VanLoadTableRow {
   lower_bound: number | null;
   upper_bound: number | null;
   has_real_confidence: boolean;
-  /** Business-facing fields for the explainability modal:
-   *  opening_stock, recent_avg_per_selling_day, expected_demand,
-   *  forecast_below_recent, guard_skipped. The table itself never
-   *  reads these -- they're spread onto the legacy Row passed to
-   *  ExplainabilityModal. */
+  /** Spread onto the legacy Row for ExplainabilityModal: opening_stock,
+   *  recent_avg_per_selling_day, expected_demand, forecast_below_recent, guard_skipped. */
   explain: Record<string, number | boolean | null>;
 }
 
@@ -112,11 +79,8 @@ export interface VanLoadPageView {
   summary: VanLoadSummaryView;
   chart_top_n: VanLoadChartItem[];
   table_rows: VanLoadTableRow[];
-  /** Per-(item, date) rows feeding the click-to-explain popovers on the
-   *  VanLoadSummary tile. Single-date here, so every row's ``date`` is
-   *  the page's ``date`` -- the field is kept for shape parity with the
-   *  past-performance payload. Non-optional on the wire; backend
-   *  defaults to []. */
+  /** Per-(item, date) rows for VanLoadSummary click-to-explain popovers;
+   *  shape parity with past-performance. Backend defaults to []. */
   items: PastPerformanceItem[];
 }
 
@@ -168,13 +132,7 @@ export interface ForecastDrawerView {
 
 const c = () => getClient("forecast");
 
-/**
- * Frontend surface for the demand-forecasting-pipeline service. Trimmed
- * to what the Pipeline page + VanLoad drawers actually consume. Model
- * inspection / pair-explainability / cache-invalidation endpoints exist
- * server-side but had no UI consumer; if a consumer comes back, re-add
- * the method alongside the new caller.
- */
+/** Frontend surface for demand-forecasting-pipeline; trimmed to what the UI consumes. */
 export const forecastApi = {
   getSummary: () => c().get<ForecastSummary>("/summary").then((r) => r.data),
 
@@ -186,11 +144,7 @@ export const forecastApi = {
       )
       .then((r) => r.data),
 
-  /**
-   * VanLoad route-detail page view -- one canonical fetch carrying the
-   * summary tiles, the top-N chart, and the table rows. All numbers are
-   * pre-computed and pre-sorted server-side; the page binds and renders.
-   */
+  /** VanLoad page view -- summary tiles + top-N chart + table rows in one fetch. */
   getVanLoadPageView: (routeCode: string, date: string, topN: number = 10) =>
     c()
       .get<VanLoadPageView>("/page-views/van-load", {
@@ -198,10 +152,7 @@ export const forecastApi = {
       })
       .then((r) => r.data),
 
-  /**
-   * Upcoming-plan drawer page view -- carries tiles, daily chart series,
-   * line-item table and the show_band flag in one fetch.
-   */
+  /** Upcoming-plan drawer page view -- tiles + daily chart + line items in one fetch. */
   getForecastDrawerPageView: (
     routeCode: string | undefined,
     itemCodes: string[] | undefined,
@@ -223,12 +174,7 @@ export const forecastApi = {
   triggerInference: () =>
     c().post<PipelineRunResponse>("/pipeline/inference", {}).then((r) => r.data),
 
-  /**
-   * Pipeline page resolver -- one fetch carries: the per-step status
-   * with formatted metric / detail strings, the publish-cascade
-   * worst-of-two summary, and the global ``any_running`` flag. The
-   * page renders the response verbatim; no client-side resolution.
-   */
+  /** Pipeline page resolver -- per-step status, cascade summary, any_running in one fetch. */
   getResolvedPipelineStatus: () =>
     c()
       .get<ResolvedPipelineStatusResponse>("/pipeline/resolved-status")
@@ -245,18 +191,8 @@ export const forecastApi = {
       .get<{ history: RetrainHistoryEntry[] }>("/retrain/history")
       .then((r) => r.data?.history ?? []),
 
-  /**
-   * Past-performance for the AccuracyDrawer -- single canonical source.
-   * Returns three daily series (allocated, reconciled, sold), aggregate
-   * tiles, and per-item top-N over the same window. Optional ``filters``
-   * scope every series and item to a category / item-code subset
-   * server-side, so chart and tile totals always reconcile.
-   *
-   * Wire shape mirrors ``/eda/sales`` and ``/analytics/adoption``: every
-   * date-bounded endpoint takes ``(start_date, end_date)`` so the
-   * frontend never has to translate between calendar deltas and ISO
-   * dates at the network boundary.
-   */
+  /** Past-performance for AccuracyDrawer -- three daily series + tiles + top-N items,
+   *  optionally filtered by category/item-codes so chart and tile totals reconcile. */
   getReconciliationPastPerformance: (
     routeCode: string,
     startDate: string,

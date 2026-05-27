@@ -5,20 +5,11 @@ from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, ConfigDict, Field
 
 
-# ----------------------------------------------------------------------
-# Redistribution wire models.
-#
-# Strict contract -- ``extra="forbid"`` so a stray field on either the
-# producer (shape_redistribution_view) or the consumer (frontend panel)
-# is surfaced as a 422, not silently dropped. The model_dump output is
-# the single source of truth the UI binds to.
-# ----------------------------------------------------------------------
+# Redistribution wire models: extra=forbid so stray fields surface as 422.
 
 
 class RedistributionEntry(BaseModel):
-    """One recipient row inside a per-item group. ``from`` is implicit
-    (the surrounding customer's card). The UI colors rows by
-    ``direction`` and renders ``toName`` + ``to`` + ``quantity``."""
+    """One recipient row inside a per-item group (``from`` is implicit)."""
     model_config = ConfigDict(extra="forbid")
 
     to: str
@@ -28,15 +19,7 @@ class RedistributionEntry(BaseModel):
 
 
 class RedistributionGroup(BaseModel):
-    """Per-item group of recipient entries. The buffer ledger still
-    drives allocation server-side, but the running buffer state is no
-    longer surfaced on the wire -- the UI renders only the entries.
-
-    ``keptOnTruck`` carries the source customer's surplus units that did
-    NOT reach any downstream recipient -- either because no eligible
-    recipient existed or because spare van-load buffer absorbed the
-    overflow. Always 0 for ``reduce``-direction groups (excess-demand /
-    drop-in side) since "kept" only makes sense on the surplus path."""
+    """Per-item group of recipient entries; keptOnTruck is the surplus not absorbed downstream (ADD only)."""
     model_config = ConfigDict(extra="forbid")
 
     itemCode: str
@@ -46,9 +29,7 @@ class RedistributionGroup(BaseModel):
 
 
 class RedistributionView(BaseModel):
-    """Wire-shaped redistribution payload emitted for every visit. The
-    panel mounts unconditionally; an empty ``groups`` list signals the
-    "nothing to redistribute" case without a separate marker field."""
+    """Redistribution payload; empty groups signals "nothing to redistribute"."""
     model_config = ConfigDict(extra="forbid")
 
     groups: List[RedistributionGroup] = Field(default_factory=list)
@@ -59,11 +40,7 @@ class InitSessionRequest(BaseModel):
 
     route_code: str
     date: str
-    # Optional. If absent, the server fetches recommendations from
-    # recommended_order (the canonical journey plan), so the client
-    # doesn't have to pre-fetch them. When present, the server uses
-    # them as-is so a freshly-regenerated plan reaches the session
-    # without waiting for the recommendation cache to invalidate.
+    # Optional; server fetches from recommended_order when absent. Pass through to bypass the cache.
     recommendations: List[Dict[str, Any]] = Field(default_factory=list)
 
 
@@ -72,8 +49,7 @@ class ProcessVisitRequest(BaseModel):
 
     session_id: str
     customer_code: str
-    # route_code + date are taken from the session; kept optional so the
-    # client can echo them back for diagnostics if useful.
+    # Taken from the session; kept optional for client-side diagnostics echo.
     route_code: Optional[str] = None
     date: Optional[str] = None
 
@@ -129,15 +105,12 @@ class SavedVisit(BaseModel):
     preVisitBriefing: Optional[str] = None
     customerAnalysis: Optional[str] = None
     redistributions: RedistributionView = Field(default_factory=RedistributionView)
-    # Off-plan items the customer invoiced today, hydrated from
-    # yf_supervision_items rows with original_recommended_qty=0 and
-    # actual_qty>0. Same shape as the live /visit response's alsoBought.
+    # Off-plan items hydrated from yf_supervision_items (rec=0, actual>0); same shape as /visit's alsoBought.
     alsoBought: List[AlsoBoughtRow] = Field(default_factory=list)
 
 
 class SessionVisitTotals(BaseModel):
-    """Wire-shaped visit aggregates from Session.summary(). Includes the
-    drop-in count so the live tile renders planned vs unplanned distinctly."""
+    """Visit aggregates from Session.summary(); includes drop-in count for the live tile."""
     model_config = ConfigDict(extra="forbid")
 
     visited_count: int = 0
@@ -175,8 +148,7 @@ class SessionCustomerTile(BaseModel):
 
 
 class SessionSummary(BaseModel):
-    """Shape Session.summary() emits. Replaces the prior opaque
-    SessionResponse.session blob."""
+    """Shape Session.summary() emits."""
     model_config = ConfigDict(extra="forbid")
 
     sessionId: str
@@ -217,12 +189,7 @@ class AlsoBoughtRow(BaseModel):
 
 
 class VisitResultPayload(BaseModel):
-    """Shape /session/visit emits. Wraps the post-visit score, the
-    per-item actual sales, the planned-only quantity totals, the
-    off-plan ``alsoBought`` rows, the structured redistribution view,
-    and the cumulative session aggregates -- everything the UI needs
-    to render a visit result in one round-trip.
-    """
+    """/session/visit response: post-visit score, actuals, redistribution view, and session totals."""
     model_config = ConfigDict(extra="forbid")
 
     score: VisitScore
@@ -249,51 +216,20 @@ class VisitResponse(BaseModel):
 
 
 class SavedVisitsResponse(BaseModel):
-    """Snapshot of already-saved visits for a (route, date), used to
-    hydrate the live UI on mount so already-visited customers render
-    actuals + score (and any prior LLM reviews) without re-running
-    the briefing or analysis."""
+    """Snapshot for hydrating already-saved visits on UI mount."""
     model_config = ConfigDict(extra="forbid")
 
     available: bool = False
     session_id: Optional[str] = None
     visits: Dict[str, SavedVisit] = Field(default_factory=dict)
+    # routeAnalysis kept as Optional[str] for wire-shape parity with the
+    # webapp's TypeScript model; always None now -- LLM analyses are
+    # generated on-demand by the webapp directly against llm_analytics.
     routeAnalysis: Optional[str] = None
     visit_totals: SessionVisitTotals = Field(default_factory=SessionVisitTotals)
-    # Pre-visit briefings keyed by ``customer_code``. Populated for
-    # every planned customer that has a non-NULL ``llm_pre_visit_briefing``
-    # column -- visited AND not-yet-visited -- so the live UI can render
-    # any planned customer's briefing without a fresh LLM call. Drop-in
-    # (unplanned) customers are not represented here: the rep cannot
-    # plan for whom they may serve.
+    # Always-empty dict kept for wire-shape parity; LLM briefings are
+    # generated on-demand by the webapp via llm_analytics, not pre-cached.
     briefings: Dict[str, str] = Field(default_factory=dict)
-
-
-class SaveBriefingRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    session_id: str
-    customer_code: str
-    # Opaque JSON-string payload from the analytics service. Stored as-is.
-    content: str
-
-
-class SaveCustomerAnalysisRequest(SaveBriefingRequest):
-    """Same shape as SaveBriefingRequest -- different target column."""
-
-
-class SaveRouteAnalysisRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    session_id: str
-    content: str
-
-
-class LlmSaveResponse(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    success: bool
-    error: Optional[str] = None
 
 
 class HealthResponse(BaseModel):

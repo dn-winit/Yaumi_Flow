@@ -1,16 +1,33 @@
 """
 Rolling-window features + intermittent-specific features.
 
-Leakage is prevented by shifting the target by one period before the rolling
-window is applied - the feature at time ``t`` never sees ``target[t]``.
+Leakage policy
+--------------
+A rolling feature at row ``t`` must only see target values that are
+OBSERVABLE at the moment row ``t`` is being predicted. At forecast
+horizon ``H`` the model is asked to predict ``H`` periods into the
+future, so row ``t`` (a test/inference row) is being scored when the
+real-world process is at time ``t-H``. The only target history we have
+in hand at that moment is everything up to and including ``t-H`` -- the
+H-1 periods immediately before ``t`` are *future* from the forecast
+origin and would only be known in hindsight.
 
-``min_periods`` is driven by ``min_periods_fraction`` (default 0.5). A roll of
-window 28 therefore requires at least 14 observations before it emits a
-value; earlier rows are left NaN. This stops the "28-period mean computed
-from 2 rows" surprise that ``min_periods=1`` produces.
+The fix is to shift the target by ``H`` periods (not the hardcoded 1)
+before applying the rolling window. ``shift(1)`` was correct at H=1
+only; at H>1 it produced features that referenced unobservable values,
+making the test-window WAPE look better than what inference can ever
+deliver. We expose ``shift_horizon`` as a parameter and default to 1 to
+keep call-sites that haven't been updated yet behaving identically to
+the prior code.
 
-All intermittent-specific features are vectorised via per-group cumulative
-sums. No Python expanding-apply loops - this is an O(N) module.
+``min_periods`` is driven by ``min_periods_fraction`` (default 0.5). A
+roll of window 28 therefore requires at least 14 observations before
+it emits a value; earlier rows are left NaN. This stops the "28-period
+mean computed from 2 rows" surprise that ``min_periods=1`` produces.
+
+All intermittent-specific features are vectorised via per-group
+cumulative sums. No Python expanding-apply loops - this is an O(N)
+module.
 """
 
 from __future__ import annotations
@@ -44,6 +61,20 @@ def _resolve_min_periods(window: int, fraction: float | None) -> int:
     return max(1, int(window * f))
 
 
+def _resolve_shift_horizon(shift_horizon: int | None) -> int:
+    """Coerce the shift to a positive int; reject 0/negative which would
+    leak the target into its own feature."""
+    if shift_horizon is None:
+        return 1
+    if not isinstance(shift_horizon, int) or shift_horizon < 1:
+        raise ValueError(
+            f"shift_horizon must be a positive integer (>=1); got "
+            f"{shift_horizon!r}. A shift of 0 leaks the target into its "
+            f"own feature; negative values reference the future."
+        )
+    return shift_horizon
+
+
 def add_rolling_features(
     df: pd.DataFrame,
     group_keys: list[str],
@@ -52,11 +83,20 @@ def add_rolling_features(
     stats: list[str],
     *,
     min_periods_fraction: float | None = 0.5,
+    shift_horizon: int | None = 1,
 ) -> pd.DataFrame:
-    """Emit ``roll_<stat>_<window>`` columns for each (stat, window) combo."""
+    """Emit ``roll_<stat>_<window>`` columns for each (stat, window) combo.
+
+    ``shift_horizon`` is the number of periods the target is shifted by
+    BEFORE the rolling window runs. At forecast horizon H, pass H so the
+    feature only sees values observable at the forecast origin (i.e.,
+    target[t-H .. t-H-w+1]). Default 1 preserves backward compatibility
+    with single-step forecasting.
+    """
     df = df.copy()
+    h = _resolve_shift_horizon(shift_horizon)
     grp = df.groupby(group_keys)[target_col]
-    shifted = grp.shift(1)
+    shifted = grp.shift(h)
     key_series = [df[k] for k in group_keys]
 
     for w in windows:
@@ -83,11 +123,19 @@ def add_intermittent_features(
     group_keys: list[str],
     target_col: str,
     cfg: dict,
+    *,
+    shift_horizon: int | None = 1,
 ) -> pd.DataFrame:
-    """Per-pair expanding features for intermittent patterns, vectorised."""
+    """Per-pair expanding features for intermittent patterns, vectorised.
+
+    ``shift_horizon`` mirrors ``add_rolling_features``: at forecast
+    horizon H the lag used to drive cumulative statistics shifts by H so
+    the feature stays leakage-free at every horizon.
+    """
     df = df.copy()
+    h = _resolve_shift_horizon(shift_horizon)
     grp = df.groupby(group_keys)[target_col]
-    lag = grp.shift(1)  # leakage-free: feature at t uses values up to t-1
+    lag = grp.shift(h)  # leakage-free: feature at t uses values up to t-h
 
     if any(cfg.get(k, False) for k in ("nonzero_mean", "inter_demand_interval", "last_nonzero_gap")):
         key_series = [df[k] for k in group_keys]

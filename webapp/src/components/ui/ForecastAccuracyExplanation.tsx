@@ -4,8 +4,7 @@ import { TOLERANCE_BY_CLASS, fmtBps } from "@/lib/format";
  *  so the table cannot drift from the scoring formula. */
 export default function ForecastAccuracyExplanation() {
   const classes: { key: string; label: string; tone: string; description: string }[] = [
-    // Descriptions mirror ``classDesc`` in ExplainabilityModal /
-    // RecommendationModal -- one phrasing per pattern across the whole UI.
+    // Mirror ExplainabilityModal/RecommendationModal classDesc copy.
     {
       key: "smooth",
       label: "Stable",
@@ -163,8 +162,7 @@ export default function ForecastAccuracyExplanation() {
         </p>
       </div>
 
-      {/* Disambiguation -- the app surfaces three accuracy-style numbers and
-          this is the one place that explains which is which. */}
+      {/* Disambiguation: this is the one place that names the three accuracy numbers. */}
       <div className="border-l-3 border-info-500 bg-info-50/40 px-4 py-3 rounded-r-lg space-y-2">
         <p className="text-body text-text-secondary leading-relaxed">
           <span className="font-semibold text-text-primary">Three accuracy numbers in this app, three distinct questions:</span>

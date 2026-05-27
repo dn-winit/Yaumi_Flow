@@ -1,6 +1,4 @@
-"""
-API request/response schemas.
-"""
+"""API request/response schemas."""
 
 from __future__ import annotations
 
@@ -16,14 +14,7 @@ class ImportRequest(BaseModel):
         default=None,
         ge=1,
         le=730,
-        description=(
-            "Optional refresh window for incremental mode. When set, the "
-            "importer re-pulls the last N days regardless of CSV state, "
-            "then dedup-merges (last-write-wins on numeric aggregates). "
-            "Use after a producer overwrites existing rows -- pure-append "
-            "incremental (`trx_date > max_csv_date`) would miss those "
-            "UPDATEs. Ignored when ``mode=full``."
-        ),
+        description="Refresh-window override for incremental mode; re-pulls last N days and dedup-merges. Ignored for full mode.",
     )
 
 
@@ -77,18 +68,9 @@ class DataSummaryResponse(BaseModel):
     last_updated: Optional[str] = None
 
 
-# ----------------------------------------------------------------------
-# EDA response envelopes
-# ----------------------------------------------------------------------
-#
-# The deep payload (totals, daily_trend, top_routes, categories, etc.)
-# is intentionally typed as Dict[str, Any] / List[Dict[str, Any]] rather
-# than rigid sub-schemas. The shapes are documented in the matching
-# webapp TypeScript types (`webapp/src/types/data-import.ts`) and have
-# stayed stable across frontend revisions; pinning them here would force
-# a coordinated backend+frontend deploy on every additive field. The
-# envelope still gives FastAPI an OpenAPI shape, validates the success/
-# message fields, and rejects accidental scalar returns.
+# EDA response envelopes -- deep payloads are Dict/List of Any so additive
+# fields don't require coordinated backend+frontend deploys. Shapes are
+# documented in webapp/src/types/data-import.ts.
 
 
 class _AvailableEnvelope(BaseModel):
@@ -97,21 +79,14 @@ class _AvailableEnvelope(BaseModel):
 
 
 class LastActiveDateResponse(BaseModel):
-    """Most recent date with sales activity in sales_recent.csv.
-
-    Used by drawers (van-load past performance, recommendation adoption)
-    to seed default reporting periods that always land on a date the
-    data actually covers -- no hardcoded "yesterday" that lands on a
-    weekend with zero rows.
-    """
+    """Most recent date with sales activity in sales_recent.csv. Used to
+    seed default reporting periods that land on a date with data."""
     available: bool
     date: Optional[str] = None
 
 
 class SalesOverviewResponse(_AvailableEnvelope):
-    # Echo of the (start_date, end_date) the server actually filtered on
-    # -- lets the client confirm date contract without re-parsing query
-    # params. ISO YYYY-MM-DD, same shape as the request.
+    # Echo of the (start_date, end_date) the server filtered on (ISO YYYY-MM-DD).
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     totals: Optional[Dict[str, Any]] = None
@@ -121,7 +96,7 @@ class SalesOverviewResponse(_AvailableEnvelope):
 
 
 class BusinessKpisResponse(_AvailableEnvelope):
-    # Echo of the requested window, same as SalesOverviewResponse.
+    # Echo of the requested window (see SalesOverviewResponse).
     start_date: Optional[str] = None
     end_date: Optional[str] = None
     anchor_date: Optional[str] = None
@@ -135,10 +110,9 @@ class BusinessKpisResponse(_AvailableEnvelope):
 
 
 class TrimmedFilterSelections(BaseModel):
-    """The input selection vector with codes that no longer exist in the
-    cascaded option sets dropped. Frontend applies it verbatim so a
-    stale code never lingers and silently filters results to nothing.
-    """
+    """Selection vector with codes absent from the cascaded option sets
+    dropped; frontend applies verbatim so stale codes can't silently
+    filter results to nothing."""
     warehouse_codes: List[str] = Field(default_factory=list)
     route_codes: List[str] = Field(default_factory=list)
     category_codes: List[str] = Field(default_factory=list)

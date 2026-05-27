@@ -13,8 +13,9 @@ Error handling contract:
   * Any other exception          -> bubbles up; the analyzer's retry
                                     loop decides whether to fall back.
 
-Logged via one structured ``llm_call ...`` line per attempt so token
-spend, latency, and outcome are visible at INFO level.
+Every call emits one structured ``llm_call ...`` log line AND appends one
+``CostEntry`` to the process cost tracker. The log line is the forensic
+audit trail; the tracker backs the live ``/cost`` endpoints.
 """
 
 from __future__ import annotations
@@ -22,10 +23,13 @@ from __future__ import annotations
 import json
 import logging
 import random
+import re
 import time
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 from llm_analytics.config.settings import Settings, get_settings
+from llm_analytics.services.cost_tracker import CostEntry, get_cost_tracker
 
 logger = logging.getLogger(__name__)
 
@@ -40,15 +44,56 @@ class TruncatedResponseError(RuntimeError):
     """
 
 
-def _log_call(provider: str, model: str, outcome: str,
-              usage: Optional[Dict[str, Any]], elapsed_ms: float) -> None:
+def _emit_call_record(
+    provider: str, model: str, outcome: str,
+    usage: Optional[Dict[str, Any]], elapsed_ms: float,
+    *, artifact: str, route_code: str, customer_code: str,
+    cache_hit: bool = False,
+) -> None:
+    """Single side-effect for every LLM call: log line + cost-tracker append.
+
+    Co-locating both writes guarantees the audit trail and the live
+    aggregation can't diverge. Caller passes the artifact/route/customer
+    context so the cost endpoint can slice by any of them.
+    """
     u = usage or {}
+    in_tok  = u.get("input_tokens")  or 0
+    out_tok = u.get("output_tokens") or 0
     logger.info(
-        "llm_call provider=%s model=%s outcome=%s input_tokens=%s output_tokens=%s elapsed_ms=%.0f",
-        provider, model, outcome,
-        u.get("input_tokens", "-"),
-        u.get("output_tokens", "-"),
+        "llm_call provider=%s model=%s artifact=%s outcome=%s "
+        "input_tokens=%s output_tokens=%s elapsed_ms=%.0f "
+        "route=%s customer=%s cache_hit=%s",
+        provider, model, artifact, outcome,
+        in_tok if in_tok else "-",
+        out_tok if out_tok else "-",
         elapsed_ms,
+        route_code or "-", customer_code or "-", cache_hit,
+    )
+    get_cost_tracker().record(CostEntry(
+        timestamp=datetime.now(timezone.utc),
+        artifact=artifact,
+        model=model,
+        provider=provider,
+        input_tokens=int(in_tok or 0),
+        output_tokens=int(out_tok or 0),
+        elapsed_ms=float(elapsed_ms),
+        outcome=outcome,
+        cache_hit=cache_hit,
+        route_code=route_code or "",
+        customer_code=customer_code or "",
+    ))
+
+
+def record_cache_hit(
+    *, artifact: str, route_code: str = "", customer_code: str = "",
+) -> None:
+    """Cost-tracker entry for a cached answer (no LLM call). Zero tokens,
+    zero cost, but appears in the call rate + cache_hit_rate metrics."""
+    s = get_settings()
+    _emit_call_record(
+        s.provider, s.model, "cache_hit", None, 0.0,
+        artifact=artifact, route_code=route_code, customer_code=customer_code,
+        cache_hit=True,
     )
 
 
@@ -108,20 +153,48 @@ class LLMClient:
         except Exception as exc:
             logger.warning("Failed to init LLM client (%s): %s", provider, exc)
 
-    def chat(self, system_prompt: str, user_prompt: str, attempt: int = 0) -> Dict[str, Any]:
-        """Send a chat request and return parsed JSON response."""
+    def chat(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        attempt: int = 0,
+        *,
+        artifact: str = "unknown",
+        route_code: str = "",
+        customer_code: str = "",
+        max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Send a chat request and return parsed JSON response.
+
+        ``artifact``, ``route_code``, ``customer_code`` flow into the cost
+        tracker so the /cost endpoints can slice spend by any of them.
+        ``max_tokens`` overrides the settings default (per-artifact sizing
+        is owned by the analyzer; this is the wire override).
+        """
         if not self.is_available:
             raise RuntimeError("LLM client not available -- check API key and provider")
 
         provider = self._s.provider
+        effective_max = int(max_tokens or self._s.max_tokens)
 
         if provider in ("groq", "openai"):
-            return self._chat_openai_compat(system_prompt, user_prompt, attempt)
+            return self._chat_openai_compat(
+                system_prompt, user_prompt, attempt,
+                artifact=artifact, route_code=route_code,
+                customer_code=customer_code, max_tokens=effective_max,
+            )
         if provider == "anthropic":
-            return self._chat_anthropic(system_prompt, user_prompt, attempt)
+            return self._chat_anthropic(
+                system_prompt, user_prompt, attempt,
+                artifact=artifact, route_code=route_code,
+                customer_code=customer_code, max_tokens=effective_max,
+            )
         raise RuntimeError(f"Unsupported provider: {provider}")
 
-    def _chat_openai_compat(self, system: str, user: str, attempt: int) -> Dict[str, Any]:
+    def _chat_openai_compat(
+        self, system: str, user: str, attempt: int,
+        *, artifact: str, route_code: str, customer_code: str, max_tokens: int,
+    ) -> Dict[str, Any]:
         """OpenAI-compatible API (Groq, OpenAI). Honours Retry-After on
         429 and applies bounded exponential backoff for other transient
         failures. Surfaces ``finish_reason='length'`` as a dedicated
@@ -135,7 +208,7 @@ class LLMClient:
                     {"role": "user", "content": user},
                 ],
                 temperature=self._s.temperature,
-                max_tokens=self._s.max_tokens,
+                max_tokens=max_tokens,
                 top_p=self._s.top_p,
                 seed=self._s.seed + attempt,
                 response_format={"type": "json_object"},
@@ -143,10 +216,14 @@ class LLMClient:
         except self._rate_limit_cls as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             wait = _retry_after_seconds(exc, default=min(2 ** attempt + random.random(), 30.0))
-            _log_call(self._s.provider, self._s.model, f"rate_limited:{wait:.1f}s", None, elapsed_ms)
-            # Sleep here rather than in the analyzer because the wait
-            # is provider-state-specific: bubbling up would lose the
-            # Retry-After signal.
+            _emit_call_record(
+                self._s.provider, self._s.model, f"rate_limited:{wait:.1f}s",
+                None, elapsed_ms,
+                artifact=artifact, route_code=route_code, customer_code=customer_code,
+            )
+            # Sleep here rather than in the analyzer because the wait is
+            # provider-state-specific: bubbling up would lose the Retry-After
+            # signal. Cap so a misconfigured Retry-After can't park the worker.
             time.sleep(min(wait, 30.0))
             raise
 
@@ -160,22 +237,31 @@ class LLMClient:
         choice = response.choices[0]
         finish_reason = getattr(choice, "finish_reason", None)
         if finish_reason == "length":
-            _log_call(self._s.provider, self._s.model, "truncated", usage, elapsed_ms)
+            _emit_call_record(
+                self._s.provider, self._s.model, "truncated", usage, elapsed_ms,
+                artifact=artifact, route_code=route_code, customer_code=customer_code,
+            )
             raise TruncatedResponseError(
-                f"finish_reason=length at max_tokens={self._s.max_tokens}"
+                f"finish_reason=length at max_tokens={max_tokens} for {artifact}"
             )
 
-        _log_call(self._s.provider, self._s.model, "ok", usage, elapsed_ms)
+        _emit_call_record(
+            self._s.provider, self._s.model, "ok", usage, elapsed_ms,
+            artifact=artifact, route_code=route_code, customer_code=customer_code,
+        )
         return self._parse_json(choice.message.content)
 
-    def _chat_anthropic(self, system: str, user: str, attempt: int) -> Dict[str, Any]:
+    def _chat_anthropic(
+        self, system: str, user: str, attempt: int,
+        *, artifact: str, route_code: str, customer_code: str, max_tokens: int,
+    ) -> Dict[str, Any]:
         """Anthropic Messages API. Same Retry-After + truncation
         contract as the OpenAI-compatible path."""
         t0 = time.monotonic()
         try:
             response = self._client.messages.create(
                 model=self._s.model,
-                max_tokens=self._s.max_tokens,
+                max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": user}],
                 temperature=self._s.temperature,
@@ -184,7 +270,11 @@ class LLMClient:
         except self._rate_limit_cls as exc:
             elapsed_ms = (time.monotonic() - t0) * 1000.0
             wait = _retry_after_seconds(exc, default=min(2 ** attempt + random.random(), 30.0))
-            _log_call(self._s.provider, self._s.model, f"rate_limited:{wait:.1f}s", None, elapsed_ms)
+            _emit_call_record(
+                self._s.provider, self._s.model, f"rate_limited:{wait:.1f}s",
+                None, elapsed_ms,
+                artifact=artifact, route_code=route_code, customer_code=customer_code,
+            )
             time.sleep(min(wait, 30.0))
             raise
 
@@ -197,29 +287,75 @@ class LLMClient:
 
         stop_reason = getattr(response, "stop_reason", None)
         if stop_reason == "max_tokens":
-            _log_call(self._s.provider, self._s.model, "truncated", usage, elapsed_ms)
+            _emit_call_record(
+                self._s.provider, self._s.model, "truncated", usage, elapsed_ms,
+                artifact=artifact, route_code=route_code, customer_code=customer_code,
+            )
             raise TruncatedResponseError(
-                f"stop_reason=max_tokens at max_tokens={self._s.max_tokens}"
+                f"stop_reason=max_tokens at max_tokens={max_tokens} for {artifact}"
             )
 
-        _log_call(self._s.provider, self._s.model, "ok", usage, elapsed_ms)
+        _emit_call_record(
+            self._s.provider, self._s.model, "ok", usage, elapsed_ms,
+            artifact=artifact, route_code=route_code, customer_code=customer_code,
+        )
         return self._parse_json(response.content[0].text)
 
     @staticmethod
     def _parse_json(raw: str) -> Dict[str, Any]:
-        """Strip markdown fences and parse JSON.
+        """Extract + parse a JSON object from arbitrary model output.
 
-        Tolerates models that emit a leading ```json ... ``` fence
-        despite ``response_format=json_object`` being set (we have seen
-        this from llama-3.1-8b on Groq). Anything more exotic (trailing
-        commas, comments) is left to surface as a parse error so the
-        retry loop catches it.
+        Defense chain (each layer only runs if the prior raised):
+          1. Strict json.loads on the trimmed input -- the happy path.
+          2. Strip ```json/``` fences if present.
+          3. Slice the first balanced ``{...}`` block out of any prose
+             prefix/suffix (some models with response_format=json_object
+             still emit a leading "Here is the JSON:" sentence).
+          4. Light repair: remove trailing commas before ``}``/``]``,
+             normalise smart-quotes that some templates inject.
+          5. If all layers fail, raise the ORIGINAL exception with the
+             raw payload's first 300 chars so the retry log is actionable.
         """
-        text = raw.strip()
-        if text.startswith("```"):
-            lines = [l for l in text.split("\n") if not l.strip().startswith("```")]
-            text = "\n".join(lines)
-        return json.loads(text)
+        text = (raw or "").strip()
+        if not text:
+            raise ValueError("LLM returned empty content")
+
+        # Layer 1: try as-is.
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError as primary_exc:
+            primary = primary_exc
+
+        # Layer 2: strip code fences.
+        if "```" in text:
+            stripped = "\n".join(
+                line for line in text.split("\n")
+                if not line.strip().startswith("```")
+            ).strip()
+            try:
+                return json.loads(stripped)
+            except json.JSONDecodeError:
+                text = stripped  # carry the fence-stripped form into layer 3
+
+        # Layer 3: extract the first balanced JSON object.
+        sliced = _extract_first_json_object(text)
+        if sliced:
+            try:
+                return json.loads(sliced)
+            except json.JSONDecodeError:
+                text = sliced
+
+        # Layer 4: light repair (trailing commas, smart quotes).
+        repaired = _repair_json(text)
+        try:
+            return json.loads(repaired)
+        except json.JSONDecodeError:
+            pass
+
+        raise ValueError(
+            f"LLM response not parseable as JSON after fence/slice/repair: "
+            f"{primary.msg!r}; raw[:300]={raw[:300]!r}"
+        )
 
     def health(self) -> Dict[str, Any]:
         return {
@@ -227,3 +363,52 @@ class LLMClient:
             "provider": self._s.provider,
             "model": self._s.model,
         }
+
+
+def _extract_first_json_object(text: str) -> str:
+    """Find the first balanced ``{...}`` substring or return ''.
+
+    Walks the string tracking brace depth + string-literal state so that
+    a ``}`` inside a string value can't terminate the slice early.
+    """
+    start = text.find("{")
+    if start < 0:
+        return ""
+    depth = 0
+    in_string = False
+    escape = False
+    for i in range(start, len(text)):
+        ch = text[i]
+        if in_string:
+            if escape:
+                escape = False
+            elif ch == "\\":
+                escape = True
+            elif ch == '"':
+                in_string = False
+            continue
+        if ch == '"':
+            in_string = True
+            continue
+        if ch == "{":
+            depth += 1
+        elif ch == "}":
+            depth -= 1
+            if depth == 0:
+                return text[start:i + 1]
+    return ""
+
+
+_TRAILING_COMMA_RE = re.compile(r",(\s*[}\]])")
+
+
+def _repair_json(text: str) -> str:
+    """Best-effort fixup for common LLM JSON quirks.
+
+    Keeps the change set tiny so a real malformed response still fails
+    visibly rather than silently mis-parsing into wrong structure.
+    """
+    fixed = text.replace("“", '"').replace("”", '"')
+    fixed = fixed.replace("‘", "'").replace("’", "'")
+    fixed = _TRAILING_COMMA_RE.sub(r"\1", fixed)
+    return fixed

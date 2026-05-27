@@ -44,19 +44,7 @@ class SessionManager:
         RecommendedQuantity, Tier, PriorityScore, DaysSinceLastPurchase,
         PurchaseCycleDays, FrequencyPercent, VanLoad.
         """
-        # Deterministic ``session_id`` for (route, date). Earlier this
-        # method tacked on a per-process timestamp + uuid, which caused
-        # every page-load to mint a brand-new sid; the route header,
-        # customer summary, and item details tables then accumulated a
-        # parallel session row per page-open. ``/session/saved`` reads
-        # ``TOP 1 ORDER BY session_started_at DESC`` -- the newest of
-        # those parallel sids -- and lost every visit that landed under
-        # an older one, surfacing as the live "Visited X/Y" tile ticking
-        # 1, 2, 3 in front of the supervisor as the auto-fire effect
-        # walked the missing customers back in one at a time. One sid
-        # per (route, date) makes ``_upsert_route_header`` and the
-        # customer/item upserts (keyed on the same composite) naturally
-        # idempotent -- every page-load lands on the same row.
+        # Deterministic sid per (route, date) -- makes route/customer/item upserts idempotent across page reloads.
         session_id = f"{route_code}_{date}"
 
         customers: Dict[str, SessionCustomer] = {}
@@ -108,29 +96,15 @@ class SessionManager:
         session: Session,
         saved: Dict[str, Any],
     ) -> int:
-        """Apply persisted visit state onto a freshly-created session.
+        """Layer persisted visit state (actuals + score + alsoBought) onto a fresh session.
 
-        ``create_session`` builds an empty in-memory model from today's
-        plan -- every customer is unvisited, every item has zero
-        actuals. The supervision DB is the source of truth for the day's
-        actual progress, so we layer the persisted actuals / score /
-        visited flag onto the matching customers before the session
-        starts serving requests.
-
-        Without this hydration ``session.summary().visit_totals``
-        starts at zero and each ``/visit`` response walks the counter up
-        from 1, even when the saved store already shows 30/32 visited
-        -- producing the visible "30 -> 1 -> 2 -> 3 ..." flicker on the
-        live tile when the supervisor opens an in-progress route.
-
-        ``saved`` is the dict returned by ``DbSaver.load_session_visits``
-        (keyed under ``visits`` by customer code). Customers present in
-        the saved store but absent from today's plan are skipped --
-        their state is still served via ``/session/saved`` for the
-        drill-in view but does not enter the session aggregates.
-
+        Without this hydration ``session.summary().visit_totals`` starts at zero
+        and ``/initialize`` disagrees with ``/saved`` on the headline tile.
+        Customers present in the saved store but absent from today's plan are skipped.
         Returns the number of customers hydrated.
         """
+        from sales_supervision.core.constants import TIER_UNPLANNED
+
         visits = (saved or {}).get("visits") or {}
         if not visits:
             return 0
@@ -154,6 +128,31 @@ class SessionManager:
             cust.visited = True
             seq += 1
             cust.visit_sequence = seq
+
+            # Mirror live process_visit's alsoBought append; idempotent against existing codes.
+            also_bought = sv.get("alsoBought") or []
+            existing_codes = {it.item_code for it in cust.items}
+            for ab in also_bought:
+                code = str((ab.get("item_code") or "")).strip()
+                qty = int(ab.get("qty", 0) or 0)
+                if not code or qty <= 0 or code in existing_codes:
+                    continue
+                cust.items.append(SessionItem(
+                    item_code=code,
+                    item_name="",
+                    recommended_qty=0,
+                    actual_qty=qty,
+                    was_sold=True,
+                    tier=TIER_UNPLANNED,
+                    raw={
+                        "ItemCode": code,
+                        "ItemName": "",
+                        "RecommendedQuantity": 0,
+                        "Tier": TIER_UNPLANNED,
+                    },
+                ))
+                existing_codes.add(code)
+
             hydrated += 1
         if hydrated:
             logger.info(
@@ -225,7 +224,6 @@ class SessionManager:
                 visited=bool(cdata.get("visited", False)),
                 visit_sequence=int(cdata.get("visitSequence", 0)),
                 score=sc,
-                llm_analysis=cdata.get("llmAnalysis", ""),
             )
 
         return Session(

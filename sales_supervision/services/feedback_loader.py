@@ -1,12 +1,4 @@
-"""
-Read-only loader exposing supervision visits to the recommended_order
-feedback loop.
-
-Owns no business logic -- just the SQL needed to flatten the supervision
-tables into the long item-level frame the feedback attribution code
-expects. Lives in the supervision module because the schema is owned
-here; recommended_order imports it to feed the closed-loop signal.
-"""
+"""Read-only flatten of yf_supervision_* into the long item-level frame recommended_order feedback expects."""
 
 from __future__ import annotations
 
@@ -14,21 +6,15 @@ import logging
 from typing import Optional
 
 import pandas as pd
-import pyodbc
 
+from common.db_pool import get_pool
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
 
 
 class SessionDbLoader:
-    """Pull visit-level outcomes from yf_supervision_* for the feedback loop.
-
-    The query joins the customer header (visited customer set) with the
-    item-detail rows (per-item actuals). One row out per (session, customer,
-    item). Adversarial-filter / shrinkage-estimator code on the caller side
-    handles the rest.
-    """
+    """One row per (session, customer, item) from yf_supervision_* for the feedback loop."""
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
@@ -43,13 +29,7 @@ class SessionDbLoader:
         )
 
     def load_visits_in_window(self, *, start_date: str, end_date: str) -> pd.DataFrame:
-        """Return one row per (route, date, session, customer, item) inside
-        the window ``[start_date, end_date]`` inclusive.
-
-        Schema:
-          route_code, date, session_id, customer_code, item_code,
-          actual_qty, was_sold, was_edited, visited
-        """
+        """One row per (route, date, session, customer, item) over [start_date, end_date] inclusive."""
         cols = [
             "route_code", "date", "session_id",
             "customer_code", "item_code",
@@ -59,14 +39,7 @@ class SessionDbLoader:
         if not self.available:
             return pd.DataFrame(columns=cols)
 
-        # Per ``(route, date, customer)`` pick the most-recently written
-        # customer row across all session_ids -- legacy data may carry
-        # multiple parallel sids per (route, date) and a naive join would
-        # multiply the feedback signal by the duplicate factor. The
-        # ``picked`` CTE collapses to one canonical (session_id,
-        # customer_code) per (route, date, customer); items inherit that
-        # pairing so the long-format output has exactly one row per
-        # (route, date, customer, item).
+        # picked CTE collapses parallel legacy sids to one canonical (session_id, customer_code) per (route, date, customer).
         sql = (
             f";WITH ranked AS ( "
             f"  SELECT r.route_code, r.supervision_date, "
@@ -100,8 +73,16 @@ class SessionDbLoader:
         )
 
         try:
-            with pyodbc.connect(self._s.db.connection_string()) as conn:
-                conn.timeout = self._s.db.query_timeout
+            # Route through the shared connection pool -- raw pyodbc.connect
+            # could deadlock against the SERIALIZABLE MERGE in db_saver under
+            # concurrent cron+write load, and bypassed common.db_pool's
+            # retry-with-deadlock-fast logic.
+            pool = get_pool(
+                self._s.db.connection_string(),
+                query_timeout=self._s.db.query_timeout,
+                autocommit=True,
+            )
+            with pool.acquire() as conn:
                 cursor = conn.cursor()
                 cursor.execute(sql, (start_date, end_date))
                 rows = cursor.fetchall()
@@ -121,15 +102,13 @@ class SessionDbLoader:
         if df.empty:
             return pd.DataFrame(columns=cols)
 
-        # Normalise dtypes to match what the feedback attribution code expects.
+        # Normalise dtypes for the feedback attribution code.
         for k in ("route_code", "date", "session_id", "customer_code", "item_code"):
             df[k] = df[k].astype(str).str.strip()
         df["actual_qty"] = pd.to_numeric(df["actual_qty"], errors="coerce").fillna(0).astype(int)
         df["was_sold"] = df["was_sold"].astype(bool)
         df["was_edited"] = df["was_edited"].astype(bool)
-        # Every row in this set is a visited customer (db_saver only writes
-        # visited customers); the column is kept for shape compatibility
-        # with the historical attribution pipeline.
+        # db_saver only writes visited rows; column kept for shape compat.
         df["visited"] = True
         return df[
             [

@@ -1,9 +1,7 @@
-"""
-data_import scheduler -- daily incremental pull at 03:00 Dubai time.
+"""data_import scheduler -- daily incremental pull at 03:00 Dubai.
 
-Runs ``importer.import_all('incremental')`` so only new rows since the last
-import are pulled. The CSV files under ``data/`` stay the single source of
-truth for all downstream services.
+Runs ``importer.import_all('incremental')``. CSVs under ``data/`` stay the
+single source of truth for downstream services.
 """
 
 from __future__ import annotations
@@ -25,27 +23,26 @@ def _incremental_import() -> None:
     settings = get_settings()
     logger.info("[cron] Incremental import starting")
     try:
-        results = DataImporter(settings).import_all(mode="incremental")
+        # Sales-recent SQL nets returns at source; late-arriving returns
+        # would miss the netting under a pure since-date incremental. Re-pull
+        # last N days and dedup-merge so the netted row overwrites the gross.
+        overrides = {}
+        if settings.sales_recent_refresh_window_days > 0:
+            overrides["sales_recent"] = settings.sales_recent_refresh_window_days
+        results = DataImporter(settings).import_all(
+            mode="incremental",
+            dataset_lookback_overrides=overrides or None,
+        )
         logger.info("[cron] Incremental import done: %s", results)
-        # CSVs may have changed -- bust the EDA aggregation cache so the next
-        # request recomputes against the fresh data.
+        # Bust the EDA cache so next request recomputes against fresh CSVs.
         try:
             from data_import.api.dependencies import get_eda_service
             get_eda_service().invalidate()
             logger.info("[cron] EDA cache invalidated")
         except Exception as exc:
             logger.warning("[cron] EDA invalidate skipped: %s", exc)
-        # Reverse cascade: POST demand_forecasting's reconciliation
-        # refresh so the diagnostic columns + carry chain in
-        # ``yf_sales_transactions`` align with the freshly-mirrored
-        # CSVs in the SAME cron tick. Without this call, the diagnostic
-        # state lagged by up to 30 minutes until the independent 03:30
-        # reconciliation cron fired -- the explainability modal showed
-        # stale ``expected_demand`` and ``pattern_*`` columns against an
-        # already-fresh ``recommended_load``. Best-effort: a transient
-        # forecast-service outage logs a warning and the scheduled
-        # reconciliation cron picks up the work later. Imported lazily
-        # so the scheduler module stays free of FastAPI app deps.
+        # Reverse cascade: re-patch diagnostic columns + carry chain in the
+        # same tick. Lazy import keeps FastAPI app deps off this module.
         try:
             from data_import.api.app import _cascade_reconciliation_refresh
             _cascade_reconciliation_refresh(settings, logger)
@@ -79,15 +76,12 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler | N
         name="Daily Incremental Import",
         replace_existing=True,
         misfire_grace_time=3600,
-        # ``coalesce`` collapses a backlog of missed slots into one fire on
-        # recovery (we never want a year of catch-up runs after an outage);
-        # ``max_instances=1`` prevents the same job from racing itself if
-        # a cron skews and the prior run is still writing CSVs.
+        # coalesce: collapse missed slots into one fire on recovery.
+        # max_instances=1: prevent the job from racing itself.
         coalesce=True,
         max_instances=1,
     )
-    # Audit every fire to yf_scheduler_log so "did this cron run on
-    # time?" is answerable from one DB row, independent of stdout.
+    # Audit every fire to yf_scheduler_log (timing-only).
     from common.scheduler_audit import attach_audit
     attach_audit(_scheduler, "data_import",
                  settings.aiml_db.connection_string())

@@ -21,12 +21,7 @@ export function useForecastRouteSummary(date?: string, enabled = true) {
   return { data, loading: isLoading, error: error ? String(error) : null };
 }
 
-/**
- * VanLoad route-detail page-view: one fetch carries the summary tiles,
- * the top-N chart, and the table -- all pre-computed, pre-sorted, with
- * one canonical field per concept. The page binds directly; no client-
- * side aggregation, sort, or field substitution.
- */
+/** VanLoad page-view -- summary tiles + top-N chart + table in one fetch (page binds verbatim). */
 export function useVanLoadPageView(
   routeCode: string | undefined,
   date: string | undefined,
@@ -43,12 +38,7 @@ export function useVanLoadPageView(
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-/**
- * Upcoming-plan drawer page-view: one fetch carries the horizon tiles,
- * the daily chart series (with band on single-SKU views), and the
- * line-item table. Server picks ``show_band`` and rounds wire bytes to
- * match the route-summary contract; the drawer binds and renders.
- */
+/** Upcoming-plan drawer page-view -- horizon tiles + daily chart + line items in one fetch. */
 export function useForecastDrawerPageView(
   routeCode: string | undefined,
   itemCodes: string[] | undefined,
@@ -72,12 +62,7 @@ export function useForecastDrawerPageView(
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
-/**
- * Resolved Pipeline page payload -- one fetch with per-step status,
- * formatted metric / detail strings, cascade summary, and the global
- * ``any_running`` flag pre-computed server-side. The page renders the
- * response verbatim; no client-side resolution.
- */
+/** Pipeline page payload -- per-step status, cascade summary, any_running in one fetch. */
 export function useResolvedPipelineStatus() {
   const { data, isLoading, error, refetch } = useQuery({
     queryKey: ["pipeline-resolved-status"],
@@ -120,11 +105,7 @@ export function useUpdateRetrainConfig() {
   return mutation;
 }
 
-/**
- * Per-day series + return metrics for the AccuracyDrawer's past-performance
- * chart. Three plottable lines (original van load, reconciled load, actually
- * sold) for the given route over the ``[start_date, end_date]`` window.
- */
+/** AccuracyDrawer past-performance: three daily series over [start_date, end_date]. */
 export function useReconciliationPastPerformance(
   routeCode: string | undefined,
   startDate: string | undefined,
@@ -152,13 +133,76 @@ export function useReconciliationPastPerformance(
   return { data, loading: isLoading, error: error ? String(error) : null, refetch };
 }
 
+// Module-scoped so a rapid re-trigger (Retrain, then Generate Forecasts) cleanly
+// tears down the prior 30-min watcher before arming a new one.
+let _postRunWatcherHandle: number | null = null;
+
 export function useTriggerPipeline() {
   const qc = useQueryClient();
-  // Trigger mutations invalidate the resolved-status query (which the
-  // Pipeline page binds to) so the strip refreshes the moment a run
-  // starts. There is no longer a raw ``pipeline-status`` consumer.
-  const onSuccess = () =>
+  // Refresh the Pipeline strip the moment a run starts.
+  const onTriggerSuccess = () =>
     qc.invalidateQueries({ queryKey: ["pipeline-resolved-status"] });
+
+  // After the run completes, invalidate downstream queries that read freshly-written
+  // artifacts (accuracy tiles, history, config) so dashboard lag drops from ~5min to ~0.
+  const invalidatePostRun = () => {
+    qc.invalidateQueries({ queryKey: ["forecast-summary"] });
+    qc.invalidateQueries({ queryKey: ["retrain-history"] });
+    qc.invalidateQueries({ queryKey: ["retrain-config"] });
+  };
+
+  const armPostRunInvalidation = () => {
+    // Tear down any prior watcher first; back-to-back triggers must not leak intervals.
+    if (_postRunWatcherHandle !== null) {
+      window.clearInterval(_postRunWatcherHandle);
+      _postRunWatcherHandle = null;
+    }
+
+    // Fire only after any_running has been stably false for STABLE_FALSE_MS.
+    // Required because auto_inference_after_train flashes false between train+inference;
+    // 6s (two polls) is longer than that gap so we don't fire mid-chain.
+    let wasRunning = false;
+    let stableFalseSince: number | null = null;
+    const STABLE_FALSE_MS = 6_000;
+    const start = Date.now();
+    const handle = window.setInterval(() => {
+      const data = qc.getQueryData<{ any_running?: boolean }>([
+        "pipeline-resolved-status",
+      ]);
+      const running = Boolean(data?.any_running);
+
+      if (running) {
+        wasRunning = true;
+        // Reset debounce -- the prior "false" was the gap between train and inference.
+        stableFalseSince = null;
+      } else if (wasRunning) {
+        if (stableFalseSince === null) {
+          stableFalseSince = Date.now();
+        } else if (Date.now() - stableFalseSince >= STABLE_FALSE_MS) {
+          // Stably idle -- auto-chain done. Invalidate downstream.
+          invalidatePostRun();
+          window.clearInterval(handle);
+          if (_postRunWatcherHandle === handle) {
+            _postRunWatcherHandle = null;
+          }
+        }
+      }
+      // Safety teardown after 30 minutes of polling.
+      if (Date.now() - start > 30 * 60 * 1000) {
+        window.clearInterval(handle);
+        if (_postRunWatcherHandle === handle) {
+          _postRunWatcherHandle = null;
+        }
+      }
+    }, 3_000);
+    _postRunWatcherHandle = handle;
+  };
+
+  const onSuccess = () => {
+    onTriggerSuccess();
+    armPostRunInvalidation();
+  };
+
   const train = useMutation({
     mutationFn: () => forecastApi.triggerTraining(),
     onSuccess,
@@ -167,10 +211,8 @@ export function useTriggerPipeline() {
     mutationFn: () => forecastApi.triggerInference(),
     onSuccess,
   });
-  // ``mutateAsync`` so callers can await the response and inspect
-  // ``success``/``message`` -- the server returns 200 with
-  // ``{success: false}`` for guard / preflight failures, so the toast
-  // wording must follow the payload, not the HTTP status.
+  // mutateAsync so callers can read {success, message} -- the server returns
+  // 200 with {success:false} for guard failures, so toasts follow payload, not HTTP.
   return {
     triggerTrain: () => train.mutateAsync(),
     triggerInference: () => inference.mutateAsync(),

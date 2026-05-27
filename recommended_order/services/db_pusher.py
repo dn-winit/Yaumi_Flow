@@ -1,22 +1,15 @@
-"""
-Pushes recommendations to yf_recommended_orders in YaumiAIML.
-Column mapping matches scripts/create_tables.sql exactly.
-"""
+"""Pushes recommendations to yf_recommended_orders in YaumiAIML.
+Column mapping matches scripts/create_tables.sql exactly."""
 
 from __future__ import annotations
 
 import logging
 import time
-from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pandas as pd
 
-# Cross-service import: the AIML connection pool lives in
-# demand_forecasting_pipeline because it was the first writer; every
-# other AIML writer (this module, sales_supervision/db_saver) now
-# routes through the same factory so a single semaphore bounds
-# concurrent connections across services.
+# Shared AIML pool factory so a single semaphore bounds connections across services.
 from common.db_pool import (
     FATAL_DB_ERRORS as _POOL_FATAL_ERRORS,
     get_pool,
@@ -36,12 +29,8 @@ _DB_COLUMNS = [
     "generated_by",
 ]
 
-# Map from DataFrame column names (PascalCase) to DB column names (snake_case).
-# The CSV the engine writes uses the right-hand-side of Recommendation.to_dict;
-# the explainability columns (Source / WhyItem / WhyQuantity / Confidence) are
-# folded into the DB's `reason_*` columns by ``_push`` -- not via this map --
-# because they need type conversion (Confidence: 0-1 float -> 0-100 int) and
-# composition (reason_explanation = WhyItem + " | " + WhyQuantity, truncated).
+# PascalCase DF -> snake_case DB. Explainability columns are folded into
+# ``reason_*`` by ``_push`` (needs type conversion + composition).
 _COL_MAP = {
     "TrxDate": "trx_date", "RouteCode": "route_code",
     "CustomerCode": "customer_code", "CustomerName": "customer_name",
@@ -58,31 +47,30 @@ _COL_MAP = {
     "TrendFactor": "trend_factor",
 }
 
-# DB column character-length limits (matches scripts/create_tables.sql).
-# Defensive truncation prevents an INSERT error on long explanation strings.
+# DB column length caps (matches scripts/create_tables.sql); truncation
+# prevents INSERT errors on long explanations.
 _REASON_STATUS_MAX = 100
 _REASON_EXPLANATION_MAX = 500
 
-# Pre-built SQL fragments. Both the column list and placeholder block are
-# fully determined by the schema, so we assemble them once at import and
-# slot the configured table name in at runtime. Saves the per-push string
-# work and matches the pattern used in sales_supervision/services/db_saver.py.
+# Pre-built SQL fragments (column list + placeholders are schema-determined).
 _INSERT_COLS = ", ".join(f"[{c}]" for c in _DB_COLUMNS)
 _INSERT_PLACEHOLDERS = ", ".join("?" for _ in _DB_COLUMNS)
 _INSERT_SQL_TPL = f"INSERT INTO {{table}} ({_INSERT_COLS}) VALUES ({_INSERT_PLACEHOLDERS})"
-# DELETE for a date is unconditional on route_code; the runtime appends
-# the route filter when one is supplied.
-_DELETE_SQL_BASE = "DELETE FROM {table} WHERE [trx_date] >= ? AND [trx_date] < DATEADD(day, 1, ?)"
+# DELETE acquires range locks via the hint clause so the DELETE+INSERT
+# transaction window is invisible to concurrent readers.
+_DELETE_SQL_BASE = (
+    "DELETE FROM {table}{hint_clause} "
+    "WHERE [trx_date] >= ? AND [trx_date] < DATEADD(day, 1, ?)"
+)
 _DELETE_ROUTE_SUFFIX = " AND [route_code] = ?"
+# Allowlist regexes so a misconfigured env var can't inject SQL.
+_LOCK_HINTS_RE = __import__("re").compile(r"^[A-Z_, ]+$")
+_ISOLATION_RE = __import__("re").compile(r"^[A-Z ]+$")
 
 
 def _dataframe_to_records(df: pd.DataFrame, cols: List[str]) -> List[tuple]:
-    """Project ``df`` to the ordered ``cols`` and emit a list of plain
-    Python tuples suitable for ``cursor.executemany``. ``NaN`` becomes
-    ``None`` (so SQL Server stores NULL) and numpy scalars are unboxed
-    via ``.item()`` so pyodbc's parameter binder doesn't see numpy
-    types it cannot serialise.
-    """
+    """Project ``df`` to ``cols`` as a list of plain Python tuples for
+    ``cursor.executemany``; NaN -> None, numpy scalars unboxed via .item()."""
     return [
         tuple(None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row)
         for row in df[cols].values.tolist()
@@ -101,13 +89,8 @@ class DbPusher:
         return bool(self._db.host and self._db.username and self._s.recommendation_table)
 
     def _pool(self):
-        """Resolve (and lazily create) the shared AIML pool for this
-        pusher's connection string. Sized to ``retry_attempts + 1`` so a
-        retry storm never starves a concurrent writer, with a floor of 4
-        to keep room for the reconciliation cron and the page-view
-        readers running on the same DSN. Pool sizing only takes effect
-        on the first ``get_pool`` call for a given (conn_str, autocommit)
-        key; later callers return the existing pool unchanged."""
+        """Lazy-resolve the shared AIML pool; sized ``retry_attempts + 1``
+        (floor 4) so retries can't starve concurrent writers."""
         return get_pool(
             self._db.aiml_connection_string,
             max_connections=max(int(self._db.retry_attempts) + 1, 4),
@@ -122,34 +105,30 @@ class DbPusher:
             return {"success": False, "error": "DB not configured"}
         return self._push(df, date, route_code)
 
-    def push_recommendations(self, date: str, route_code: Optional[str] = None) -> Dict[str, Any]:
-        """Push local CSV files to DB."""
-        if not self.available:
-            return {"success": False, "error": "DB not configured (set RO_DB_HOST + RO_RECOMMENDATION_TABLE)"}
-
-        file_dir = Path(self._s.file_storage_dir)
-        pattern = f"recommendations_{date}_{route_code}.csv" if route_code else f"recommendations_{date}_*.csv"
-        files = list(file_dir.glob(pattern))
-        if not files:
-            return {"success": False, "error": f"No files matching {pattern}"}
-
-        df = pd.concat([pd.read_csv(f, low_memory=False) for f in files], ignore_index=True)
-        if df.empty:
-            return {"success": False, "error": "Files are empty"}
-        return self._push(df, date, route_code)
-
     def _push(self, df: pd.DataFrame, date: str, route_code: Optional[str]) -> Dict[str, Any]:
         table = self._s.recommendation_table
         t0 = time.time()
 
         db_df = self._project_to_schema(df)
 
+        # Settings-driven isolation + hints (allowlisted). Empty -> disabled.
+        isolation = (self._db.merge_isolation_level or "").strip().upper()
+        if isolation and not _ISOLATION_RE.match(isolation):
+            raise ValueError(
+                f"merge_isolation_level must contain only uppercase letters "
+                f"and spaces; got {self._db.merge_isolation_level!r}"
+            )
+        lock_hints = (self._db.merge_target_lock_hints or "").strip()
+        if lock_hints and not _LOCK_HINTS_RE.match(lock_hints):
+            raise ValueError(
+                f"merge_target_lock_hints must contain only uppercase letters "
+                f"and ``,`` / spaces; got {self._db.merge_target_lock_hints!r}"
+            )
+        hint_clause = f" WITH ({lock_hints})" if lock_hints else ""
         insert_sql = _INSERT_SQL_TPL.format(table=table)
-        # DELETE matches by date (and optional route) so a re-run is
-        # idempotent: same key set lands the same rows. DELETE + chunked
-        # INSERT live in one transaction so a partial INSERT failure
-        # rolls the DELETE back too -- never any orphan gaps.
-        delete_sql = _DELETE_SQL_BASE.format(table=table)
+        # DELETE+chunked INSERT in one txn so partial INSERT failures roll
+        # back the DELETE; re-runs are idempotent on the (date[, route]) key.
+        delete_sql = _DELETE_SQL_BASE.format(table=table, hint_clause=hint_clause)
         delete_params: List[Any] = [date, date]
         if route_code:
             delete_sql += _DELETE_ROUTE_SUFFIX
@@ -162,34 +141,23 @@ class DbPusher:
         last_error: Optional[str] = None
         for attempt in range(1, self._db.retry_attempts + 1):
             try:
-                # ``pool.acquire()`` is a context manager: the underlying
-                # connection is always closed on exit (returning the
-                # ODBC socket to the driver-level cache for the next
-                # acquire), and the bounding semaphore is released even
-                # if the body raises -- no leak on exception.
+                # pool.acquire() releases the semaphore + closes the conn on exit.
                 with pool.acquire() as conn:
                     cursor = conn.cursor()
                     cursor.fast_executemany = True
                     try:
+                        # Pin isolation for the DELETE+INSERT txn so
+                        # readers can't see the empty window.
+                        if isolation:
+                            cursor.execute(f"SET TRANSACTION ISOLATION LEVEL {isolation};")
                         cursor.execute(delete_sql, delete_params)
                         for i in range(0, len(records), chunk):
                             cursor.executemany(insert_sql, records[i : i + chunk])
                         conn.commit()
                     except Exception:
-                        # Roll back BEFORE the connection closes so the
-                        # DELETE in this transaction never persists when
-                        # the INSERT half fails. Pool exit then closes
-                        # the (now-clean) connection.
-                        #
-                        # A rollback that itself raises is a serious
-                        # signal: the connection is in an undefined
-                        # state and the next caller that pulls it from
-                        # the pool may observe partial writes. Log
-                        # loudly at ERROR so operators see the broken-
-                        # connection event; don't swallow the rollback
-                        # exception silently. The original write error
-                        # is still re-raised so callers see the actual
-                        # root cause.
+                        # Rollback the DELETE on INSERT failure; if rollback
+                        # itself raises, the conn is in an undefined state
+                        # so log loudly before re-raising the original error.
                         try:
                             conn.rollback()
                         except Exception as rollback_exc:
@@ -205,8 +173,7 @@ class DbPusher:
                 logger.info("Pushed %d recs to %s for %s in %.1fs", len(records), table, date, duration)
                 return {"success": True, "table": table, "rows": len(records), "duration_seconds": duration}
             except _POOL_FATAL_ERRORS as exc:
-                # Bad SQL / bad data -- retrying is futile and the upstream
-                # caller deserves a fast, accurate failure response.
+                # Bad SQL / bad data -- no retry.
                 last_error = f"{type(exc).__name__}: {exc}"
                 logger.error("Push fatal error for %s/%s (no retry): %s",
                              date, route_code or "ALL", exc)
@@ -223,34 +190,25 @@ class DbPusher:
         return {"success": False, "error": last_error or "All push attempts failed"}
 
     def _project_to_schema(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Translate the engine's CSV shape into the DB column shape.
-
-        Three independent rewrites: (1) PascalCase -> snake_case via the
-        rename map, (2) explainability columns folded into the single
-        ``reason_*`` slot the schema exposes, (3) any structural column
-        the engine didn't emit is back-filled with NULL so a legacy CSV
-        from a pre-explainability run still pushes cleanly.
-        """
+        """Translate engine CSV shape -> DB schema: rename, fold
+        explainability into ``reason_*``, NULL-fill missing columns."""
         rename = {k: v for k, v in _COL_MAP.items() if k in df.columns}
         out = df.rename(columns=rename).copy()
         out["generated_by"] = "API"
 
-        # Source -> reason_status: 1:1 string copy (defensive truncation).
+        # Source -> reason_status (truncated).
         if "Source" in df.columns:
             out["reason_status"] = df["Source"].astype(str).str.slice(0, _REASON_STATUS_MAX)
         else:
             out["reason_status"] = None
 
-        # WhyItem + WhyQuantity collapse into reason_explanation. The DB
-        # only has one explanation slot; concatenating preserves both
-        # signals in a single sentence the UI / auditor can read.
+        # WhyItem + WhyQuantity -> single reason_explanation slot.
         why_item = df["WhyItem"].astype(str) if "WhyItem" in df.columns else pd.Series([""] * len(df))
         why_qty = df["WhyQuantity"].astype(str) if "WhyQuantity" in df.columns else pd.Series([""] * len(df))
         composed = (why_item.fillna("") + " | " + why_qty.fillna("")).str.strip(" |")
         out["reason_explanation"] = composed.str.slice(0, _REASON_EXPLANATION_MAX)
 
-        # Confidence is 0..1 float in the engine; reason_confidence is INT
-        # 0..100 in the schema -> rescale.
+        # Confidence 0..1 float -> reason_confidence 0..100 int.
         if "Confidence" in df.columns:
             conf = pd.to_numeric(df["Confidence"], errors="coerce").fillna(0.0)
             out["reason_confidence"] = (conf.clip(0.0, 1.0) * 100).round().astype(int)

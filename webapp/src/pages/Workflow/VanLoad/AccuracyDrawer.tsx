@@ -39,49 +39,23 @@ interface Props {
   open: boolean;
   onClose: () => void;
   routeCode?: string;
-  /**
-   * Last day of the past-performance window. When the page already
-   * holds a user-selected date, pass it here so the drawer aligns with
-   * the headline van-load tile. Falls back to "yesterday" only when
-   * the caller has no date in scope.
-   */
+  /** Last day of the window; defaults to "yesterday" when caller has no date in scope. */
   endDate?: string;
 }
 
-/**
- * Past performance drawer. Reads canonical reconciled values from the
- * forecast frame the daily cron writes, so per-day totals match the
- * page-view tile by construction. Anchor scope: (route, item) pairs
- * with Predicted > 0 in the window. Wire shape and field semantics
- * are documented in src/types/forecast.ts.
- */
+/** Past-performance drawer; field semantics in src/types/forecast.ts. */
 export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endDateProp }: Props) {
-  // Past performance pivots on the most recent date the data actually
-  // covers (a real query, not a calendar offset) so the drawer never
-  // opens onto a zero-data weekend / holiday. Hook is static-tier
-  // cached so subsequent opens are instant after the first dashboard hit.
+  // Anchor on the data's actual last active date so the drawer never opens on a zero-data day.
   const { date: lastActiveDate, loading: lastActiveLoading } = useLastActiveDate();
 
-  // ``period`` is null until we know lastActiveDate -- gating downstream
-  // queries on a real anchor prevents a flicker of "no data" tiles
-  // computed against a calendar-default that gets corrected milliseconds
-  // later. The drawer renders a small loading state in the meantime.
+  // period stays null until lastActiveDate resolves -- prevents flicker against a calendar default.
   const [period, setPeriod] = useState<ReportingPeriod | null>(null);
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  // Reset filters + (re)seed the period whenever the drawer opens, the
-  // route changes, the parent's selected end-date moves, or the data's
-  // last active date shifts (e.g. after the morning data_import cron).
-  // The window ends at min(endDateProp - 1, lastActiveDate) so it
-  // never overlaps the page's currently-viewed planning day, never
-  // crosses into the future, and never lands beyond what the CSV
-  // actually covers. ISO strings compare lexicographically.
-  //
-  // Wait for ``useLastActiveDate`` to resolve so we always seed with a
-  // real anchor; if the CSV is empty (lastActiveDate stays null after
-  // the fetch settles), fall back to ``today`` so the drawer always
-  // renders -- the empty-state inside will surface "no activity" with
-  // the right copy instead of a permanent skeleton.
+  // (Re)seed period when the drawer opens, route changes, parent end-date moves, or last active shifts.
+  // Window ends at min(endDateProp - 1, lastActiveDate) so it never overlaps the planning day,
+  // never crosses into the future, and never lands past the CSV. Falls back to today if CSV is empty
+  // so the inner empty-state can surface the right copy.
   useEffect(() => {
     if (!open) return;
     if (lastActiveLoading) return;
@@ -193,9 +167,7 @@ interface ContentProps {
   data: NonNullable<ReturnType<typeof useReconciliationPastPerformance>["data"]>;
 }
 
-// Pure render: server pre-computes every number plus the one-line
-// insight banner. Client only formats and maps colour tokens; no
-// aggregation, no derived percentages, no client-side string mixing.
+// Pure render: server pre-computes everything; client only formats + maps colour tokens.
 function DrawerContent({ data }: ContentProps) {
   const t = data.totals;
 
@@ -235,11 +207,7 @@ function DrawerContent({ data }: ContentProps) {
         </div>
       )}
 
-      {/* Row 1 -- three hero tiles, plain numbers, canonical webapp
-          terms: "Actual van load" / "Recommended van load" /
-          "Actually sold". Border colour = the same hue used by the
-          matching bar in the chart below, so the eye maps tile -> bar
-          without a legend lookup. */}
+      {/* Row 1 hero tiles; border colour matches the chart bar below. */}
       <KpiRow>
         <MetricCard
           label="Actual van load"
@@ -322,10 +290,7 @@ function DrawerContent({ data }: ContentProps) {
         />
       </KpiRow>
 
-      {/* Row 2 -- two comparison tiles answering the questions a
-          dispatcher actually asks:
-          (1) of the SKUs that sold, how many did we cover? (forecast scope)
-          (2) under our load, how much less overnight stock?      (load shape) */}
+      {/* Row 2: SKU coverage (forecast scope) + leftovers saved (load shape). */}
       <KpiRow>
         <MetricCard
           label="SKU coverage"
@@ -417,11 +382,7 @@ function DrawerContent({ data }: ContentProps) {
         />
       </KpiRow>
 
-      {/* Two breakdown drilldowns above the chart -- the user picks the
-          aggregation level (category vs item) for the same columns:
-          Actual van load / Recommended van load / Actually sold /
-          Actual leftover / Recommended leftover. Both are server-sorted
-          and closed by default. */}
+      {/* Category + item drilldowns; server-sorted, collapsed by default. */}
       {categories.length > 0 && (
         <details className="rounded-lg border border-default bg-surface-raised">
           <summary className="cursor-pointer select-none px-4 py-3 text-body font-medium text-text-primary hover:bg-surface-sunken/40">
@@ -504,11 +465,7 @@ function DrawerContent({ data }: ContentProps) {
         </details>
       )}
 
-      {/* Grouped bar chart -- header toggle switches between the
-          three-bar "Van load" view (rep / recommended / sold) and the
-          two-bar "Leftovers" view (actual vs recommended leftover per
-          day). Same colour tokens as the tile borders above so the eye
-          maps tile -> bar without a legend lookup. */}
+      {/* Grouped bar chart -- toggle between Van load (3 bars) and Leftovers (2 bars). */}
       <BarChart
         title="Day-by-day comparison"
         subtitle={chartSubtitle}

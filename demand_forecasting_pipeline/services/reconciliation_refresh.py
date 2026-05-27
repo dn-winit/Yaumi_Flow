@@ -1,29 +1,8 @@
-"""
-Daily reconciliation refresh -- writes the carry chain + diagnostics +
-actual_sold for past + today into ``yf_sales_transactions``.
+"""Daily reconciliation refresh: writes carry chain + diagnostics + actual_sold for past+today.
 
-Architecture
-------------
-``yf_demand_forecast`` is purely the model output (predicted, p_demand,
-bounds, demand_class, etc.). The reconciliation columns (carry chain,
-engine math, envelope diagnostics) plus the actual_sold reality side
-live in ``yf_sales_transactions``. This module is the writer.
-
-Contract
---------
-- **Reads** the demand_forecast CSV mirror (kept fresh by data_import)
-  for raw model input, AND ``VW_GET_SALES_DETAILS`` for actual_sold.
-- **Computes** via ``services.reconciliation.enrich.enrich_with_load``
-  -- the same engine the recommendation pipeline and the API lazy
-  fallback use.
-- **Writes** to ``yf_sales_transactions`` via #temp + MERGE with the
-  natural key ``(trx_date, route_code, item_code)``. UPSERT semantics
-  so the daily cron covers both new today-rows and refreshes of
-  yesterday/etc.
-- **Idempotent** -- same inputs, same outputs, byte-identical.
-- **Past + today only**. Future dates are excluded by design (no actual
-  transactions yet -- can't reconcile what hasn't happened).
-- **Atomic per window** -- all rows land in one transaction.
+Reads demand_forecast CSV mirror + VW_GET_SALES_DETAILS; computes via enrich_with_load
+(same engine as recommend + API lazy fallback); writes yf_sales_transactions via #temp +
+MERGE on (trx_date, route_code, item_code). Idempotent, past+today only, atomic per window.
 """
 from __future__ import annotations
 
@@ -33,12 +12,17 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
+import numpy as np
 import pandas as pd
 import pyodbc
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import FATAL_DB_ERRORS, get_pool, with_db_retry
 from common.numeric import safe_float
+from common.sql_fragments import NET_SOLD_CASE_SQL, RETURNS_SUBQUERY_BODY_SQL
+from demand_forecasting_pipeline.services.cache_invalidation import (
+    invalidate_van_load_cache,
+)
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     enrich_with_load,
     forward_fill_closing,
@@ -47,34 +31,17 @@ from demand_forecasting_pipeline.services.reconciliation.enrich import (
 logger = logging.getLogger(__name__)
 
 
-# In-process serialisation for ``refresh_reconciliation``. Two concurrent
-# calls on overlapping (start, end) windows would race the MERGE -- SQL
-# Server's SERIALIZABLE level prevents corrupt rows, but the second writer
-# can still error out on a key-range lock collision and abandon its own
-# cascade. The lock keeps the second caller queued behind the first so
-# the cron, the API trigger, and any manual replay produce identical
-# state regardless of arrival order.
-#
-# Locking discipline (CRITICAL): the lock is held ONLY across the DB
-# write. It is released BEFORE the cascade HTTP POST so a slow cascade
-# can never block a second writer indefinitely (the cascade is itself
-# retried inside ``_cascade_data_import_refresh`` -- holding the global
-# lock across it would compound the wait).
+# Lock serialises overlapping refreshes; HELD ONLY across DB write (released before
+# cascade HTTP POST so a slow cascade can't queue a second writer indefinitely).
 _REFRESH_LOCK = threading.Lock()
 
-# Last successful refresh timestamp (UTC). Read under ``_REFRESH_LOCK``.
-# Used by the cron-context call below to short-circuit when the
-# data_import cascade already ran reconciliation within the last
-# ``CRON_SKIP_IF_RECENT_SECONDS`` window. Manual ``/refresh`` calls
-# bypass this guard via ``force=True`` so operators can always trigger
-# a fresh run on demand.
+# Last successful refresh (UTC); cron short-circuits when within the dedup
+# window (settings.reconciliation_cron_dedup_window_seconds). Manual /refresh
+# calls bypass via force=True.
 _LAST_REFRESH_AT: Optional[datetime] = None
-CRON_SKIP_IF_RECENT_SECONDS = 1800  # 30 min
 
 
-# Engine output column -> yf_sales_transactions column name.
-# Single source of truth for the renaming; the SQL builder below uses
-# the values, the projection step uses the keys.
+# Engine col -> yf_sales_transactions col; single source of truth for renaming.
 _RECON_COL_MAP: Dict[str, str] = {
     "opening_stock":               "opening_stock",
     "recommended_load":            "fresh_load",
@@ -91,8 +58,7 @@ _RECON_COL_MAP: Dict[str, str] = {
     "forecast_dormant":            "forecast_dormant",
 }
 
-# Natural key. No data_split -- yf_sales_transactions is split-agnostic
-# (transactions are a real-world fact; the split is a model concept).
+# Natural key; no data_split (transactions are real-world facts).
 _KEY_COLS = ("trx_date", "route_code", "item_code")
 
 # Boolean-typed target columns -- staged as BIT in temp table.
@@ -105,10 +71,19 @@ _BOOL_COLS = {
 
 _SALES_TARGET_TABLE = "[YaumiAIML].[dbo].[yf_sales_transactions]"
 
+# Columns that reflect REAL-WORLD truth catching up (late returns, end-of-day stock
+# adjustments). These ALWAYS update on re-merge -- including for past dates -- so
+# a stale actual_sold from morning gets corrected by evening's late returns.
+_REP_SIDE_COLS = frozenset({
+    "actual_sold",
+    "yaumi_opening_stock",
+    "yaumi_fresh_load",
+    "yaumi_total_van_load",
+    "yaumi_leftover",
+})
 
-# ---------------------------------------------------------------------------
+
 # Main entry point
-# ---------------------------------------------------------------------------
 
 def refresh_reconciliation(
     *,
@@ -127,8 +102,9 @@ def refresh_reconciliation(
         settings: optional override for tests.
         today: optional override for tests.
         force: When ``False``, the call short-circuits if another caller
-            already ran a successful refresh within
-            ``CRON_SKIP_IF_RECENT_SECONDS``. This is the cron-context
+            already ran a successful refresh within the configured dedup
+            window (``settings.reconciliation_cron_dedup_window_seconds``).
+            This is the cron-context
             backstop path: the 03:30 demand_forecasting cron used to
             re-run the entire reconciliation 30 minutes after the 03:00
             data_import cascade had already done the same work (~99s of
@@ -167,12 +143,13 @@ def refresh_reconciliation(
             last = _LAST_REFRESH_AT
         if last is not None:
             elapsed = (datetime.now(timezone.utc) - last).total_seconds()
-            if elapsed < CRON_SKIP_IF_RECENT_SECONDS:
+            dedup_window = int(getattr(s, "reconciliation_cron_dedup_window_seconds", 1800))
+            if elapsed < dedup_window:
                 logger.info(
                     "reconciliation_refresh_skipped_recent: last successful "
                     "refresh was %.0fs ago (<%ds threshold); 03:00 cascade "
                     "already covered this window",
-                    elapsed, CRON_SKIP_IF_RECENT_SECONDS,
+                    elapsed, dedup_window,
                 )
                 return {
                     "success": True,
@@ -194,6 +171,24 @@ def refresh_reconciliation(
     # POST below; see ``_REFRESH_LOCK`` docstring above.
     _REFRESH_LOCK.acquire()
     try:
+        # 0. Pre-refresh the demand_forecast CSV mirror from the DB.
+        #    The engine + BiasService both read this CSV; if a writer
+        #    (cron, /pipeline/inference, or a direct DbPusher call)
+        #    advanced yf_demand_forecast in the DB without triggering
+        #    the data_import cascade, the CSV would be stale and the
+        #    bias table would calibrate against the prior model
+        #    revision. Pre-refreshing here makes the chain self-healing
+        #    -- any path that lands new predictions in the DB is
+        #    automatically observed on the next reconciliation tick.
+        #    Skipped (logged) when data_import_url isn't configured;
+        #    the legacy "trust the upstream cascade" semantics still
+        #    apply for those deployments.
+        _cascade_data_import_refresh(
+            s,
+            dataset="demand_forecast",
+            lookback_days=int(getattr(s, "forecast_csv_refresh_lookback_days", 60)),
+        )
+
         # 1. Load demand_forecast CSV (raw model output)
         src = s.shared_data_path(s.demand_forecast_file)
         if not src.exists():
@@ -402,7 +397,7 @@ def refresh_reconciliation(
         write_df["item_code"]  = write_df["item_code"].astype(str)
 
         # 8. UPSERT into yf_sales_transactions
-        rows_updated = _upsert_sales_transactions(s, write_df)
+        rows_updated = _upsert_sales_transactions(s, write_df, today_dt=today_dt)
     finally:
         # Release BEFORE the cascade so a slow / retried HTTP round-trip
         # can never block a subsequent caller. The DB MERGE above is the
@@ -420,7 +415,9 @@ def refresh_reconciliation(
     #    on a fully successful POST -- on failure the cache stays warm
     #    with last-known-good data instead of going cold and forcing
     #    every reader to repopulate from a potentially stale CSV.
-    cascade_lookback = max(int(horizon_days_behind) + 2, 7)
+    pad = int(getattr(s, "reconciliation_cascade_lookback_pad_days", 2))
+    min_days = int(getattr(s, "reconciliation_cascade_lookback_min_days", 7))
+    cascade_lookback = max(int(horizon_days_behind) + pad, min_days)
     cascade = _cascade_data_import_refresh(
         s,
         dataset="sales_transactions",
@@ -429,6 +426,61 @@ def refresh_reconciliation(
 
     # 10. Cascade -> recommended_order regenerates for each refreshed date.
     recommended_order_cascade = _cascade_recommended_order_generate(s, window=window)
+
+    # 11. Cascade -> sales_supervision for EVERY date in the reconciliation
+    #     window. The earlier single-date version only invalidated today; a
+    #     30-day backfill would refresh past-date recs in the DB but leave
+    #     supervision rows orphaned because the invalidate POST only reached
+    #     today_dt.
+    #
+    #     For each date in [start, end], POST /session/internal/invalidate-day.
+    #     The endpoint:
+    #       (a) drops the in-memory session cache for that date so the next
+    #           reconcile tick re-fetches recs from the canonical DB table
+    #       (b) repairs yf_supervision_items rows where original_recommended_qty=0
+    #           by joining yf_recommended_orders for the true value
+    #       (c) recomputes the rolled-up route_performance_score / qty_fulfillment_rate
+    #
+    #     Best-effort per date: a supervision outage on one date must not
+    #     poison the others or the reconciler's own success contract.
+    # Per-date gating: a date whose recommended_order regen FAILED has no
+    # fresh recs to invalidate against, so skip it. But every date that DID
+    # regen successfully should still get its supervision repair. The earlier
+    # all-or-nothing gate (one failed rec-order date skipping supervision for
+    # the WHOLE window) was the bug -- a 30-day backfill with 1 transient
+    # failure left 29 days of supervision orphaned. ``pd`` is module-level;
+    # do NOT shadow with a local ``import pandas as pd`` inside this scope
+    # (would make pd a local symbol everywhere and break earlier refs).
+    if recommended_order_cascade.get("skipped") is True:
+        supervision_cascade = {
+            "skipped": True,
+            "reason": "recommended_order_cascade_skipped",
+        }
+    else:
+        ro_per_date = {entry.get("date"): entry for entry in recommended_order_cascade.get("per_date") or []}
+        start_d, end_d = window
+        dates = pd.date_range(start=start_d, end=end_d, freq="D").strftime("%Y-%m-%d").tolist()
+        per_date_results = []
+        all_ok = True
+        for d in dates:
+            ro_entry = ro_per_date.get(d) or {}
+            # If rec-order succeeded for this specific date OR was a no-op
+            # skip, the supervision repair still has something to align against.
+            if ro_entry.get("success") is True or ro_entry.get("skipped") is True:
+                r = _cascade_supervision_invalidate(s, date=d)
+                per_date_results.append({"date": d, **r})
+                if not (r.get("success") is True or r.get("skipped") is True):
+                    all_ok = False
+            else:
+                per_date_results.append({"date": d, "skipped": True,
+                                          "reason": "recommended_order_failed_for_this_date"})
+                all_ok = False
+        supervision_cascade = {
+            "skipped": False,
+            "success": all_ok,
+            "dates_processed": len(dates),
+            "per_date": per_date_results,
+        }
 
     # Honest success contract. The DB write landed atomically -- but if
     # the cascade failed, the CSV mirror downstream readers see is now
@@ -467,6 +519,7 @@ def refresh_reconciliation(
         "duration_seconds": round((pd.Timestamp.now() - t0).total_seconds(), 2),
         "cascade": cascade,
         "recommended_order_cascade": recommended_order_cascade,
+        "supervision_cascade": supervision_cascade,
     }
     if not cascade_ok:
         payload["error"] = (
@@ -511,9 +564,15 @@ def _cascade_recommended_order_generate(
 
     def _post_once(d: str) -> Dict[str, Any]:
         with httpx.Client(timeout=timeout) as client:
+            # Re-entrancy header: we ARE the reconciliation_refresh that
+            # populates yf_sales_transactions; if RO's auto-heal called back
+            # into reconciliation/refresh while we hold its locks, the
+            # cascade would deadlock. RO reads this header and short-circuits
+            # ``_ensure_carry_chain_present`` -- it trusts our state.
             resp = client.post(
                 f"{url_base}/api/v1/recommended-order/generate",
                 json={"date": d, "force": True},
+                headers={"X-Skip-Carry-Chain-Heal": "1"},
             )
             resp.raise_for_status()
             body = resp.json()
@@ -561,6 +620,43 @@ def _cascade_recommended_order_generate(
     }
 
 
+def _cascade_supervision_invalidate(
+    s: Settings, *, date: str,
+) -> Dict[str, Any]:
+    """POST sales_supervision /session/internal/invalidate-day so cached
+    sessions drop their stale rec snapshot. Best-effort: a supervision
+    outage must not poison the reconciler's own success contract -- by
+    the time this fires, DB + downstream CSVs are already consistent.
+    """
+    url_base = (getattr(s, "sales_supervision_url", "") or "").strip().rstrip("/")
+    if not url_base:
+        return {"skipped": True, "reason": "DF_SALES_SUPERVISION_URL not set"}
+
+    import httpx
+    timeout = float(getattr(s, "sales_supervision_cascade_timeout_seconds", 10.0))
+    try:
+        with httpx.Client(timeout=timeout) as client:
+            resp = client.post(
+                f"{url_base}/api/v1/supervision/session/internal/invalidate-day",
+                params={"date": date},
+            )
+            resp.raise_for_status()
+            payload = resp.json()
+        return {
+            "skipped": False,
+            "success": bool(payload.get("success")),
+            "auto_visit_dropped": payload.get("auto_visit_dropped"),
+            "registry_dropped": payload.get("registry_dropped"),
+        }
+    except Exception as exc:
+        logger.warning(
+            "supervision invalidate-day cascade failed for date=%s: %s; "
+            "supervisor sessions will pick up fresh recs after TTL expiry",
+            date, exc,
+        )
+        return {"skipped": False, "success": False, "error": str(exc)}
+
+
 # ---------------------------------------------------------------------------
 # Actual sold lookup (read-only YaumiLive)
 # ---------------------------------------------------------------------------
@@ -570,9 +666,29 @@ def _fetch_actual_sold(
     start: Any,
     end: Any,
 ) -> pd.DataFrame:
-    """Pull SUM(QuantityInPCs) per (route, item, date) from
+    """Pull net actual_sold per (route, item, date) from
     VW_GET_SALES_DETAILS for the [start, end] window. YaumiLive is
     READ-ONLY -- this is a query, never a write.
+
+    Return-netting (mirrors ``data_import.core.queries.sales_recent`` --
+    the canonical netting pattern; keep the two in lockstep):
+
+      * Each sales-invoice line ``(TrxCode, ItemCode)`` LEFT JOINs the
+        sum of any return rows pointing back via
+        ``ReturnItem_InvoiceRef``. The subtraction lands on the
+        ORIGINAL invoice date (lag-aware), which is the right
+        semantic: a return on day +5 reduces day-0's demand, not
+        day +5's.
+      * Line-level clamp at 0 so an over-return (data error) cannot
+        push a line negative and mask other lines in the same group.
+      * Returns subquery carries the SAME route + date predicates as
+        the outer query, so it never scans rows the outer wouldn't
+        have read anyway -- bounded subset, not a second full pass.
+      * Returns can only post-date their original invoice; a return
+        outside the window can only point to an invoice that is also
+        outside the window (which the outer query already excludes).
+        So bounding the subquery by the same window loses no
+        in-window netting.
 
     Raw ``pyodbc.connect`` here is intentional (vs the AIML pool):
     one-shot live cut-through fired once per cron tick, so a pool
@@ -593,26 +709,56 @@ def _fetch_actual_sold(
     # misconfiguration cannot silently drop rows; a populated registry
     # is the production path.
     routes = list(getattr(s, "live_route_codes", []) or [])
-    route_clause = ""
-    params: list = [str(start), str(end)]
-    if routes:
-        route_clause = f"AND RouteCode IN ({','.join(['?'] * len(routes))})"
-        params.extend(str(r) for r in routes)
+    route_ph = ",".join("?" for _ in routes) if routes else ""
 
+    # Outer params (sales invoice WHERE) then inner subquery params
+    # (return TrxTypes + route filter + date window). Order matters:
+    # the subquery is embedded in the FROM/LEFT JOIN, which SQL Server
+    # binds left-to-right with the outer's params.
+    outer_params: list = [
+        s.sales_item_type,
+        s.sales_invoice_trx_type,
+    ]
+    inner_params: list = [
+        s.bad_return_trx_type,
+        s.good_return_trx_type,
+    ]
+    if routes:
+        outer_params.extend(str(r) for r in routes)
+        inner_params.extend(str(r) for r in routes)
+    outer_params.extend([str(start), str(end)])
+    inner_params.extend([str(start), str(end)])
+
+    route_clause_outer = f"AND s.RouteCode IN ({route_ph})" if routes else ""
+    route_clause_inner = f"AND r.RouteCode IN ({route_ph})" if routes else ""
+
+    # Both the netting CASE and the returns subquery come from the
+    # shared ``common.sql_fragments`` module so this query and
+    # ``data_import.core.queries.sales_recent`` cannot drift on the
+    # netting semantics. Any future change to the formula propagates
+    # to both call sites in lockstep.
+    returns_subquery = RETURNS_SUBQUERY_BODY_SQL.format(
+        view="[YaumiLive].[dbo].[VW_GET_SALES_DETAILS]",
+        route_clause=route_clause_inner,
+        date_clause="AND CAST(r.TrxDate AS DATE) BETWEEN ? AND ?",
+    )
     sql = f"""
     SELECT
-        CAST(TrxDate AS DATE) AS trx_date,
-        RouteCode             AS route_code,
-        ItemCode              AS item_code,
-        SUM(QuantityInPCs)    AS actual_sold
-    FROM [YaumiLive].[dbo].[VW_GET_SALES_DETAILS] WITH (NOLOCK)
-    WHERE ItemType = 'OrderItem'
-      AND TrxType  = 'SalesInvoice'
-      AND QuantityInPCs > 0
-      AND CAST(TrxDate AS DATE) BETWEEN ? AND ?
-      {route_clause}
-    GROUP BY CAST(TrxDate AS DATE), RouteCode, ItemCode;
+        CAST(s.TrxDate AS DATE) AS trx_date,
+        s.RouteCode             AS route_code,
+        s.ItemCode              AS item_code,
+        SUM({NET_SOLD_CASE_SQL}) AS actual_sold
+    FROM [YaumiLive].[dbo].[VW_GET_SALES_DETAILS] s WITH (NOLOCK)
+    LEFT JOIN ({returns_subquery}) rj
+        ON s.TrxCode  = rj.InvoiceRef
+       AND s.ItemCode = rj.ItemCode
+    WHERE s.ItemType = ?
+      AND s.TrxType  = ?
+      {route_clause_outer}
+      AND CAST(s.TrxDate AS DATE) BETWEEN ? AND ?
+    GROUP BY CAST(s.TrxDate AS DATE), s.RouteCode, s.ItemCode;
     """
+    params = inner_params + outer_params
     try:
         with pyodbc.connect(s.live_connection_string(), autocommit=False) as conn:
             cur = conn.cursor()
@@ -815,7 +961,9 @@ def _fetch_yaumi_loading(
 # ---------------------------------------------------------------------------
 
 @with_db_retry
-def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
+def _upsert_sales_transactions(
+    s: Settings, write_df: pd.DataFrame, *, today_dt: Any,
+) -> int:
     """Stage -> MERGE write_df into yf_sales_transactions.
 
     UPSERT semantics: WHEN MATCHED THEN UPDATE, WHEN NOT MATCHED THEN
@@ -857,19 +1005,34 @@ def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
     # fast_executemany consistently; we ship NaN for missing numerics
     # and None only for the BIT cols. Build the records tuple in the
     # exact order of staging columns.
+    #
+    # Vectorised build: ``iterrows()`` over a tens-of-thousands-of-rows
+    # frame INSIDE a HOLDLOCK+UPDLOCK transaction held the SERIALIZABLE
+    # range lock open for minutes; the column-wise pass below builds the
+    # same row tuples in NumPy and is typically 50-100x faster.
     all_cols = list(_KEY_COLS) + target_cols
-    records = []
-    for _, r in write_df.iterrows():
-        row = []
+    if write_df.empty:
+        records: list[tuple] = []
+    else:
+        col_arrays: list[object] = []
         for c in all_cols:
-            v = r.get(c)
+            series = write_df[c] if c in write_df.columns else pd.Series(
+                [None] * len(write_df), index=write_df.index,
+            )
             if c in _BOOL_COLS:
-                row.append(int(v) if pd.notna(v) else 0)
+                # BIT NULL: ship int 0/1; missing -> 0 (matches the
+                # row-level branch above).
+                vals = pd.to_numeric(series, errors="coerce").fillna(0).astype(int).to_numpy()
             elif c in _KEY_COLS:
-                row.append(str(v))
+                vals = series.astype(str).to_numpy()
             else:
-                row.append(float(v) if pd.notna(v) else None)
-        records.append(tuple(row))
+                # FLOAT NULL: pandas->numpy with object dtype so we can
+                # mix float + None per pyodbc's fast_executemany contract.
+                numeric = pd.to_numeric(series, errors="coerce")
+                vals = np.where(numeric.notna(), numeric, None).astype(object)
+            col_arrays.append(vals)
+        # zip(*cols) emits one tuple per row, matching the previous shape.
+        records = list(zip(*col_arrays))
 
     pool = get_pool(
         s.db.connection_string(),
@@ -897,13 +1060,53 @@ def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
     col_list = ", ".join(f"[{c}]" for c in all_cols)
     placeholders = ", ".join("?" for _ in all_cols)
     src_cols = ", ".join(f"S.[{c}]" for c in all_cols)
-    set_clause = ", ".join(f"T.[{c}] = S.[{c}]" for c in target_cols + ["updated_at"])
     on_clause = " AND ".join(f"T.[{k}] = S.[{k}]" for k in _KEY_COLS)
+
+    # MODEL-SIDE columns are frozen for past dates when the freeze flag is on:
+    # a retrain would otherwise silently rewrite yesterday's "what we recommended"
+    # history, breaking past-performance audit trails. Rep-side cols (actual_sold,
+    # yaumi_*) always update so late returns + closing-stock corrections flow in.
+    #
+    # Threshold is Python's ``today_dt`` (computed under refresh_reconciliation's
+    # UTC clock), NOT SQL Server's GETDATE() -- if the DB instance lives in a
+    # non-UTC timezone, GETDATE() can be one day ahead of the trx_date values
+    # Python writes, which would incorrectly freeze today's row at the day boundary.
+    # The string is server-controlled (date arithmetic, never user input), safe
+    # to inline.
+    #
+    # Wraps in COALESCE-style fallback: if the existing target row has NULL in a
+    # model col (e.g. very first MERGE landed during a partial engine output),
+    # take the new value rather than perpetually freezing NULL.
+    freeze_past = bool(getattr(s, "reconciliation_freeze_past_model_cols", True))
+    # Canonical YYYY-MM-DD via strftime (str()[:10] worked but was a fragile
+    # representation contract -- date/datetime/Timestamp all differ).
+    today_iso = today_dt.strftime("%Y-%m-%d")
+    set_parts: list[str] = []
+    for c in target_cols:
+        if (not freeze_past) or (c in _REP_SIDE_COLS):
+            set_parts.append(f"T.[{c}] = S.[{c}]")
+        else:
+            set_parts.append(
+                f"T.[{c}] = CASE "
+                f"WHEN S.[trx_date] >= CAST('{today_iso}' AS DATE) THEN S.[{c}] "
+                f"WHEN T.[{c}] IS NULL THEN S.[{c}] "
+                f"ELSE T.[{c}] END"
+            )
+    set_parts.append("T.[updated_at] = GETDATE()")
+    set_clause = ", ".join(set_parts)
 
     with pool.acquire() as conn:
         cur = conn.cursor()
         try:
             cur.fast_executemany = True
+            # SERIALIZABLE + HOLDLOCK/UPDLOCK matches db_pusher's pattern.
+            # Without these, the MERGE runs at READ COMMITTED and a
+            # concurrent INSERT can sneak between MATCH and INSERT --
+            # ``@with_db_retry`` catches the deadlock today, but
+            # eliminating the race is strictly better than retrying it.
+            # Range locks are released at commit; the in-process
+            # ``_REFRESH_LOCK`` keeps the window short.
+            cur.execute("SET TRANSACTION ISOLATION LEVEL SERIALIZABLE;")
             cur.execute(f"""
                 CREATE TABLE #sales_stage (
                     {key_ddl},
@@ -915,7 +1118,7 @@ def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
                 records,
             )
             cur.execute(f"""
-                MERGE {_SALES_TARGET_TABLE} AS T
+                MERGE {_SALES_TARGET_TABLE} WITH (HOLDLOCK, UPDLOCK) AS T
                 USING (
                     SELECT *, GETDATE() AS updated_at FROM #sales_stage
                 ) AS S
@@ -977,26 +1180,12 @@ def _upsert_sales_transactions(s: Settings, write_df: pd.DataFrame) -> int:
 _CASCADE_RETRY_DELAY_SECONDS = 5.0
 
 
-def _invalidate_van_load_cache() -> None:
-    """Drop the in-process VanLoadService cache so the next read repopulates
-    from the freshly-mirrored CSV.
-
-    ArtifactService is NOT invalidated here: its cache is keyed on
-    ``(path, st_mtime_ns, st_size)`` so the CSV mtime change that
-    data_import performs on the atomic rename is itself the invalidation
-    signal -- the next ``_read_df`` observes a new snapshot tuple and
-    re-parses. Adding an explicit ``invalidate_cache()`` call would be a
-    redundant memory-only hint that doesn't change correctness. The
-    VanLoadService cache, by contrast, is TTL-based and cannot see the
-    mtime flip, so it does need an explicit poke.
-    """
-    try:
-        from demand_forecasting_pipeline.api.dependencies import get_van_load_service
-        get_van_load_service().invalidate()
-    except Exception as inv_exc:
-        logger.warning(
-            "van_load_cache_invalidate_failed before cascade: %s", inv_exc,
-        )
+# Cache invalidation helper lives in ``services.cache_invalidation`` --
+# see the module for the rationale. ArtifactService is deliberately NOT
+# invalidated by the reconciliation cron: its cache is keyed on
+# ``(path, st_mtime_ns, st_size)``, so the atomic-rename mtime flip
+# data_import performs is itself the invalidation signal. Only the
+# TTL-based VanLoadService needs an explicit poke.
 
 
 def _post_cascade_once(
@@ -1073,10 +1262,9 @@ def _cascade_data_import_refresh(
                 dataset, result.get("error"),
             )
 
-    # Invalidate the van-load cache ONLY on a fully successful cascade
-    # -- see docstring above for why pre-emptive invalidation was wrong.
+    # Invalidate the van-load cache ONLY on a fully successful cascade.
     if result.get("success"):
-        _invalidate_van_load_cache()
+        invalidate_van_load_cache(reason="reconciliation-refresh")
 
     return {"skipped": False, **result}
 

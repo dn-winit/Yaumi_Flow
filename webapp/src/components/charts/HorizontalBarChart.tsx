@@ -35,12 +35,7 @@ interface Props {
   emptyMessage?: string;
 }
 
-/**
- * Compact horizontal bar chart for top-N rankings. Cleaner than a table
- * when the goal is "show me the leader board, eyeball the gaps." Bars are
- * sorted by the caller (largest first reads best). Each bar shows its
- * formatted value at the end so users don't need to read the axis.
- */
+/** Horizontal bar chart for top-N rankings; caller pre-sorts, bars show their formatted value. */
 export default function HorizontalBarChart({
   data,
   rowHeight = 36,
@@ -52,8 +47,7 @@ export default function HorizontalBarChart({
     return <EmptyState title={emptyMessage} />;
   }
 
-  // Total height grows with N so the bars never get squashed. Axis padding
-  // covers tick labels at the ends.
+  // Grows with N so bars never squash; +24 covers axis tick labels.
   const height = data.length * rowHeight + 24;
 
   return (

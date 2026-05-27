@@ -1,26 +1,10 @@
 """
 Redistribution view-shaper -- pure, deterministic.
 
-One algorithm, three callers:
-
-  * ``/session/visit``           -- live, post-process_visit.
-  * ``/session/saved``           -- replay across visited customers.
-  * ``/session/unplanned``       -- drop-in invoices.
-
-All three converge on the same code path so the panel renders identical
-bytes whether the view came from a live tap or a page reload. No
-mutation, no DB access, no RNG. The shaper reads session state and
-emits a ``RedistributionView``. Sorting is fully specified so two
-equivalent session states always emit the same JSON.
-
-The cumulative buffer ledger (:func:`compute_buffer_ledger`) walks the
-session in route order and tracks, per (customer, item), the running
-spare van-load state immediately before and after each visit. Each
-per-customer shaper call consults the ledger so allocation decisions
-account for every earlier visit's deposits and withdrawals. The running
-state is NOT surfaced on the wire -- only the resulting recipient
-entries are -- but the ledger still drives whether and how much each
-entry carries.
+Single algorithm shared by /session/visit, /session/saved, and /session/unplanned
+so the panel renders identical bytes regardless of caller. No mutation, no DB,
+no RNG. ``compute_buffer_ledger`` walks the session in route order so each
+shaper call accounts for every earlier visit's deposits and withdrawals.
 """
 
 from __future__ import annotations
@@ -38,13 +22,7 @@ from sales_supervision.models.schemas import (
     SessionItem,
 )
 
-# Wire-schema imports are deferred to call time inside the shaper.
-# ``sales_supervision.api.schemas`` lives under the ``api`` package
-# whose ``__init__.py`` pulls in ``app.create_app`` -- a chain that
-# transitively imports ``core.session`` and therefore THIS module.
-# A top-level import here would deadlock on first import; deferring
-# avoids the cycle without giving up the strict ConfigDict(extra=
-# 'forbid') wire contract.
+# Wire-schema imports deferred inside the shaper to break the api -> core import cycle.
 if TYPE_CHECKING:  # pragma: no cover -- import for type checkers only
     from sales_supervision.api.schemas import RedistributionView
 
@@ -65,9 +43,7 @@ REDISTRIBUTION_DIRECTION_REDUCE = "reduce"
 
 
 def _is_planned_customer(c: SessionCustomer) -> bool:
-    """Inverse of :func:`is_unplanned_customer`. An empty-items customer
-    (rare legacy stub) is classified as planned so the shaper never
-    silently treats an unknown row as a drop-in."""
+    """Inverse of is_unplanned_customer; empty-items stubs count as planned."""
     return not is_unplanned_customer(c)
 
 
@@ -84,17 +60,7 @@ def _item_name_lookup(session: Session) -> Dict[str, str]:
 def _customer_item_contributions(
     cust: SessionCustomer, *, is_drop_in: bool,
 ) -> Dict[str, int]:
-    """Signed per-item contribution map for one customer.
-
-    Positive: surplus deposited into the buffer (planned under-fulfill).
-    Negative: excess-demand withdrawn from the buffer or downstream
-    (planned over-fulfill, or any drop-in actual).
-
-    Drop-in rows pinned onto an otherwise-planned customer are treated
-    as excess-demand (no plan reservation to compare to). One canonical
-    contribution rule -- the shaper and the ledger both call this so
-    they can never drift.
-    """
+    """Signed per-item contribution: positive = surplus into buffer, negative = excess demand."""
     out: Dict[str, int] = {}
     if is_drop_in:
         for it in cust.items:
@@ -110,10 +76,7 @@ def _customer_item_contributions(
             if qty > 0:
                 out[it.item_code] = out.get(it.item_code, 0) - qty
             continue
-        # Use ``recommended_qty`` rather than ``effective_recommended``
-        # so a downstream adjustment from an earlier visit doesn't get
-        # re-counted as additional movement here. The supervisor reasons
-        # about the ORIGINAL plan vs the ACTUAL delivery.
+        # Use recommended_qty (original plan), not effective_recommended, to avoid double-counting earlier adjustments.
         rec = max(0, int(it.recommended_qty or 0))
         act = max(0, int(it.actual_qty or 0))
         diff = rec - act
@@ -125,17 +88,7 @@ def _customer_item_contributions(
 def _compute_van_load_and_planned(
     session: Session,
 ) -> tuple[Dict[str, int], Dict[str, int]]:
-    """Pre-compute ``van_load[i]`` and ``total_planned[i]`` once per call.
-
-    ``van_load[i]`` is the truck load for item ``i``. Sourced from
-    ``SessionItem.van_inventory_qty`` across planned rows; we take MAX
-    to absorb any per-row drift (zeros from a partial join, lower values
-    from a stale snapshot). Higher is the less-punitive interpretation
-    for the customer being audited.
-
-    ``total_planned[i]`` is the sum of ``recommended_qty`` across planned
-    customers. Drop-ins are excluded; their reservations were never made.
-    """
+    """Pre-compute van_load[i] (MAX across rows to absorb drift) and total_planned[i] for planned customers."""
     van_load: Dict[str, int] = {}
     total_planned: Dict[str, int] = {}
     for cust in session.customers.values():
@@ -162,12 +115,7 @@ def _eligible_recipients(
     source: Optional[SessionCustomer],
     item_code: str,
 ) -> List[tuple[int, str, SessionCustomer, SessionItem]]:
-    """Planned downstream candidates for ``item_code``.
-
-    Downstream means: tier != UNPLANNED, recommended_qty > 0, and
-    either not-yet-visited (seq == 0) or later on the route than the
-    source. Caller sorts the returned list by (visit_sequence, code).
-    """
+    """Planned downstream candidates for item_code (tier != UNPLANNED, rec > 0, seq=0 or seq > source)."""
     src_seq = int(source.visit_sequence) if source is not None else 0
     src_code = source.customer_code if source is not None else ""
     out: List[tuple[int, str, SessionCustomer, SessionItem]] = []
@@ -201,15 +149,7 @@ def _clean_name(name: Optional[str]) -> str:
     return (name or "").strip()
 
 
-# ----------------------------------------------------------------------
-# Cumulative buffer ledger
-#
-# As visits land in route order each one either deposits into or
-# withdraws from a running per-item spare buffer. The ledger walks the
-# session in (visit_sequence ASC, customer_code ASC) order and records,
-# per (customer, item), the buffer state immediately before and after
-# that visit. Pure: same session in, byte-identical ledger out.
-# ----------------------------------------------------------------------
+# Cumulative buffer ledger: walks session in (seq ASC, code ASC) tracking per-item spare van-load.
 
 
 def _visited_walk_order(session: Session) -> List[SessionCustomer]:
@@ -222,17 +162,7 @@ def _visited_walk_order(session: Session) -> List[SessionCustomer]:
 def compute_buffer_ledger(
     session: Session,
 ) -> Dict[Tuple[str, str], Tuple[int, int]]:
-    """Walk visited customers in route order; return per-(cust,item) state.
-
-    For each visited customer C and each item C interacted with, the
-    returned map carries ``(buffer_before, buffer_after)`` -- the spare
-    van-load state immediately before C consumed / deposited, and
-    immediately after. Values are SIGNED here. The shaper uses these
-    pre/post states to drive allocation; nothing about the buffer is
-    surfaced on the wire.
-
-    Pure function: no DB, no mutation of ``session``.
-    """
+    """Per-(cust,item) signed (buffer_before, buffer_after) across visited customers in route order. Pure."""
     ledger: Dict[Tuple[str, str], Tuple[int, int]] = {}
     van_load, total_planned = _compute_van_load_and_planned(session)
 
@@ -276,32 +206,13 @@ def shape_redistribution_view(
     total_planned: Optional[Dict[str, int]] = None,
     item_names: Optional[Dict[str, str]] = None,
 ) -> "RedistributionView":
-    """Compute the redistribution view for one visited customer.
+    """Pure shaper -- emits one customer's RedistributionView.
 
-    Pure function -- no DB, no mutation of ``session``. Same input,
-    byte-identical output.
-
-    Buffer-aware semantics
-    ----------------------
-    For each item ``i`` on the truck the initial buffer is
-    ``van_load[i] - total_planned[i]`` (can be negative when the truck
-    is over-committed). When ``buffer_ledger`` is supplied the per-item
-    pre-state reflects every earlier visit's contribution.
-
-    Surplus case (planned source under-fulfilled an item):
-      * buffer >= 0 -> surplus grows the buffer; no downstream entry.
-      * buffer  < 0 -> downstream absorbs up to ``min(surplus, -buffer)``;
-        leftover grows the buffer.
-
-    Excess-demand case (planned over-bought OR drop-in):
-      * ``min(excess, max(buffer, 0))`` is absorbed by the buffer.
-      * The remainder encroaches on downstream allocations through
-        ``_eligible_recipients`` capacity.
-
-    Pre-computed ``van_load`` / ``total_planned`` / ``item_names`` can be
-    passed in by the orchestrators so an N-customer replay walks the
-    session once instead of N times. When omitted the shaper computes
-    them locally (single-customer / unit-test path).
+    Initial buffer per item is ``van_load[i] - total_planned[i]``; when ``buffer_ledger``
+    is supplied the per-item pre-state reflects all earlier visits. Surplus grows the
+    buffer (or fills downstream shortfalls when buffer is negative); excess demand is
+    absorbed by buffer first then encroaches on downstream. Optional pre-computed maps
+    let orchestrators replay N customers with O(session) work.
     """
     from sales_supervision.api.schemas import (
         RedistributionEntry as WireRedistributionEntry,
@@ -345,10 +256,7 @@ def shape_redistribution_view(
                 buffer_i = vl - tp
 
             entries: List[WireRedistributionEntry] = []
-            # Total source surplus on this item (positive) -- used to
-            # split into "distributed downstream" vs "kept on truck".
-            # Only meaningful for the ADD direction; stays 0 for the
-            # excess-demand / drop-in path.
+            # Splits into distributed downstream vs kept on truck; only meaningful for ADD direction.
             surplus_total = 0
 
             if signed > 0:
@@ -403,17 +311,11 @@ def shape_redistribution_view(
                             direction=REDISTRIBUTION_DIRECTION_REDUCE,
                         ))
 
-            # ``keptOnTruck`` -- surplus units that didn't reach any
-            # downstream recipient (ADD direction only; the REDUCE side
-            # records downstream customers losing share, never a source
-            # surplus). Computed as the residual of ``surplus_total``
-            # minus everything distributed.
+            # keptOnTruck = surplus not absorbed downstream (ADD direction only).
             if signed > 0:
                 distributed = sum(int(e.quantity) for e in entries)
                 kept_on_truck = max(0, surplus_total - distributed)
-                # Identity assertion: distributed + kept must equal total
-                # surplus. Surface a loud log warning if drift ever shows
-                # up -- the shaper would be off-contract.
+                # Identity: distributed + kept must equal surplus_total.
                 if distributed + kept_on_truck != surplus_total:
                     logger.warning(
                         "redistribution identity drift: source=%s item=%s "
@@ -424,9 +326,7 @@ def shape_redistribution_view(
             else:
                 kept_on_truck = 0
 
-            # Surface the group when at least one recipient line exists
-            # or the source kept unsold stock on the van. Empty-empty
-            # groups would render as no-op rows.
+            # Suppress empty-empty groups (no recipients and nothing kept).
             if entries or kept_on_truck > 0:
                 entries.sort(key=lambda e: (-e.quantity, e.to))
                 groups.append(RedistributionGroup(
@@ -441,8 +341,7 @@ def shape_redistribution_view(
 
         return RedistributionView(groups=groups)
     except Exception as exc:
-        # Safe default -- empty view. The wire contract is preserved
-        # regardless of failure.
+        # Safe default -- empty view preserves wire contract.
         logger.exception(
             "shape_redistribution_view failed for %s (drop_in=%s): %s",
             source_customer_code, is_drop_in, exc,
@@ -454,12 +353,7 @@ def compute_redistributions_for_saved_visits(
     session: Session,
     visited_codes_in_order: List[str],
 ) -> Dict[str, "RedistributionView"]:
-    """Replay redistribution for every planned-visited customer.
-
-    A single cumulative buffer ledger + van/planned/name maps are
-    computed once and threaded into every per-customer shaper call --
-    O(session) total work, not O(visited * session).
-    """
+    """Replay redistribution for every visited customer in O(session) by sharing the ledger/maps."""
     ledger = compute_buffer_ledger(session)
     van_load, total_planned = _compute_van_load_and_planned(session)
     names = _item_name_lookup(session)
@@ -480,13 +374,7 @@ def compute_redistribution_for_unplanned(
     session: Session,
     dropin_items_per_customer: Dict[str, List[Dict[str, Any]]],
 ) -> Dict[str, "RedistributionView"]:
-    """Shape the drop-in redistribution view for each drop-in customer.
-
-    For each drop-in we materialise a synthetic ``SessionCustomer`` on
-    a copy of the session so the shaper sees the drop-in's actuals as
-    if they were a tier=UNPLANNED row, then runs the same allocation
-    pass. The original session is not mutated.
-    """
+    """Shape redistribution per drop-in via a synthetic tier=UNPLANNED row on a session copy."""
     if not dropin_items_per_customer:
         return {}
 

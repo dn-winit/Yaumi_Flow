@@ -44,13 +44,35 @@ function statusLabel(s: StepStatus): string {
 const fmtTimestamp = (ts: string | null): string => (ts ? fmtDateTime(ts) : "");
 
 /* ------------------------------------------------------------------ */
+/*  Per-class accuracy subtitle for the Baseline accuracy tile          */
+/* ------------------------------------------------------------------ */
+
+const SEPARATOR = "·"; // middle dot, matches the per-class spec.
+
+/** Per-class accuracy line under the Baseline tile; null when no winners (caller fallback). */
+function PerClassAccuracyLine({
+  winners,
+}: {
+  winners: { demand_class: string; wape: number }[];
+}) {
+  if (!winners.length) return null;
+  const parts = winners.map((w) => {
+    const cls = w.demand_class.charAt(0).toUpperCase() + w.demand_class.slice(1).toLowerCase();
+    const accuracy = Math.round(100 - w.wape);
+    return `${cls} ${accuracy}%`;
+  });
+  return (
+    <div className="text-caption text-text-tertiary mt-0.5">
+      {parts.join(` ${SEPARATOR} `)}
+    </div>
+  );
+}
+
+/* ------------------------------------------------------------------ */
 /*  Step-flow visualisation                                             */
 /* ------------------------------------------------------------------ */
 
-/**
- * Connector between step ``i`` and ``i+1`` lights up brand-coloured as
- * soon as step ``i+1`` has progressed past idle.
- */
+/** Connector i->i+1 lights up once step i+1 is past idle. */
 function connectorActive(next: StepStatus): boolean {
   return next === "completed" || next === "running" || next === "failed";
 }
@@ -111,12 +133,7 @@ function Connector({ active, vertical }: { active: boolean; vertical?: boolean }
   );
 }
 
-/**
- * The ONLY client-side compute that survives this page: an animation
- * tick for the running step's elapsed-time line. Backend can't push
- * per-second updates without SSE, and the alternative (showing a
- * stale "Running for Xs" until the next status poll) feels frozen.
- */
+/** Per-second tick for the running step's elapsed line (no SSE, so client-side animation). */
 function RunningElapsed({
   startedAt,
   lastSuccessSeconds,
@@ -244,17 +261,14 @@ function HeaderActions({ refetchStatus, anyRunning }: HeaderActionsProps) {
           setState("done");
           toast(labels.startedToast, "info");
         } else {
-          // Server refused (guard / preflight): payload is 200 OK with
-          // ``success: false`` -- show the server's reason verbatim.
+          // Guard/preflight refusal -- 200 OK + success:false; show reason verbatim.
           setState("error");
           toast(result?.message || labels.refusedFallback, "danger");
         }
         refetchStatus();
         setTimeout(() => setState("idle"), result?.success ? 3000 : 4000);
       } catch (err) {
-        // Surface the actual error verbatim -- a swallowed catch made
-        // every backend 5xx look like the same "failed to start" message
-        // and hid the real cause from ops.
+        // Surface verbatim -- swallowed errors made every 5xx look identical to ops.
         const detail = err instanceof Error ? err.message : String(err ?? "");
         const msg = detail ? `${labels.threwToast}: ${detail}` : labels.threwToast;
         setState("error");
@@ -286,9 +300,7 @@ function HeaderActions({ refetchStatus, anyRunning }: HeaderActionsProps) {
     [runTrigger, triggerInference],
   );
 
-  // Both buttons disable when any pipeline is running OR any local
-  // trigger is in flight. The button currently spinning stays
-  // interactive so its loading indicator renders.
+  // Disable when any pipeline runs or a trigger is in flight; the spinning button stays interactive.
   const disableTrain = (anyBusy || anyRunning) && trainState !== "loading";
   const disableInference = (anyBusy || anyRunning) && inferState !== "loading";
 
@@ -334,15 +346,12 @@ export default function PipelinePage() {
     error: summaryError,
   } = useForecastSummary();
 
-  // Show the spinner while EITHER query is loading. The previous
-  // ``&&`` gate let one half resolve into "--" / empty stepper before
-  // the other landed.
+  // OR-gate so the page never paints half-resolved.
   if (statusLoading || summaryLoading) {
     return <Loading message="Loading pipeline..." />;
   }
 
-  // Surface backend failures instead of silently rendering blanks --
-  // a 5xx on resolved-status used to look identical to "no data."
+  // Surface backend failures instead of rendering blanks that look like "no data".
   const fatalError = statusError ?? summaryError;
   if (fatalError && resolved == null) {
     return (
@@ -360,6 +369,7 @@ export default function PipelinePage() {
 
   const accuracy = summaryData?.accuracy_pct;
   const ov = summaryData?.training_overview ?? undefined;
+  const classWinners = ov?.class_winners ?? [];
   const trainedAt = ov?.trained_at ? String(ov.trained_at) : null;
   const trainedDays = daysSince(trainedAt);
   const trainedAgo =
@@ -399,11 +409,18 @@ export default function PipelinePage() {
               : undefined
           }
           subtitle={
-            accuracy != null
-              ? testStart && testEnd
-                ? `Scored on test data ${testStart} – ${testEnd}`
-                : "Scored on the held-out test data"
-              : "No test predictions found — run the pipeline to score the model"
+            accuracy != null ? (
+              <>
+                <div>
+                  {testStart && testEnd
+                    ? `Scored on test data ${testStart} – ${testEnd}`
+                    : "Scored on the held-out test data"}
+                </div>
+                <PerClassAccuracyLine winners={classWinners} />
+              </>
+            ) : (
+              "No test predictions found — run the pipeline to score the model"
+            )
           }
           loading={summaryLoading}
           info={

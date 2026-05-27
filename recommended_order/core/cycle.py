@@ -1,17 +1,11 @@
-"""
-Purchase cycle calculator.
-
-Sprint-1 changes:
-  * dropped the "business bucket" snap (7/14/21/28/30/60/90) -- it killed
-    daily staples by rounding them up to a week.
-  * exponential-decay recency weighting (half-life from calibration).
-  * multi-pattern detection compares on raw gaps, not rounded gaps.
+"""Purchase cycle calculator. Exp-decay recency weighting at the
+calibration half-life; multi-pattern detection on raw gaps (no bucket
+snap, so daily-staple customers aren't rounded up to weekly).
 """
 
 from __future__ import annotations
 
 import logging
-from collections import Counter
 from typing import List, Tuple
 
 import numpy as np
@@ -25,10 +19,10 @@ logger = logging.getLogger(__name__)
 class CycleCalculator:
     """Calculates purchase cycles from raw gap data."""
 
-    # --- minimums for structural decisions, not business thresholds ---
+    # Structural minimums (not business thresholds).
     _MIN_PATTERN_OCCURRENCES = 2
     _MIN_PATTERN_DIFF_DAYS = 7            # two patterns must differ by > 1 week
-    _DEFAULT_DAYS_WHEN_UNKNOWN = 30       # fallback ONLY when we have no data
+    _DEFAULT_DAYS_WHEN_UNKNOWN = 30       # only used when we have no data
 
     def __init__(self, half_life_days: float) -> None:
         self._half_life = max(1.0, float(half_life_days))
@@ -46,8 +40,7 @@ class CycleCalculator:
         if item_history is None or item_history.empty:
             return CycleInfo(self._DEFAULT_DAYS_WHEN_UNKNOWN, 0.0, "insufficient")
 
-        # ``TrxDate`` is normalised to datetime64 at load time
-        # (data.manager._normalize), so a second to_datetime here is wasted work.
+        # TrxDate is already datetime64 (normalised in data.manager).
         dates = item_history["TrxDate"].sort_values().unique()
         if len(dates) < 2:
             return CycleInfo(self._DEFAULT_DAYS_WHEN_UNKNOWN, 0.0, "insufficient")
@@ -99,21 +92,27 @@ class CycleCalculator:
     # ------------------------------------------------------------------
 
     def _detect_patterns(self, gaps: np.ndarray) -> List[dict]:
-        """Find distinct modes in the raw gap distribution.
+        """Distinct modes via log-spaced +/-20% buckets so daily/weekly/monthly stay separate.
 
-        We bucket gaps into groups of +/- 20% of each other to find modes
-        without collapsing everything to 7/14/30.
+        Bucket id = round(log(g) / log(1.2)); two gaps fall in the same bucket
+        iff their ratio is within +/-20%. The earlier ``g / max(1, g*0.2)``
+        formula collapsed algebraically to ~g, putting every distinct gap in
+        its own bucket and effectively disabling multi-pattern detection.
         """
         if len(gaps) < 4:
             return []
-        # Bucket each gap to the nearest 20% of its value -- preserves daily
-        # (1, 2, 3) vs weekly (7) vs monthly (28-31) as distinct modes.
-        buckets = [int(round(g / max(1, g * 0.2)) * max(1, g * 0.2)) for g in gaps]
-        counts = Counter(buckets)
+        log_step = np.log(1.2)
+        bucket_to_gaps: dict[int, list[int]] = {}
+        for g in gaps:
+            g_int = max(1, int(g))
+            bid = int(round(np.log(float(g_int)) / log_step))
+            bucket_to_gaps.setdefault(bid, []).append(g_int)
         patterns = [
-            {"cycle": c, "count": n}
-            for c, n in counts.items()
-            if n >= self._MIN_PATTERN_OCCURRENCES
+            # Representative cycle is the median raw-day gap in this bucket so
+            # downstream consumers and the diff check below stay in day units.
+            {"cycle": int(round(float(np.median(gs)))), "count": len(gs)}
+            for gs in bucket_to_gaps.values()
+            if len(gs) >= self._MIN_PATTERN_OCCURRENCES
         ]
         if len(patterns) >= 2:
             cycles = [p["cycle"] for p in patterns]
@@ -127,10 +126,8 @@ class CycleCalculator:
         gap_end_dates: np.ndarray,
         target_date: pd.Timestamp,
     ) -> int:
-        """Exponential-decay weighted median of raw gaps.
-
-        Weight of a gap ending ``age`` days before target = 2^(-age / half_life).
-        """
+        """Exp-decay weighted median of raw gaps;
+        weight = 2^(-age/half_life)."""
         target = pd.Timestamp(target_date).to_datetime64()
         ages = (target - gap_end_dates) / np.timedelta64(1, "D")
         ages = ages.astype(float)

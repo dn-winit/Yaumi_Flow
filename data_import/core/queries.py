@@ -1,12 +1,10 @@
-"""
-Dynamic SQL query builder -- parameterised, no hardcoded routes or dates.
-Supports both full-load and incremental-load modes.
-"""
+"""Parameterised SQL builder supporting full and incremental modes."""
 
 from __future__ import annotations
 
 from typing import List, Optional
 
+from common.sql_fragments import NET_SOLD_CASE_SQL, RETURNS_SUBQUERY_BODY_SQL
 from data_import.config.settings import Settings, get_settings
 
 
@@ -29,10 +27,8 @@ class QueryBuilder:
         since_date: Optional[str] = None,
         lookback_days: Optional[int] = None,
     ) -> tuple[str, list]:
-        """
-        If since_date is provided: fetch only rows where TrxDate > since_date (incremental).
-        Otherwise: fetch last lookback_days (full refresh).
-        """
+        """``since_date`` -> incremental (TrxDate > date); else full refresh
+        over last ``lookback_days``."""
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
 
@@ -82,14 +78,29 @@ class QueryBuilder:
         since_date: Optional[str] = None,
         window_days: Optional[int] = None,
     ) -> tuple[str, list]:
-        routes = routes or self._s.route_codes
-        ph = self._route_ph(routes)
-
+        # Explicit columns pin the view-schema contract; order matches the
+        # downstream CSV header so read_csv consumers stay byte-stable.
         sql = f"""
-            SELECT *
+            SELECT
+                JourneyDate,
+                RouteCode,
+                WarehouseCode,
+                WarehouseName,
+                CustomerCode,
+                CustomerName,
+                SalesClassCode,
+                SalesClassName,
+                CustomerGroupCode,
+                CustomerGroupName,
+                VisitSequence,
+                Customer_Latitude,
+                Customer_Longitude,
+                Warehouse_Latitude,
+                Warehouse_Longitude
             FROM {self._s.journey_view} WITH (NOLOCK)
-            WHERE RouteCode IN ({ph})
+            WHERE RouteCode IN ({self._route_ph(routes or self._s.route_codes)})
         """
+        routes = routes or self._s.route_codes
         params: list = list(routes)
 
         if since_date:
@@ -116,12 +127,8 @@ class QueryBuilder:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
 
-        # ``yf_demand_forecast`` is now purely the model output. The 7
-        # reconciliation columns (recommended_load, forecast_corrected,
-        # bias_pct, opening_stock, load_lower_bound, load_upper_bound,
-        # leftover_to_next_day) live in ``yf_sales_transactions`` -- a
-        # separate table fed by the daily reconciliation cron and the
-        # historical backfill script. See ``sales_transactions()`` below.
+        # yf_demand_forecast is purely model output; reconciliation columns
+        # live in yf_sales_transactions (see ``sales_transactions()`` below).
         sql = f"""
             SELECT
                 trx_date        AS TrxDate,
@@ -151,18 +158,15 @@ class QueryBuilder:
             sql += "  AND trx_date > ?\n"
             params.append(since_date)
         else:
-            days = lookback_days or self._s.sales_recent_lookback_days
+            # Forecast horizon (current+future) -- past in yf_sales_transactions.
+            days = lookback_days or self._s.demand_forecast_lookback_days
             sql += "  AND trx_date >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
 
         return sql, params
 
-    # ------------------------------------------------------------------
-    # Sales transactions (carry chain + diagnostics + actual_sold). One
-    # row per (route, item, date) for past + today. Source of truth for
-    # the reconciliation surface; the cron writes here daily and the
-    # explainability modal reads from here.
-    # ------------------------------------------------------------------
+    # Sales transactions: carry chain + diagnostics + actual_sold.
+    # One row per (route, item, date); source of truth for reconciliation.
 
     def sales_transactions(
         self,
@@ -204,16 +208,13 @@ class QueryBuilder:
             sql += "  AND trx_date > ?\n"
             params.append(since_date)
         else:
-            days = lookback_days or self._s.sales_recent_lookback_days
+            # Reconciliation history window (NOT the model training window).
+            days = lookback_days or self._s.sales_transactions_lookback_days
             sql += "  AND trx_date >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
         return sql, params
 
-    # ------------------------------------------------------------------
-    # Closing stock (end-of-day inventory still on the van). Today's
-    # opening = yesterday's closing. Drives carry-over arithmetic in the
-    # reconciliation layer.
-    # ------------------------------------------------------------------
+    # Closing stock: end-of-day van inventory; today's opening = yesterday's closing.
 
     def closing_stock(
         self,
@@ -240,7 +241,8 @@ class QueryBuilder:
             sql += "  AND TrxDate > ?\n"
             params.append(since_date)
         else:
-            days = lookback_days or self._s.sales_recent_lookback_days
+            # Feeds carry-chain ffill (7d) + past-performance (90d) + buffer.
+            days = lookback_days or self._s.closing_stock_lookback_days
             sql += "  AND TrxDate >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
         sql += """
@@ -249,10 +251,7 @@ class QueryBuilder:
         """
         return sql, params
 
-    # ------------------------------------------------------------------
-    # Load allocation -- the fresh top-up the rep loads each morning.
-    # Multiple movements per day collapse to one row per (date, item).
-    # ------------------------------------------------------------------
+    # Load allocation: morning fresh top-up; one row per (date, item).
 
     def load_allocation(
         self,
@@ -279,7 +278,8 @@ class QueryBuilder:
             sql += "  AND MovementDate > ?\n"
             params.append(since_date)
         else:
-            days = lookback_days or self._s.sales_recent_lookback_days
+            # Pairs with past-performance + load tile (90d + buffer).
+            days = lookback_days or self._s.load_allocation_lookback_days
             sql += "  AND MovementDate >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
         sql += """
@@ -287,11 +287,8 @@ class QueryBuilder:
         """
         return sql, params
 
-    # ------------------------------------------------------------------
-    # Sales returns (Bad + Good). Stored as negative QuantityInPCs in
-    # VW_GET_SALES_DETAILS; we flip sign and split by TrxType so the
-    # reconciliation layer can surface bad-vs-good rates separately.
-    # ------------------------------------------------------------------
+    # Sales returns: negative QuantityInPCs flipped + split by TrxType
+    # so reconciliation can surface bad-vs-good rates separately.
 
     def sales_returns(
         self,
@@ -327,7 +324,8 @@ class QueryBuilder:
             sql += "  AND TrxDate > ?\n"
             params.append(since_date)
         else:
-            days = lookback_days or self._s.sales_recent_lookback_days
+            # Drives bad/good rate drawer + past-performance (90d + buffer).
+            days = lookback_days or self._s.sales_returns_lookback_days
             sql += "  AND TrxDate >= DATEADD(day, -?, GETDATE())\n"
             params.append(days)
         sql += """
@@ -337,9 +335,23 @@ class QueryBuilder:
         params.extend([self._s.bad_return_trx_type, self._s.good_return_trx_type])
         return sql, params
 
-    # ------------------------------------------------------------------
-    # Sales recent (incremental by TrxDate, for demand forecasting input)
-    # ------------------------------------------------------------------
+    # Sales recent: return-netted at source via ReturnItem_InvoiceRef so
+    # the reduction lands on the ORIGINAL invoice date (lag-aware demand).
+    # Subquery shares route+date predicates with the outer query so the
+    # optimiser bounds both scans identically. Orphan returns
+    # (InvoiceRef IS NULL) flow through ``sales_returns`` instead.
+    # Line-level CASE floors at 0 so an over-return can't go negative.
+
+    def _date_clause(self, *, alias: str, since_date: Optional[str],
+                     lookback_days: int) -> tuple[str, list]:
+        """Date-window WHERE fragment shared by outer query + returns
+        subquery so both bound the scan to the same window."""
+        if since_date:
+            return f"  AND {alias}.TrxDate > ?\n", [since_date]
+        return (
+            f"  AND {alias}.TrxDate >= DATEADD(day, -?, GETDATE())\n",
+            [lookback_days],
+        )
 
     def sales_recent(
         self,
@@ -349,6 +361,24 @@ class QueryBuilder:
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
+        days = lookback_days or self._s.sales_recent_lookback_days
+
+        # Subquery + outer share the same window via ``_date_clause``.
+        sub_date_sql, sub_date_params = self._date_clause(
+            alias="r", since_date=since_date, lookback_days=days,
+        )
+        out_date_sql, out_date_params = self._date_clause(
+            alias="s", since_date=since_date, lookback_days=days,
+        )
+
+        # Push route+date predicates into the subquery (pre-aggregation).
+        # Body from common.sql_fragments keeps netting semantics
+        # byte-identical with reconciliation_refresh._fetch_actual_sold.
+        returns_subquery = RETURNS_SUBQUERY_BODY_SQL.format(
+            view=self._s.sales_view,
+            route_clause=f"AND r.RouteCode IN ({ph})",
+            date_clause=sub_date_sql.strip(),
+        )
 
         sql = f"""
             SELECT
@@ -359,26 +389,31 @@ class QueryBuilder:
                 s.ItemCode,
                 s.ItemName,
                 s.CategoryName,
-                CEILING(SUM(CASE WHEN s.QuantityInPCs > 0 THEN s.QuantityInPCs ELSE 0 END)) AS TotalQuantity,
+                CEILING(SUM({NET_SOLD_CASE_SQL})) AS TotalQuantity,
                 ROUND(AVG(s.UnitPrice), 2) AS AvgUnitPrice
             FROM {self._s.sales_view} s WITH (NOLOCK)
+            LEFT JOIN ({returns_subquery}) rj
+                ON s.TrxCode = rj.InvoiceRef
+               AND s.ItemCode = rj.ItemCode
             WHERE s.ItemType  = ?
               AND s.TrxType   = ?
               AND s.RouteCode IN ({ph})
-        """
-        params: list = [self._s.sales_item_type, self._s.sales_invoice_trx_type, *routes]
-
-        if since_date:
-            sql += "  AND s.TrxDate > ?\n"
-            params.append(since_date)
-        else:
-            days = lookback_days or self._s.sales_recent_lookback_days
-            sql += "  AND s.TrxDate >= DATEADD(day, -?, GETDATE())\n"
-            params.append(days)
-
-        sql += """
+            {out_date_sql.strip()}
             GROUP BY
                 s.TrxDate, s.WarehouseCode, s.WarehouseName,
                 s.RouteCode, s.ItemCode, s.ItemName, s.CategoryName
         """
+
+        params: list = [
+            # Inner subquery params (source order):
+            self._s.bad_return_trx_type,
+            self._s.good_return_trx_type,
+            *routes,
+            *sub_date_params,
+            # Outer query params:
+            self._s.sales_item_type,
+            self._s.sales_invoice_trx_type,
+            *routes,
+            *out_date_params,
+        ]
         return sql, params

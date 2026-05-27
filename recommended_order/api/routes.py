@@ -1,6 +1,4 @@
-"""
-API routes for the recommended order service.
-"""
+"""API routes for the recommended order service."""
 
 from __future__ import annotations
 
@@ -12,7 +10,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import pandas as pd
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 
 from recommended_order.api.dependencies import (
     get_adoption_service,
@@ -138,9 +136,7 @@ def filter_options(
     route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
 
     if date:
-        # Single-pass groupby instead of one ``get_journey_customers`` call
-        # per route -- the picker grid would otherwise issue N filter
-        # operations on the same DataFrame for the 12-route fleet.
+        # Single-pass groupby vs N filters across the picker grid.
         jp = dm.get_journey_plan(date=date)
         if not jp.empty and "RouteCode" in jp.columns and "CustomerCode" in jp.columns:
             grouped = jp.groupby("RouteCode")["CustomerCode"]
@@ -149,9 +145,7 @@ def filter_options(
                 if n > 0:
                     journey_counts[str(rc)] = n
 
-        # For routes that ARE planned but have no stored recommendations,
-        # surface the diagnosis on the picker grid so the supervisor sees
-        # the gap up-front instead of a vague "Click to generate".
+        # Diagnose planned-but-unstored routes up-front for the picker grid.
         if journey_counts:
             existing = store.exists_batch(date, list(journey_counts.keys()))
             for rc in journey_counts:
@@ -173,11 +167,8 @@ def filter_options(
 def _corpus_median_active_customers(
     dm: DataManager, route_codes: List[str],
 ) -> Optional[float]:
-    """Median active-customer count across every configured route.
-
-    Calibration uses this to detect sparse routes (where the per-route customer
-    count is materially below the corpus norm) and soften filters accordingly.
-    """
+    """Median active-customer count across the configured fleet; used by
+    calibration to soften filters on sparse routes."""
     counts = []
     for rc in route_codes:
         df = dm.get_customer_data(rc)
@@ -192,13 +183,8 @@ def _corpus_median_active_customers(
 def _corpus_field_distributions(
     dm: DataManager, route_codes: List[str], clamps: SafetyClamps,
 ) -> Dict[str, List[float]]:
-    """Build corpus-wide distributions of each calibration field (for the
-    Sprint-3 anti-overfit sanity clamp).
-
-    We compute calibration once per route using a fresh (un-sanity-clamped)
-    pass -- passing ``corpus_field_values=None`` ensures the clamp itself
-    doesn't influence the corpus distribution.
-    """
+    """Corpus distributions per calibration field for the anti-overfit
+    clamp; base-pass with ``corpus_field_values=None`` to avoid recursion."""
     field_names = (
         "frequency_floor", "dormancy_days", "qty_benchmark",
         "completion_gate", "basket_min_confidence", "recency_half_life_days",
@@ -240,8 +226,7 @@ def _load_feedback_adjustments(
         return {}, {}
     db_loader = None
     try:
-        # Lazy import keeps recommended_order's startup independent of
-        # the supervision module being importable in every deployment.
+        # Lazy import: supervision module isn't a hard dep.
         from sales_supervision.services.feedback_loader import SessionDbLoader
         db_loader = SessionDbLoader()
         if not db_loader.available:
@@ -258,22 +243,14 @@ def _load_feedback_adjustments(
     )
 
 
-# Number of typical items to surface per customer in the empty-state diagnosis.
-# Kept small so the UI stays scannable; salespeople just need the top SKUs to
-# verify the van load, not the whole basket.
+# Typical items shown per customer in the empty-state diagnosis.
 _DIAGNOSIS_TOP_ITEMS = 3
 
 
 def _diagnose_empty_route(
     rc: str, target_date: str, dm: DataManager
 ) -> EmptyRouteDiagnosis:
-    """Explain why a route returned 0 recommendations -- positively framed.
-
-    The engine ran honestly; this function tells the supervisor what the
-    engine SAW so they can act (reload van, reassign route, or accept that
-    today's plan is genuinely empty). Every branch is data-driven; no string
-    is hardcoded against a specific route or customer.
-    """
+    """Explain why a route returned 0 recommendations (data-driven, actionable)."""
     journey_custs = dm.get_journey_customers(rc, target_date) or []
     van_items = dm.get_van_items(rc, target_date) or {}
 
@@ -302,9 +279,7 @@ def _diagnose_empty_route(
     van_set = {str(c) for c in van_items.keys()}
     journey_set = {str(c) for c in journey_custs}
 
-    # Normalise the join keys exactly once. The cached customer frame may use
-    # stringified ints with trailing whitespace upstream, so we coerce here
-    # rather than inside the per-customer loop (which would be O(rows × custs)).
+    # Normalise join keys once to keep this O(rows + custs) not O(rows*custs).
     norm_cust = cust_df["CustomerCode"].astype(str).str.strip()
     norm_item = cust_df["ItemCode"].astype(str).str.strip()
     hist_custs = set(norm_cust.unique())
@@ -329,7 +304,7 @@ def _diagnose_empty_route(
             continue
         cust_codes = list(cust_items_freq.index)
         if any(code in van_set for code in cust_codes):
-            continue  # this customer has at least one matching item -- not a mismatch
+            continue  # at least one item matches the van -- not a mismatch
         mismatch.append(
             EmptyRouteCustomer(
                 customer_code=cust,
@@ -363,8 +338,7 @@ def _diagnose_empty_route(
             customers=mismatch,
         )
 
-    # Every known customer DID have van overlap, yet the engine still produced
-    # no candidates. Falls through to a generic but honest message.
+    # Engine produced nothing despite overlap; fall through to a generic message.
     return EmptyRouteDiagnosis(
         reason="engine_no_match",
         headline="No items cleared the recommendation threshold",
@@ -385,17 +359,9 @@ def _sales_transactions_has(s, target_date: str) -> bool:
 
 
 def _trigger_reconciliation_refresh(s, horizon_days_behind: int) -> dict:
-    """POST demand_forecasting's /reconciliation/refresh.
-
-    Wraps every transport / HTTP-status error as a ``RuntimeError`` so
-    callers ``_ensure_carry_chain_present`` and ``_generate_routes`` see
-    a single exception type and return the structured "carry_chain_
-    missing" envelope instead of leaking a 500 to the supervisor UI.
-    Without the wrap, a 422 (horizon out of bounds) bubbled up as an
-    uncaught ``httpx.HTTPStatusError`` -- e.g. a pre-system date request
-    asking for a 2329-day horizon against demand_forecasting's 365-day
-    cap rendered as a bare ``Internal Server Error``.
-    """
+    """POST demand_forecasting's /reconciliation/refresh; wraps transport
+    + HTTP errors as ``RuntimeError`` so callers can return the structured
+    ``carry_chain_missing`` envelope instead of leaking a 500."""
     import httpx
     url = f"{s.demand_forecasting_url.rstrip('/')}/api/v1/forecast/reconciliation/refresh"
     logger.warning("carry_chain_auto_heal: POST %s?horizon_days_behind=%d", url, horizon_days_behind)
@@ -419,17 +385,9 @@ def _trigger_reconciliation_refresh(s, horizon_days_behind: int) -> dict:
 
 
 def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
-    """Auto-heal yf_sales_transactions for non-future dates by triggering
-    reconciliation_refresh with the minimal horizon covering target_date.
-
-    ``today`` is computed in the scheduler timezone so a UTC-deployed
-    server interpreting a Dubai cron's ``target_date`` doesn't
-    misclassify Dubai-today as the future. Previously ``date.today()``
-    used the server's local zone; at 23:30 UTC = 03:30 Dubai-tomorrow,
-    target_date held Dubai-tomorrow's ISO and the comparison
-    short-circuited the auto-heal entirely. Using the same TZ that
-    produced ``target_date`` keeps the contract self-consistent.
-    """
+    """Auto-heal yf_sales_transactions by triggering reconciliation_refresh
+    with the minimal horizon covering ``target_date``. ``today`` uses the
+    scheduler TZ so a UTC-deployed server doesn't misclassify Dubai-today."""
     s = get_settings()
     from datetime import date as _date, datetime
     from zoneinfo import ZoneInfo
@@ -444,14 +402,8 @@ def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
             f"RO_DEMAND_FORECASTING_URL is unset -- cannot auto-heal."
         )
     horizon = max(0, (today_d - _date.fromisoformat(target_date)).days)
-    # demand_forecasting caps horizon at 365 days (one full year of
-    # back-fill). A request for a date older than that is by definition
-    # out of the auto-heal envelope -- the reconciliation cron has
-    # never carried state that far back. Fail fast with a clear
-    # message; the caller catches RuntimeError and returns the
-    # structured "carry_chain_missing" envelope to the UI instead of
-    # letting the inevitable 422 from demand_forecasting bubble up as
-    # an unhandled HTTPStatusError -> bare 500.
+    # demand_forecasting caps horizon at 365 days. Fail fast with a clear
+    # message so the caller surfaces ``carry_chain_missing``.
     _MAX_AUTOHEAL_HORIZON = 365
     if horizon > _MAX_AUTOHEAL_HORIZON:
         raise RuntimeError(
@@ -483,16 +435,20 @@ def _generate_routes(
     store: RecommendationStore,
     pusher: DbPusher,
     skip_existing: bool = True,
+    skip_carry_chain_heal: bool = False,
 ) -> Dict[str, Any]:
     """Generate + save + DB-push recommendations for a set of routes.
+    Shared by POST /generate and POST /get (lazy path); skips routes that
+    already have data when ``skip_existing`` is True.
 
-    Shared by POST /generate and POST /get (lazy path). Skips routes that
-    already have data when ``skip_existing`` is True. Routes without source
-    data (no van items / no journey customers) are recorded but not failed.
+    ``skip_carry_chain_heal`` short-circuits the reconciliation/refresh
+    callback in ``_ensure_carry_chain_present``. Set by the DF cascade via
+    the ``X-Skip-Carry-Chain-Heal: 1`` header to avoid re-entrant deadlock
+    (we'd be asking DF to re-do work it's currently holding our locks for).
     """
     t0 = time.time()
 
-    # Ensure CSVs contain data for the target date (Friday allowed as no-journey)
+    # Ensure CSVs cover target_date (Friday allowed as no-journey).
     try:
         dm.assert_fresh(target_date)
     except RuntimeError as exc:
@@ -505,17 +461,20 @@ def _generate_routes(
             "details": [{"status": "stale_data", "error": str(exc)}],
         }
 
-    try:
-        _ensure_carry_chain_present(target_date, dm)
-    except RuntimeError as exc:
-        logger.error("carry_chain_guard_failed: %s", exc)
-        return {
-            "routes_requested": 0,
-            "routes_generated": 0,
-            "total_records": 0,
-            "duration_seconds": round(time.time() - t0, 2),
-            "details": [{"status": "carry_chain_missing", "error": str(exc)}],
-        }
+    if skip_carry_chain_heal:
+        logger.info("carry_chain_heal skipped (re-entrant call from DF cascade)")
+    else:
+        try:
+            _ensure_carry_chain_present(target_date, dm)
+        except RuntimeError as exc:
+            logger.error("carry_chain_guard_failed: %s", exc)
+            return {
+                "routes_requested": 0,
+                "routes_generated": 0,
+                "total_records": 0,
+                "duration_seconds": round(time.time() - t0, 2),
+                "details": [{"status": "carry_chain_missing", "error": str(exc)}],
+            }
 
     if skip_existing:
         existing = store.exists_batch(target_date, route_codes)
@@ -523,9 +482,13 @@ def _generate_routes(
     else:
         to_generate = list(route_codes)
 
-    # Inject corpus-level stats so per-route calibration can detect sparse routes
-    # AND sanity-clamp outlier per-route values against the corpus distribution.
-    clamps = SafetyClamps()
+    # Corpus stats let per-route calibration detect sparse routes and
+    # sanity-clamp outliers against the corpus distribution. Read clamps
+    # from the singleton engine's constants so a (future) env-driven
+    # override of SafetyClamps fields cannot diverge between the engine
+    # and the corpus-stats pre-build. Previously this rebuilt a fresh
+    # SafetyClamps() per request, bypassing the engine's bound copy.
+    clamps = engine._c.clamps
     engine.set_corpus_stats(
         median_active_customers=_corpus_median_active_customers(dm, route_codes),
         field_values=_corpus_field_distributions(dm, route_codes, clamps),
@@ -534,11 +497,8 @@ def _generate_routes(
     adj, conf = _load_feedback_adjustments(dm, clamps)
     engine.set_feedback_adjustments(adj, confidence=conf)
 
-    # Per-route generation is independent: same engine, distinct DataManager
-    # slices, distinct store keys, distinct DB rows. Run in a thread pool so
-    # cold-path latency scales sub-linearly with the route count. The engine
-    # is mostly numpy/pandas under the hood; the GIL releases on those calls
-    # so threads give a real wall-clock win.
+    # Per-route generation is independent; thread pool gives a real win
+    # since numpy/pandas releases the GIL.
     workers = max(1, int(get_settings().generation_concurrency))
 
     def _one(rc: str) -> Dict[str, Any]:
@@ -563,11 +523,23 @@ def _generate_routes(
             if df.empty:
                 return {"route": rc, "status": "empty", "records": 0}
 
+            # DB push FIRST, CSV save second. The DB is the canonical source
+            # of truth -- if DB push fails, the CSV is NOT written so the
+            # next /get call lazy-regenerates against fresh inputs rather
+            # than serving a stale CSV that disagrees with the DB. The prior
+            # order (CSV then DB) left orphan CSVs on transient DB failure,
+            # and `skip_existing=True` in the cron meant they never re-tried.
+            if pusher.available:
+                push_result = pusher.push_dataframe(df, target_date, rc)
+                if not push_result.get("success", True):
+                    return {
+                        "route": rc, "status": "error",
+                        "error": f"db_push_failed: {push_result.get('error','')}",
+                        "records": 0,
+                    }
+
             save_result = store.save(df, target_date, rc)
             saved = int(save_result.get("records_saved", 0))
-
-            if pusher.available:
-                pusher.push_dataframe(df, target_date, rc)
 
             return {"route": rc, "status": "generated", "records": saved}
         except Exception as exc:
@@ -597,6 +569,7 @@ def _generate_routes(
 @router.post("/generate", response_model=GenerateResponse)
 def generate_recommendations(
     req: GenerateRequest,
+    request: Request,
     dm: DataManager = Depends(get_fresh_data_manager),
     engine: RecommendationEngine = Depends(get_engine),
     store: RecommendationStore = Depends(get_store),
@@ -604,10 +577,14 @@ def generate_recommendations(
 ):
     target_date = req.date
     route_codes = req.route_codes or dm.get_route_codes()
+    # Re-entrancy guard: when DF's reconciliation_refresh cascade calls us,
+    # it sets this header. _ensure_carry_chain_present would otherwise call
+    # BACK into reconciliation/refresh and deadlock while DF holds locks.
+    skip_heal = request.headers.get("X-Skip-Carry-Chain-Heal") == "1"
 
     res = _generate_routes(
         target_date, route_codes, dm=dm, engine=engine, store=store, pusher=pusher,
-        skip_existing=not req.force,
+        skip_existing=not req.force, skip_carry_chain_heal=skip_heal,
     )
 
     if res["routes_requested"] == 0:
@@ -643,13 +620,9 @@ def get_recommendations(
     store: RecommendationStore = Depends(get_store),
     pusher: DbPusher = Depends(get_db_pusher),
 ):
-    """Retrieve stored recommendations, with lazy top-up generation.
-
-    * Single route: if nothing is stored for that route, generate it on demand.
-    * Grid view (no ``route_code``): derive the expected route set from the
-      day's journey plan and generate every route that's missing from the
-      store, so the grid always reflects the full planned fleet.
-    """
+    """Retrieve stored recommendations with lazy top-up generation. Single
+    route generates on demand; grid view derives the planned fleet from
+    the journey plan and fills any gaps."""
     source = "store"
     generated_routes = 0
 
@@ -665,8 +638,7 @@ def get_recommendations(
                 df = store.get(req.date, req.route_code)
                 source = "generated"
     else:
-        # Grid view: figure out which routes are supposed to run today
-        # (journey plan) and fill any gaps so every card has data.
+        # Grid view: derive expected routes from journey plan, fill gaps.
         journey = dm.get_journey_plan(date=req.date)
         expected = (
             sorted(journey["RouteCode"].dropna().astype(str).str.strip().unique().tolist())
@@ -679,7 +651,7 @@ def get_recommendations(
             if missing:
                 res = _generate_routes(
                     req.date, missing, dm=dm, engine=engine, store=store, pusher=pusher,
-                    skip_existing=False,  # `missing` is already the gap list
+                    skip_existing=False,  # already the gap list
                 )
                 generated_routes = res["routes_generated"]
                 if generated_routes > 0:
@@ -687,10 +659,7 @@ def get_recommendations(
         df = store.get(req.date, None)
 
     if df.empty:
-        # Diagnose the empty result so the UI can give the supervisor an
-        # actionable, positively-framed explanation. Only meaningful when a
-        # single route is requested -- the grid view doesn't need per-route
-        # diagnosis since the picker shows route status separately.
+        # Diagnose single-route empty result (grid view shows status via picker).
         diagnosis = (
             _diagnose_empty_route(req.route_code, req.date, dm)
             if req.route_code
@@ -717,22 +686,17 @@ def get_recommendations(
     if "TrxDate" in df.columns:
         df["TrxDate"] = pd.to_datetime(df["TrxDate"], errors="coerce").dt.strftime("%Y-%m-%d")
 
-    # Upstream CSVs sometimes type RouteCode/CustomerCode/ItemCode as ints when
-    # the values are numeric -- force string to match the response schema.
+    # Force code columns to string (CSV may type numeric codes as int).
     for col in ("RouteCode", "CustomerCode", "ItemCode"):
         if col in df.columns:
             df[col] = df[col].astype(str).str.strip()
 
-    # Name columns are optional strings in the schema -- pandas reads missing
-    # values as NaN (float), which fails pydantic str validation. Fill first.
+    # Fill NaN names so pydantic str validation passes.
     for col in ("CustomerName", "ItemName"):
         if col in df.columns:
             df[col] = df[col].fillna("").astype(str)
 
-    # Sprint-1 explainability columns:
-    #   * Signals is stored as a JSON string in the CSV for portability;
-    #     decode it back to list[dict] for the API contract.
-    #   * WhyItem / WhyQuantity / Source default to "" when missing.
+    # Explainability columns: decode Signals JSON; fill optional strings.
     import json as _json
     if "Signals" in df.columns:
         def _decode(v):
@@ -781,10 +745,8 @@ def adoption(
     item_codes: List[str] = Query(default=[], alias="item_codes"),
     svc: AdoptionService = Depends(get_adoption_service),
 ):
-    """Did recommendations convert? Read-only join of stored recs and sales,
-    optionally narrowed to specific categories and/or items so the drawer's
-    filters can scope adoption metrics in the same shape as the dashboard.
-    """
+    """Did recommendations convert? Read-only join of stored recs vs sales,
+    optionally scoped by category/item to match dashboard filters."""
     return svc.get_adoption(start_date, end_date, route_code, category_codes, item_codes)
 
 

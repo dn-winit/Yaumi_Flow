@@ -40,17 +40,12 @@ interface BarChartProps {
   title?: string;
   /** Optional helper text rendered just below the title, inside the card. */
   subtitle?: string;
-  /** Optional element rendered on the right side of the header (intended
-   *  for toggles, filter chips, etc.). Matches the Card ``actions`` slot. */
+  /** Right-side header slot for toggles/chips. */
   actions?: ReactNode;
   emptyMessage?: string;
   onBarClick?: (payload: Record<string, unknown>) => void;
   loading?: boolean;
-  /**
-   * Minimum horizontal width allocated per bar (single-series) or per
-   * GROUP (multi-series). The wrapper's ``overflow-x-auto`` ensures
-   * crowded windows stay legible by scrolling instead of overlapping.
-   */
+  /** Min px per bar (single) or per group (multi); wrapper scrolls on overflow. */
   pxPerPoint?: number;
 }
 
@@ -69,9 +64,7 @@ export default function BarChart({
   loading = false,
   pxPerPoint = 80,
 }: BarChartProps) {
-  // Title/subtitle pair mirrors LineChart's stacked header so the two
-  // components are visually interchangeable from the caller's POV.
-  // ``actions`` sits on the right, matching the Card component's slot.
+  // Mirrors LineChart header so the two are visually interchangeable.
   const header = (title || subtitle || actions) ? (
     <div className="mb-4 flex items-start justify-between gap-3">
       <div>
@@ -95,9 +88,7 @@ export default function BarChart({
     );
   }
 
-  // Multi-series mode reserves wider space per x value so the grouped
-  // bars don't collapse onto each other. ~32px per bar inside a group
-  // is the smallest legible width at the standard axis font size.
+  // Multi-series needs wider columns; ~36px/bar is the smallest legible width.
   const isMulti = Array.isArray(series) && series.length > 0;
   const effectivePxPerPoint = isMulti
     ? Math.max(pxPerPoint, series!.length * 36)
@@ -118,9 +109,7 @@ export default function BarChart({
                 barCategoryGap="20%"
               >
                 <CartesianGrid {...GRID_PROPS} />
-                {/* interval=0 + minTickGap=0 keeps every label visible;
-                    the wrapper's overflow-x-auto + minWidth guarantees
-                    each label has its own column with no collision. */}
+                {/* interval=0 + scroll wrapper -> every label gets its own column. */}
                 <XAxis
                   dataKey={xKey}
                   tickFormatter={fmtAxisDate}

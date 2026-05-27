@@ -5,9 +5,7 @@ type Trend = "up" | "down" | "neutral";
 
 interface MetricCardProps {
   label: string;
-  /** Primitive values get a count-up animation on change; ReactNodes
-   *  render verbatim. Pass ``disableAnimation`` to snap primitives in
-   *  for live tiles where interpolation looks like "still settling". */
+  /** Primitives animate (count-up); ReactNodes render verbatim. */
   value: string | number | ReactNode;
   trend?: Trend;
   subtitle?: string | ReactNode;
@@ -23,10 +21,7 @@ const trendConfig: Record<Trend, { icon: string; color: string }> = {
   neutral: { icon: "\u2192", color: "text-text-tertiary" },
 };
 
-// Matches strings with exactly ONE numeric value (possibly with prefix/suffix
-// like "AED 45.8K" or "55.3%"). Compound values like "1 / 21" or "12 routes"
-// contain multiple number groups and must NOT be animated -- stripping non-digits
-// would concatenate them into a wrong number.
+// Single-number guard so "1 / 21" doesn't animate into "121".
 const SINGLE_NUMBER = /^[^0-9]*(\d+\.?\d*)[^0-9]*$/;
 
 function useAnimatedValue(target: string): string {
@@ -75,9 +70,7 @@ function useAnimatedValue(target: string): string {
   return display;
 }
 
-// Animate count-ups only for plain primitive values. ReactNode values
-// (popover triggers, mixed nodes) bypass animation entirely -- they
-// would either get coerced to "[object Object]" or visually flicker.
+// Animate only primitives; ReactNodes would coerce to "[object Object]" or flicker.
 function isAnimatable(v: unknown): v is string | number {
   return typeof v === "string" || typeof v === "number";
 }

@@ -22,11 +22,7 @@ interface RouteGridProps {
   emptyMessage?: string;
 }
 
-/**
- * Generic clickable route grid. Purely presentational -- the caller owns the
- * data-fetching and any side-actions (regenerate, etc.). Used by both the
- * Orders tab and the Van Load tab.
- */
+/** Presentational route grid; caller owns data-fetching + side actions. */
 export default function RouteGrid({
   routes,
   onSelect,

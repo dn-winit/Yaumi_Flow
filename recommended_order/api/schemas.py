@@ -1,6 +1,4 @@
-"""
-Pydantic request/response schemas for the API.
-"""
+"""Pydantic request/response schemas for the API."""
 
 from __future__ import annotations
 
@@ -85,10 +83,7 @@ class EmptyRouteCustomer(BaseModel):
 class EmptyRouteDiagnosis(BaseModel):
     """Why a route returned 0 recommendations -- structured for the UI."""
     reason: str = Field(
-        description=(
-            "no_plan | no_journey | no_van | all_new_customers | "
-            "van_mismatch | mixed | engine_no_match"
-        )
+        description="no_plan|no_journey|no_van|all_new_customers|van_mismatch|mixed|engine_no_match",
     )
     headline: str = Field(description="Short, positive title for the empty state")
     detail: str = Field(description="One-sentence explanation of what to check")
@@ -125,9 +120,7 @@ class FilterOptionsResponse(BaseModel):
     routes: List[str]
     dates: List[str] = []
     journey_counts: Dict[str, int] = {}  # {route: customer_count} for the requested date
-    # {route: diagnosis} populated only for routes that have planned customers
-    # but no stored recommendations -- lets the route grid show a meaningful
-    # one-liner ("Van load gap caught", etc.) instead of "Click to generate".
+    # Populated only when a route has planned customers but no stored recs.
     route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
 
 
@@ -139,11 +132,8 @@ class RecommendationSummaryResponse(BaseModel):
     customers_latest: int = 0
 
 
-# ----------------------------------------------------------------------
-# Analytics envelopes (rich nested payloads stay Dict[str, Any] to avoid
-# locking the backend into the exact frontend shape on every additive
-# field; the success/availability fields are still validated).
-# ----------------------------------------------------------------------
+# Analytics envelopes: nested payloads stay Dict[str, Any] so additive
+# fields don't require a coordinated FE/BE deploy.
 
 
 class AdoptionResponse(BaseModel):

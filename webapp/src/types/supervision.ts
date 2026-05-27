@@ -1,14 +1,6 @@
-/** One downstream-recipient line inside a ``RedistributionGroup``.
- *
- *  ``quantity`` is always a positive magnitude; the signed semantics
- *  live in ``direction``:
- *    - ``"add"``    -> units flowed TO the recipient (surplus
- *                      reallocated from the just-visited customer).
- *    - ``"reduce"`` -> recipient's planned share was cut (encroachment
- *                      because the just-visited customer over-bought).
- *
- *  This is a string-literal union, not ``string``, so TypeScript forces
- *  every consumer to handle both cases explicitly. */
+/** One downstream-recipient line inside a RedistributionGroup. `quantity` is always
+ *  positive; sign lives in `direction` ("add" = surplus flowed to recipient,
+ *  "reduce" = recipient's planned share was cut due to encroachment). */
 export interface RedistributionEntry {
   to: string;
   toName: string;
@@ -16,13 +8,8 @@ export interface RedistributionEntry {
   direction: "add" | "reduce";
 }
 
-/** Per-SKU grouping: each item that got redistributed is one group.
- *
- *  ``keptOnTruck`` carries the leftover surplus that the engine could
- *  NOT place with a downstream recipient: an under-sold item with no
- *  takers stays on the van. Server defaults this to 0; the UI surfaces
- *  the number so supervisors see explicitly when stock is sitting in
- *  the truck rather than being redistributed away. */
+/** Per-SKU grouping; one group per redistributed item.
+ *  `keptOnTruck` = surplus the engine could not place downstream (stays on the van). */
 export interface RedistributionGroup {
   itemCode: string;
   itemName: string;
@@ -30,17 +17,13 @@ export interface RedistributionGroup {
   keptOnTruck: number;
 }
 
-/** Wire-shaped redistribution payload the server emits for EVERY visit
- *  (planned or drop-in). The field is non-optional on every visit
- *  carrier so the panel can mount unconditionally and render its
- *  per-item entries (or an empty body) without a null guard. */
+/** Redistribution payload emitted for every visit; non-optional so the panel mounts
+ *  unconditionally and renders an empty body when there's nothing to show. */
 export interface RedistributionView {
   groups: RedistributionGroup[];
 }
 
-/** Cumulative session-level visit aggregates. Server-pushed by both
- *  ``/visit`` (after each visit) and ``/saved`` (on hydrate) so the
- *  client never re-sums the visits map. */
+/** Cumulative session-level visit aggregates -- server-pushed by /visit and /saved. */
 export interface SessionVisitTotals {
   visited_count: number;
   total_actual: number;
@@ -56,19 +39,14 @@ export interface SessionRecommendationTotals {
   customers_count: number;
 }
 
-/** Pre-shaped customer payload from ``Session.summary().customers_grouped``.
- *  Items are filtered to ``recommended_qty > 0`` and customers with no
- *  surviving items are dropped, matching what the live UI used to
- *  compute on the client. */
+/** Pre-shaped customer payload; items filtered to recommended_qty>0, empty customers dropped. */
 export interface SessionCustomerGrouped {
   customer_code: string;
   customer_name: string;
   items: Record<string, unknown>[];
 }
 
-/** Per-customer tile stats, server-pre-computed. ``visited`` reflects
- *  in-session state at the time the session was emitted; live updates
- *  lift it off the local visits map. */
+/** Per-customer tile stats; `visited` reflects session state at emit time. */
 export interface SessionCustomerTile {
   customer_code: string;
   customer_name: string;
@@ -77,9 +55,7 @@ export interface SessionCustomerTile {
   visited: boolean;
 }
 
-/** Typed session payload the server returns from ``/session/initialize``.
- *  Every aggregate the UI reads is pre-computed -- the client never
- *  re-sums or re-groups anything below this boundary. */
+/** Session payload from /session/initialize; every aggregate is pre-computed server-side. */
 export interface SessionSummary {
   sessionId: string;
   routeCode: string;
@@ -106,26 +82,19 @@ export interface AlsoBoughtRow {
   qty: number;
 }
 
-/** Typed visit-result payload. Returned by ``/session/visit`` and
- *  consumed by the live tab's ``handleVisitComplete``. Every numeric
- *  here is server-computed so the client renders verbatim. */
+/** Visit-result payload from /session/visit; all numerics are server-computed. */
 export interface VisitResultPayload {
   score: VisitScore;
-  /** Live-fetched per-item actuals for the visited customer, keyed by
-   *  ItemCode. Pulled from data_import inside the request handler so
-   *  the client never supplies them. */
+  /** Live actuals for the visited customer, keyed by ItemCode (from data_import). */
   actualSales: Record<string, number>;
-  /** Rec-fulfilled total = sum of ``min(rec, act)`` per planned item. */
+  /** Rec-fulfilled total = sum of min(rec, act) per planned item. */
   actualQty: number;
   /** Sum of recommended quantities for the customer's planned items. */
   recommendedQty: number;
-  /** Items the customer bought that were NOT in the planned list.
-   *  Awareness-only context (no score impact); sorted desc by qty. */
+  /** Off-plan items the customer bought; awareness-only, no score impact. Sorted desc. */
   alsoBought: AlsoBoughtRow[];
   redistributions: RedistributionView;
-  /** Cumulative session-level visit aggregates INCLUDING this latest
-   *  visit. Same shape ``Session.summary().visit_totals`` emits, so
-   *  the client drops it directly into its visit-totals state slot. */
+  /** Session-level visit aggregates INCLUDING this latest visit. */
   sessionTotals: SessionVisitTotals;
 }
 
@@ -144,14 +113,10 @@ export interface UnplannedVisitor {
   customer_name?: string;
   total_qty: number;
   items: { item_code: string; qty: number }[];
-  /** Server-computed tile fields. Server pre-counts unique SKUs and
-   *  flags ``live_visited`` so the UI grid maps the customer to a
-   *  CustomerStat without iterating items. */
+  /** Pre-counted SKUs + visited flag so the grid skips per-item iteration. */
   unique_skus: number;
   live_visited: boolean;
-  /** Always present on the wire. The drop-in panel always renders;
-   *  when the customer's van consumption couldn't be matched to a
-   *  downstream planned recipient, ``groups`` is simply empty. */
+  /** Always present; `groups` may be empty when no downstream recipient was found. */
   redistributions: RedistributionView;
 }
 
@@ -175,10 +140,8 @@ export interface SavedVisit {
   preVisitBriefing?: string | null;
   customerAnalysis?: string | null;
   redistributions: RedistributionView;
-  /** Off-plan items the customer invoiced -- persisted in
-   *  ``yf_supervision_items`` with ``original_recommended_qty=0`` so a
-   *  page reload hydrates the same "Also bought" chip strip the live
-   *  ``/visit`` response surfaces. Empty array when no off-plan rows. */
+  /** Off-plan invoiced items, persisted with original_recommended_qty=0 so reload
+   *  hydrates the same "Also bought" strip as the live /visit response. */
   alsoBought: AlsoBoughtRow[];
 }
 
@@ -189,9 +152,7 @@ export interface SavedVisitsResponse {
   // Route-level LLM review for the (route, date), if any.
   routeAnalysis?: string | null;
   visit_totals: SessionVisitTotals;
-  // Pre-visit briefings keyed by customer_code. Populated for every
-  // planned customer the cron has briefed -- visited OR not-yet-visited
-  // -- so the briefing modal can render any planned customer without a
-  // fresh LLM round-trip. Drop-in (unplanned) customers are not present.
+  // Pre-visit briefings keyed by customer_code for every planned customer (visited
+  // or not). Drop-in customers are not present.
   briefings?: Record<string, string>;
 }

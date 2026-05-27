@@ -29,14 +29,19 @@ import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
-import pandas as pd
 from pydantic import ValidationError
 
 from llm_analytics.config.settings import Settings, get_settings
-from llm_analytics.core.client import LLMClient, TruncatedResponseError
+from llm_analytics.core.client import LLMClient, TruncatedResponseError, record_cache_hit
 from llm_analytics.core.formatter import DataFormatter
 from llm_analytics.core.prompt_loader import PromptLoader
-from llm_analytics.core.validator import sanitize_customer_codes
+from llm_analytics.core.schema_render import render_schema_for_prompt
+from llm_analytics.core.validator import (
+    CUSTOMER_ANALYSIS_TEXT_FIELDS,
+    PRE_VISIT_BRIEFING_TEXT_FIELDS,
+    ROUTE_ANALYSIS_TEXT_FIELDS,
+    scrub_hallucinated_entities,
+)
 from llm_analytics.models.schemas import CustomerAnalysis, PreVisitBriefing, RouteAnalysis
 from llm_analytics.services.cache import LLMCache
 from llm_analytics.services.rate_limiter import RateLimiter
@@ -53,44 +58,44 @@ DEGRADED_KEY = "_degraded"
 
 
 def _items_signature(items: List[Dict[str, Any]]) -> str:
-    """Stable digest over the per-item data fed to the prompt.
+    """Stable digest over EVERY per-item field the prompt actually reads.
 
-    Captures item identity + the two quantities that drive every
-    narrative the LLM produces. A visit scored before actuals land
-    (all ``actual_qty=0``) and the same visit re-evaluated after the
-    sale (real ``actual_qty>0``) hash to different signatures, so the
-    second call doesn't get the first one's stale cache.
+    Folds quantities (rec, actual), tier, frequency, days_since, cycle,
+    AND the explainability fields (why_item, why_quantity, trend, source)
+    because the briefing template renders all of them. If a rec-engine
+    edit changes ``why_item`` for an existing recommendation, the cache
+    MUST miss so the new narrative is generated. Pre-fix the signature
+    only hashed (code, rec, act), so explainability edits served stale
+    briefings for up to 24h.
     """
     from llm_analytics.core.formatter import _pick
     parts = []
     for it in items or []:
-        code = str(_pick(it, "item_code", "itemCode", "ItemCode", default=""))
-        rec = int(_pick(it, *_REC_QTY_KEYS, default=0) or 0)
-        act = int(_pick(it, *_ACT_QTY_KEYS, default=0) or 0)
-        parts.append(f"{code}:{rec}:{act}")
+        code  = str(_pick(it, "item_code", "itemCode", "ItemCode", default=""))
+        rec   = int(_pick(it, *_REC_QTY_KEYS, default=0) or 0)
+        act   = int(_pick(it, *_ACT_QTY_KEYS, default=0) or 0)
+        tier  = str(_pick(it, "tier", "Tier", default=""))
+        freq  = round(float(_pick(it, "frequency_percent", "frequencyPercent", "FrequencyPercent", default=0) or 0), 1)
+        last  = int(_pick(it, "days_since_last_purchase", "daysSinceLastPurchase", "DaysSinceLastPurchase", default=0) or 0)
+        cycle = round(float(_pick(it, "purchase_cycle_days", "purchaseCycleDays", "PurchaseCycleDays", default=0) or 0), 1)
+        why_i = str(_pick(it, "why_item", "whyItem", "WhyItem", default=""))
+        why_q = str(_pick(it, "why_quantity", "whyQuantity", "WhyQuantity", default=""))
+        src   = str(_pick(it, "source", "Source", default=""))
+        trend = str(_pick(it, "trend_factor", "trendFactor", "TrendFactor", default=""))
+        parts.append(
+            f"{code}|{rec}|{act}|{tier}|{freq}|{last}|{cycle}|{why_i}|{why_q}|{src}|{trend}"
+        )
     parts.sort()
-    return hashlib.sha256("|".join(parts).encode()).hexdigest()[:16]
+    return hashlib.sha256("\n".join(parts).encode()).hexdigest()[:16]
 
 
-# Every shape that a recommended-quantity / actual-quantity field has
-# ever been emitted under. The supervision auto-path uses snake_case
-# (``recommended_qty``), the browser briefing form uses short camel
-# (``recommendedQty``), and the customer-analysis form uses long camel
-# (``recommendedQuantity``); the rec-engine sometimes emits the
-# PascalCase form. Listing every variant here means producers never
-# need to translate -- and "empty visit" detection cannot silently
-# fail because one caller spelt it differently.
-_REC_QTY_KEYS = (
-    "recommended_qty",
-    "recommendedQty",
-    "recommendedQuantity",
-    "RecommendedQuantity",
-)
-_ACT_QTY_KEYS = (
-    "actual_qty",
-    "actualQty",
-    "actualQuantity",
-    "ActualQuantity",
+# Canonical key tuples live in formatter.py so the analyzer + formatter
+# read the same naming-convention list. Re-aliased here so existing call
+# sites stay readable. If a new naming convention shows up from a new
+# producer, add it to formatter.py once and every consumer picks it up.
+from llm_analytics.core.formatter import (
+    ACT_QTY_KEYS as _ACT_QTY_KEYS,
+    REC_QTY_KEYS as _REC_QTY_KEYS,
 )
 
 
@@ -151,6 +156,36 @@ class Analyzer:
         # into every cache key so a model swap or prompt edit invalidates
         # the cache without an explicit clear.
         self._cache_version = f"{self._s.model}|{_prompts_version(self._s.prompts_dir)}"
+        # Per-artifact schema text -- built once at construction from the
+        # Pydantic models so the system prompt and the validator never drift.
+        # If a field is added/renamed in models/schemas.py the next service
+        # restart picks it up without any prompt YAML edit.
+        self._schema_text: Dict[str, str] = {
+            "pre_visit_briefing":  render_schema_for_prompt(PreVisitBriefing),
+            "customer_analysis":   render_schema_for_prompt(CustomerAnalysis),
+            "route_analysis":      render_schema_for_prompt(RouteAnalysis),
+        }
+
+    def _system_with_schema(self, artifact: str) -> str:
+        """System prompt + the Pydantic-rendered output schema.
+
+        Single source of truth: the model is shown the exact contract the
+        post-call Pydantic validator will enforce. No YAML edit can break
+        this alignment.
+        """
+        base = self._prompts.get_system_prompt(artifact)
+        schema = self._schema_text.get(artifact, "")
+        if not schema:
+            return base
+        return (
+            f"{base}\n\n"
+            "OUTPUT FORMAT (VALID JSON, MATCHING THIS SCHEMA EXACTLY):\n"
+            f"{schema}\n\n"
+            "Do not include keys outside the schema. Do not wrap in markdown fences. "
+            "Do not add prose outside the JSON object. Every code/identifier you "
+            "cite MUST appear in the data section of the user message -- "
+            "no inventing item codes, customer codes, or percentages."
+        )
 
     # ------------------------------------------------------------------
     # Customer analysis
@@ -161,7 +196,6 @@ class Analyzer:
         customer_code: str,
         route_code: str,
         date: str,
-        customer_data: pd.DataFrame,
         current_items: List[Dict[str, Any]],
         performance_score: float = 0.0,
         coverage: float = 0.0,
@@ -175,6 +209,8 @@ class Analyzer:
         )
         cached = self._cache.get("customer_analysis", **cache_kwargs)
         if cached:
+            record_cache_hit(artifact="customer_analysis",
+                             route_code=route_code, customer_code=customer_code)
             return cached
 
         # Empty-state contract: honest deterministic response. Saves a
@@ -196,21 +232,32 @@ class Analyzer:
             return self._fallback("customer", customer_code=customer_code,
                                   reason="Rate limit exceeded")
 
-        historical = self._formatter.format_historical_context(customer_data)
-        visit_table = self._formatter.format_current_visit(current_items)
-
-        system = self._prompts.get_system_prompt("customer_analysis")
-        user = self._prompts.render(
-            "customer_analysis", "customer_analysis_template",
+        system, user = self.build_customer_prompt(
             customer_code=customer_code, route_code=route_code, date=date,
-            performance_score=int(round(performance_score)),
-            coverage=int(round(coverage)),
-            accuracy=int(round(accuracy)),
-            historical_context=historical, current_visit_table=visit_table,
+            current_items=current_items,
+            performance_score=performance_score, coverage=coverage, accuracy=accuracy,
         )
 
-        result = self._call_with_retry(system, user, CustomerAnalysis, "customer_analysis")
+        result = self._call_with_retry(
+            system, user, CustomerAnalysis, "customer_analysis",
+            route_code=route_code, customer_code=customer_code,
+            max_tokens=self._s.max_tokens_customer_analysis,
+        )
         result["customer_code"] = customer_code
+        # Scrub any item code the model cited that wasn't in the prompt.
+        # Defense in depth against hallucination -- the schema instruction is
+        # the first line; the validator below is the unbypassable second line.
+        from llm_analytics.core.formatter import _pick
+        allowed_items = {
+            str(_pick(it, "item_code", "itemCode", "ItemCode", default=""))
+            for it in current_items if it
+        } - {""}
+        scrub_hallucinated_entities(
+            result,
+            allowed_items=allowed_items,
+            allowed_customers={customer_code},
+            text_fields=CUSTOMER_ANALYSIS_TEXT_FIELDS,
+        )
         if not result.get(DEGRADED_KEY):
             self._cache.set("customer_analysis", result, **cache_kwargs)
         return result
@@ -254,6 +301,7 @@ class Analyzer:
         )
         cached = self._cache.get("route_analysis", **cache_kwargs)
         if cached:
+            record_cache_hit(artifact="route_analysis", route_code=route_code)
             return cached
 
         if not visited_customers:
@@ -262,27 +310,29 @@ class Analyzer:
         if not self._limiter.acquire():
             return self._fallback("route", route_code=route_code, reason="Rate limit exceeded")
 
-        visited = len(visited_customers)
-        coverage_pct = (visited / max(total_customers, 1)) * 100
-        qty_achievement = (total_actual / max(total_recommended, 1)) * 100
-        actual_data = self._formatter.format_route_performance(visited_customers)
-
-        system = self._prompts.get_system_prompt("route_analysis")
-        user = self._prompts.render(
-            "route_analysis", "route_analysis_template",
+        system, user = self.build_route_prompt(
             route_code=route_code, date=date,
-            visited_customers=visited, total_customers=total_customers,
-            coverage_percentage=coverage_pct,
-            total_actual=int(total_actual), total_recommended=int(total_recommended),
-            quantity_achievement=qty_achievement,
-            actual_data=actual_data,
+            visited_customers=visited_customers,
+            total_customers=total_customers,
+            total_actual=total_actual, total_recommended=total_recommended,
         )
 
-        result = self._call_with_retry(system, user, RouteAnalysis, "route_analysis")
+        result = self._call_with_retry(
+            system, user, RouteAnalysis, "route_analysis",
+            route_code=route_code,
+            max_tokens=self._s.max_tokens_route_analysis,
+        )
         result["route_code"] = route_code
 
-        if actual_customer_codes:
-            result = sanitize_customer_codes(result, actual_customer_codes)
+        # Customer-code whitelist (item codes are not in the route prompt
+        # so allowed_items is empty -- any item-code-looking token in the
+        # output is a hallucination by definition).
+        scrub_hallucinated_entities(
+            result,
+            allowed_items=(),
+            allowed_customers=actual_customer_codes or set(),
+            text_fields=ROUTE_ANALYSIS_TEXT_FIELDS,
+        )
 
         if not result.get(DEGRADED_KEY):
             self._cache.set("route_analysis", result, **cache_kwargs)
@@ -306,8 +356,14 @@ class Analyzer:
             _v=self._cache_version,
             _content=_items_signature(items),
         )
+        # Cache lookup records a hit so /cost endpoints see cached answers
+        # as zero-cost calls and cache_hit_rate is meaningful.
         cached = self._cache.get("pre_visit_briefing", **cache_kwargs)
         if cached:
+            record_cache_hit(
+                artifact="pre_visit_briefing",
+                route_code=route_code, customer_code=customer_code,
+            )
             return cached
 
         if _is_empty_visit(items):
@@ -316,69 +372,130 @@ class Analyzer:
         if not self._limiter.acquire():
             return self._fallback("pre_visit", customer_code=customer_code, reason="Rate limit exceeded")
 
-        # Build a rich items table with all explainability fields so the LLM
-        # can weave cycle days, frequency, trend, and reasoning into the briefing.
-        # Accepts both snake_case (supervision auto-path) and camel/Pascal
-        # (browser path) so a single helper covers every producer.
-        def _get(d: Dict, *keys: str, default: Any = "") -> Any:
-            for k in keys:
-                v = d.get(k)
-                if v is not None:
-                    return v
-            return default
+        system, user = self.build_pre_visit_prompt(
+            customer_code=customer_code, customer_name=customer_name,
+            route_code=route_code, date=date, items=items,
+        )
 
+        result = self._call_with_retry(
+            system, user, PreVisitBriefing, "pre_visit_briefing",
+            route_code=route_code, customer_code=customer_code,
+            max_tokens=self._s.max_tokens_briefing,
+        )
+        result["customer_code"] = customer_code
+        # Scrub hallucinated item codes -- briefing must only cite items
+        # that were actually in the recommendations payload.
+        from llm_analytics.core.formatter import _pick as _pick_field
+        allowed_items = {
+            str(_pick_field(it, "item_code", "itemCode", "ItemCode", default=""))
+            for it in items if it
+        } - {""}
+        scrub_hallucinated_entities(
+            result,
+            allowed_items=allowed_items,
+            allowed_customers={customer_code},
+            text_fields=PRE_VISIT_BRIEFING_TEXT_FIELDS,
+        )
+        if not result.get(DEGRADED_KEY):
+            self._cache.set("pre_visit_briefing", result, **cache_kwargs)
+        return result
+
+    # ------------------------------------------------------------------
+    # Prompt builders -- single source of truth shared by live analyze
+    # methods and the /analyze/*/preview endpoints. Pure functions of
+    # their inputs + the loaded system prompt; no LLM call, no cache, no
+    # rate-limit. Adding a new field to a prompt happens here once and
+    # both live and preview pick it up.
+    # ------------------------------------------------------------------
+
+    def build_customer_prompt(
+        self, *, customer_code: str, route_code: str, date: str,
+        current_items: List[Dict[str, Any]],
+        performance_score: float, coverage: float, accuracy: float,
+    ) -> tuple[str, str]:
+        visit_table = self._formatter.format_current_visit(current_items)
+        system = self._system_with_schema("customer_analysis")
+        user = self._prompts.render(
+            "customer_analysis", "customer_analysis_template",
+            customer_code=customer_code, route_code=route_code, date=date,
+            performance_score=round(float(performance_score), 1),
+            coverage=round(float(coverage), 1),
+            accuracy=round(float(accuracy), 1),
+            current_visit_table=visit_table,
+        )
+        return system, user
+
+    def build_route_prompt(
+        self, *, route_code: str, date: str,
+        visited_customers: List[Dict[str, Any]],
+        total_customers: int,
+        total_actual: int = 0, total_recommended: int = 0,
+    ) -> tuple[str, str]:
+        visited = len(visited_customers or [])
+        coverage_pct = (visited / max(total_customers, 1)) * 100
+        qty_achievement = (total_actual / max(total_recommended, 1)) * 100
+        actual_data = self._formatter.format_route_performance(visited_customers or [])
+        system = self._system_with_schema("route_analysis")
+        user = self._prompts.render(
+            "route_analysis", "route_analysis_template",
+            route_code=route_code, date=date,
+            visited_customers=visited, total_customers=total_customers,
+            coverage_percentage=coverage_pct,
+            total_actual=int(total_actual), total_recommended=int(total_recommended),
+            quantity_achievement=qty_achievement,
+            actual_data=actual_data,
+        )
+        return system, user
+
+    def build_pre_visit_prompt(
+        self, *, customer_code: str, customer_name: str,
+        route_code: str, date: str, items: List[Dict[str, Any]],
+    ) -> tuple[str, str]:
+        """Render the briefing prompt with the rich items table that carries
+        every explainability field the prompt template references."""
+        from llm_analytics.core.formatter import _pick as _get
+        # Local _safe vs the formatter's _sanitize: formatter sanitises for
+        # data-table contexts (collapses braces); briefing text just needs
+        # the JSON-breaking inch-mark + backslash neutralised.
         def _safe(v: Any) -> str:
-            # Strip characters that break Groq's JSON validation when echoed
-            # back in output strings -- notably inch marks in item names like
-            # 'Fresh Tortilla Plain 8" 6PC'.
             return str(v).replace('"', " inch").replace("\\", "/") if v is not None else ""
 
-        lines = []
+        lines: List[str] = []
         total_qty = 0
         for it in items:
-            qty = int(_get(it, "recommended_qty", "recommendedQty", "RecommendedQuantity", default=0) or 0)
+            qty   = int(_get(it, "recommended_qty", "recommendedQty", "RecommendedQuantity", default=0) or 0)
             total_qty += qty
             cycle = _get(it, "purchase_cycle_days", "purchaseCycleDays", "PurchaseCycleDays")
             days_since = _get(it, "days_since_last_purchase", "daysSinceLastPurchase", "DaysSinceLastPurchase")
-            freq = _get(it, "frequency_percent", "frequencyPercent", "FrequencyPercent")
+            freq  = _get(it, "frequency_percent", "frequencyPercent", "FrequencyPercent")
             trend = _get(it, "trend_factor", "trendFactor", "TrendFactor")
             why_item = _get(it, "why_item", "whyItem", "WhyItem")
-            why_qty = _get(it, "why_quantity", "whyQuantity", "WhyQuantity")
+            why_qty  = _get(it, "why_quantity", "whyQuantity", "WhyQuantity")
             source = _get(it, "source", "Source")
-            tier = _get(it, "tier", "Tier")
-
+            tier   = _get(it, "tier", "Tier")
             parts = [
                 f"  Item: {_safe(_get(it, 'item_code', 'itemCode', 'ItemCode', default='?'))} - {_safe(_get(it, 'item_name', 'itemName', 'ItemName'))}",
                 f"  Recommended qty: {qty} | Tier: {_safe(tier)} | Source: {_safe(source)}",
             ]
-            facts = []
+            facts: List[str] = []
             if cycle:
-                try:
-                    facts.append(f"buys every {int(round(float(cycle)))} days")
-                except (TypeError, ValueError):
-                    pass
+                try: facts.append(f"buys every {int(round(float(cycle)))} days")
+                except (TypeError, ValueError): pass
             if days_since:
-                try:
-                    facts.append(f"last bought {int(days_since)} days ago")
-                except (TypeError, ValueError):
-                    pass
+                try: facts.append(f"last bought {int(days_since)} days ago")
+                except (TypeError, ValueError): pass
             if freq:
-                try:
-                    facts.append(f"buys this on {int(round(float(freq)))}% of visits")
-                except (TypeError, ValueError):
-                    pass
+                try: facts.append(f"buys this on {int(round(float(freq)))}% of visits")
+                except (TypeError, ValueError): pass
             if trend and str(trend) != "1.0":
                 facts.append(f"trend factor {trend}")
             if facts:
                 parts.append(f"  Facts: {', '.join(facts)}")
-            if why_item:
-                parts.append(f"  Why recommended: {_safe(why_item)}")
-            if why_qty:
-                parts.append(f"  Why this quantity: {_safe(why_qty)}")
+            if why_item: parts.append(f"  Why recommended: {_safe(why_item)}")
+            if why_qty:  parts.append(f"  Why this quantity: {_safe(why_qty)}")
             lines.append("\n".join(parts))
         items_table = "\n\n".join(lines) if lines else "No items"
 
-        # Customer-level context summary
         context_parts = []
         for it in items:
             why = _get(it, "why_item", "whyItem", "WhyItem")
@@ -388,24 +505,16 @@ class Analyzer:
                 )
         customer_context = "\n".join(context_parts) if context_parts else "No additional context"
 
-        system = self._prompts.get_system_prompt("pre_visit_briefing")
+        system = self._system_with_schema("pre_visit_briefing")
         user = self._prompts.render(
             "pre_visit_briefing", "pre_visit_template",
             customer_code=customer_code,
             customer_name=_safe(customer_name) or customer_code,
-            route_code=route_code,
-            date=date,
-            item_count=len(items),
-            total_qty=total_qty,
-            items_table=items_table,
-            customer_context=customer_context,
+            route_code=route_code, date=date,
+            item_count=len(items), total_qty=total_qty,
+            items_table=items_table, customer_context=customer_context,
         )
-
-        result = self._call_with_retry(system, user, PreVisitBriefing, "pre_visit_briefing")
-        result["customer_code"] = customer_code
-        if not result.get(DEGRADED_KEY):
-            self._cache.set("pre_visit_briefing", result, **cache_kwargs)
-        return result
+        return system, user
 
     # ------------------------------------------------------------------
     # Health
@@ -432,17 +541,30 @@ class Analyzer:
     # Internal
     # ------------------------------------------------------------------
 
-    def _call_with_retry(self, system: str, user: str, model_cls: type, label: str) -> Dict[str, Any]:
+    def _call_with_retry(
+        self, system: str, user: str, model_cls: type, label: str,
+        *, route_code: str = "", customer_code: str = "", max_tokens: Optional[int] = None,
+    ) -> Dict[str, Any]:
         """Call LLM with retries on transient errors. Validation failures
         on the final attempt return the raw dict (so a structurally
         almost-right response still degrades gracefully). Truncations are
         treated as fatal because retrying without a bigger token budget
-        just repeats the failure."""
+        just repeats the failure.
+
+        ``label`` doubles as the cost-tracker ``artifact`` label so spend
+        slices naturally per analyze_* method.
+        """
         last_exc: Optional[str] = None
         for attempt in range(self._s.max_retries):
             raw: Optional[Dict[str, Any]] = None
             try:
-                raw = self._client.chat(system, user, attempt=attempt)
+                raw = self._client.chat(
+                    system, user, attempt=attempt,
+                    artifact=label,
+                    route_code=route_code,
+                    customer_code=customer_code,
+                    max_tokens=max_tokens,
+                )
                 validated = model_cls(**raw)
                 return validated.model_dump()
 

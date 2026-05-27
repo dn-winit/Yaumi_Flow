@@ -1,38 +1,17 @@
 """Cron-fire audit trail for APScheduler-backed daily jobs.
 
-One row in ``yf_scheduler_log`` per job execution, written from an
-APScheduler event listener. The listener fires AFTER the job returns
-(or raises), so the row's ``fired_at`` is the scheduler's planned
-``scheduled_run_time`` -- which is the correct timestamp for the
-"did this cron fire at its time?" question, independent of how long
-the job itself took.
-
-Why a listener (not a per-job decorator):
-  * APScheduler exposes ``EVENT_JOB_EXECUTED`` and ``EVENT_JOB_ERROR``
-    natively; using them is the idiomatic, zero-glue approach.
-  * No job function needs to import this module -- the wiring is a
-    single ``attach_audit(scheduler, service, conn_str)`` call at
-    scheduler startup, immediately before ``scheduler.start()``.
-  * Adding a new cron in any service automatically gets audited the
-    moment it's registered on the audited scheduler; no risk of
-    forgetting to decorate the new job function.
-
-Why best-effort writes:
-  * The scheduler must never crash because the audit table is
-    momentarily unreachable. Every audit write is swallowed at the
-    INFO log level on failure; the scheduled job itself still runs
-    normally either way.
-
-Schema lives in ``scripts/create_tables.sql`` (search for
-``yf_scheduler_log``). The table is intentionally narrow: service,
-job_id, fire timestamp, status, and (only on failure) the error
-message. Duration, route counts, and per-job side effects already
-live in each service's own structured logs -- this table is the
-single source of truth for the *fire timing* question, nothing more.
+Writes one ``yf_scheduler_log`` row per job execution from an
+``EVENT_JOB_EXECUTED|EVENT_JOB_ERROR`` listener; ``fired_at`` uses
+``scheduled_run_time`` so it answers "did this cron fire at its time?"
+independent of job duration. Best-effort writes -- a DB hiccup on the
+audit table must never crash the scheduler. Schema: see
+``scripts/create_tables.sql`` (search ``yf_scheduler_log``).
 """
 from __future__ import annotations
 
 import logging
+import threading
+import time
 from datetime import datetime
 from typing import Any
 
@@ -46,6 +25,26 @@ _SERVICE_MAX = 50
 _JOB_ID_MAX = 100
 _STATUS_MAX = 20
 
+# Throttle: at most one WARNING per (service, error-type) per hour, so a sustained
+# schema-drift or wrong-table outage is surfaced exactly once an hour instead of
+# spamming the log on every cron fire.
+_WARN_THROTTLE_SECONDS = 3600.0
+_WARN_LAST: dict[tuple[str, str], float] = {}
+_WARN_LOCK = threading.Lock()
+
+
+def _should_warn(service: str, exc: BaseException) -> bool:
+    """True iff the (service, exception-type) pair hasn't logged a WARNING
+    in the past ``_WARN_THROTTLE_SECONDS``."""
+    key = (service, type(exc).__name__)
+    now = time.monotonic()
+    with _WARN_LOCK:
+        last = _WARN_LAST.get(key, 0.0)
+        if now - last >= _WARN_THROTTLE_SECONDS:
+            _WARN_LAST[key] = now
+            return True
+    return False
+
 
 def _write(
     conn_str: str,
@@ -55,8 +54,8 @@ def _write(
     status: str,
     error_message: str | None,
 ) -> None:
-    """Insert one audit row. Swallows DB errors -- this must never
-    propagate back into APScheduler's job-event dispatch loop."""
+    """Insert one audit row; DB errors are swallowed (never propagate to
+    APScheduler's job-event dispatch loop)."""
     try:
         pool = get_pool(conn_str)
         with pool.acquire() as conn:
@@ -73,30 +72,31 @@ def _write(
             )
             conn.commit()
     except Exception as exc:
-        # INFO not WARNING: a transient DB hiccup during the audit is
-        # not actionable on its own. If the underlying scheduled job
-        # also failed, its own error path will log loudly with the real
-        # root cause.
-        logger.info(
-            "scheduler_audit_write_skipped service=%s job=%s err=%r",
-            service, job_id, exc,
-        )
+        # First failure (or first per hour) gets a WARNING so schema drift
+        # / bad table name / DSN rot is actually visible; sustained failure
+        # downgrades to INFO so we don't drown the log. The audit trail is
+        # best-effort -- the job's own success/fail path remains the source
+        # of truth -- but a silent break is still a break.
+        if _should_warn(service, exc):
+            logger.warning(
+                "scheduler_audit_write_failed service=%s job=%s err=%r "
+                "(throttled to 1/hr per error type)",
+                service, job_id, exc,
+            )
+        else:
+            logger.info(
+                "scheduler_audit_write_skipped service=%s job=%s err=%r",
+                service, job_id, exc,
+            )
 
 
 def attach_audit(scheduler: Any, service: str, conn_str: str) -> None:
-    """Wire the audit listener to ``scheduler``.
-
-    Call once per BackgroundScheduler, after ``add_job`` calls and
-    immediately before ``scheduler.start()``. Every subsequent
-    successful or failed job execution writes one ``yf_scheduler_log``
-    row attributed to ``service``.
-
-    ``conn_str`` is the AIML DSN string the row will be written to;
-    each service passes its own settings.db.connection_string() (or
-    equivalent) so we don't pull a settings dependency into common/.
+    """Wire the audit listener to ``scheduler`` (call once after
+    ``add_job`` and before ``scheduler.start()``). ``conn_str`` is the
+    AIML DSN -- passed in to avoid pulling a settings dep into common/.
     """
-    # Lazy import keeps APScheduler off the common/ import path for
-    # callers that don't use a scheduler (tests, the live data API).
+    # Lazy import: keeps APScheduler off common/'s import path for
+    # callers that don't use a scheduler.
     from apscheduler.events import EVENT_JOB_ERROR, EVENT_JOB_EXECUTED
 
     def _listener(event: Any) -> None:

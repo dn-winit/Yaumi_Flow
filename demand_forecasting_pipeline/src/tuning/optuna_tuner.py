@@ -24,6 +24,7 @@ Everything external to the objective is config-driven:
 from __future__ import annotations
 
 import logging
+from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
@@ -216,12 +217,34 @@ def tune_model(
     metric: str,
     tuning_cfg: dict | None = None,
     random_seed: int | None = None,
+    artifacts_dir: str | None = None,
+    demand_class: str | None = None,
 ) -> dict:
     """Run an Optuna study and return the winning params.
 
     Returns ``{}`` (empty params -> caller uses model_defaults) when tuning
     cannot meaningfully run; reasons are logged so silent fallbacks don't
     go unnoticed.
+
+    Persistence
+    -----------
+    When ``artifacts_dir`` is supplied, the study's best params + full
+    trial history are written to disk under
+    ``<artifacts_dir>/optuna/<demand_class>__<model_name>/``:
+
+      * ``best_params.json``  -- the winning hyperparameters + study metadata
+      * ``trials.csv``        -- one row per trial (params, score, state)
+
+    These artifacts enable:
+      * **Warm-start** -- a future tuning run can read best_params.json
+        and seed Optuna with the prior winner (saves the first ~5-10
+        trials worth of exploration).
+      * **Audit trail** -- which hyperparameters were tried, which won,
+        and what the score distribution looked like. Critical when
+        debugging why a champion-challenger gate rejected a retrain.
+      * **Reproducibility** -- the artifacts capture enough state to
+        re-run the same study with the same sampler seed and verify
+        the same winner emerges.
     """
     if not _HAS_OPTUNA:
         logger.warning("Optuna not installed - skipping HP tuning for %s", model_name)
@@ -342,4 +365,90 @@ def tune_model(
         )
         return {}
 
+    # Persist the study so a future run can warm-start and an operator
+    # can audit which params won and what the trial distribution
+    # looked like. Best-effort -- I/O failure must not fail the tune.
+    if artifacts_dir:
+        try:
+            _persist_study(
+                study,
+                artifacts_dir=artifacts_dir,
+                model_name=model_name,
+                demand_class=demand_class,
+                metric=metric,
+                direction=direction,
+                random_seed=random_seed,
+            )
+        except Exception as exc:
+            logger.warning(
+                "Could not persist Optuna study for %s: %s "
+                "(returning best_params regardless)", model_name, exc,
+            )
+
     return study.best_params
+
+
+def _persist_study(
+    study: Any,
+    *,
+    artifacts_dir: str,
+    model_name: str,
+    demand_class: Optional[str],
+    metric: str,
+    direction: str,
+    random_seed: Optional[int],
+) -> None:
+    """Write a study's best_params + trial history to disk.
+
+    Layout::
+
+        <artifacts_dir>/optuna/<class_or_global>__<model>/
+            best_params.json
+            trials.csv
+
+    Atomic writes via tmp+rename so a kill mid-write never produces
+    a torn artifact a future warm-start would choke on.
+    """
+    import json
+    import os
+    import tempfile
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    label = f"{demand_class or 'global'}__{model_name}"
+    out_dir = Path(artifacts_dir) / "optuna" / label
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    payload = {
+        "schema_version": "1.0",
+        "model_name": model_name,
+        "demand_class": demand_class,
+        "metric": metric,
+        "direction": direction,
+        "random_seed": random_seed,
+        "n_trials_attempted": len(study.trials),
+        "best_value": float(study.best_value),
+        "best_params": dict(study.best_params),
+        "tuned_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+    # Atomic JSON + CSV writes via the shared io_utils helpers. Same
+    # tmp + ``os.replace`` invariant as the rest of the codebase --
+    # one home for atomic writes (``src/utils/io_utils``), not five
+    # copies of mkstemp+open+replace boilerplate.
+    from demand_forecasting_pipeline.src.utils.io_utils import (
+        save_dataframe, save_json,
+    )
+    save_json(payload, str(out_dir / "best_params.json"))
+
+    # Trial history CSV via Optuna's built-in serializer. ``trials_dataframe()``
+    # already produces a tidy DataFrame with columns: number, value, params,
+    # state, datetime_start, datetime_complete, duration.
+    try:
+        trials_df = study.trials_dataframe()
+        save_dataframe(trials_df, str(out_dir / "trials.csv"))
+    except Exception as exc:
+        logger.warning(
+            "Could not write trials.csv for %s: %s "
+            "(best_params.json still persisted)", model_name, exc,
+        )

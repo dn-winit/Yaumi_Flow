@@ -1,11 +1,6 @@
-"""
-Explainability primitives.
-
-Single source of truth for every plain-English string the recommendation
-engine emits. Scoring / quantity / generator logic *adds* Signals here;
-no other module constructs the sentences. This keeps the UI narrative
-consistent and makes A/B copy changes trivial.
-"""
+"""Explainability primitives. Single source for every plain-English
+string the engine emits -- generators / scoring add Signals; no other
+module constructs sentences."""
 
 from __future__ import annotations
 
@@ -30,15 +25,9 @@ KIND_FEEDBACK_ADJUSTED = "feedback_adjusted"
 
 @dataclass
 class Signal:
-    """One reason contributing to a recommendation.
-
-    Attributes:
-        kind:      canonical tag, e.g. ``"regular_buyer"`` -- UI keys off this.
-        detail:    plain-English sentence rendered verbatim in the card.
-        weight:    relative contribution in [0, 1]; Explanation renormalises
-                   so weights sum to 1 across the row.
-        evidence:  structured numbers (counts, ratios) the UI may surface.
-    """
+    """One reason contributing to a recommendation. ``kind`` is the UI key,
+    ``detail`` is the verbatim sentence, ``weight`` is renormalised by
+    Explanation, ``evidence`` carries structured numbers for auditors."""
 
     kind: str
     detail: str
@@ -54,14 +43,8 @@ class Signal:
         }
 
 
-# ---------------------------------------------------------------------------
-# Detail-sentence factories (ONLY place these strings live)
-# ---------------------------------------------------------------------------
-
-# Sentences are written for a non-technical supervisor: short, plain
-# English, no formulas or engineering jargon. Numeric evidence stays on
-# the Signal.evidence dict for any downstream auditor; the user-facing
-# string is the headline only.
+# Detail-sentence factories (the only place these strings live).
+# Numeric evidence rides on Signal.evidence; the user-facing string is headline only.
 
 def detail_regular_buyer(item_visits: int, total_visits: int) -> str:
     return f"Bought on {item_visits} of the last {total_visits} visits."
@@ -75,8 +58,7 @@ def detail_due_now(days_since: int, cycle_days: int) -> str:
 
 
 def detail_overdue(cycles_missed: float, days_since: int) -> str:
-    # cycles_missed stays on evidence; the headline reads naturally
-    # without exposing a "cycles" abstraction the user may not have.
+    # cycles_missed kept on evidence only.
     _ = cycles_missed
     return (
         f"Overdue — last bought {days_since} days ago, "
@@ -99,8 +81,7 @@ def detail_trending_down(old_cycle: int, new_cycle: int) -> str:
 
 
 def detail_lookalike_peer(score_pct: float, n_peers: int) -> str:
-    # Drop the "similarity-weighted score" technicality. The number of
-    # similar customers carries the story; the score is on evidence.
+    # Score kept on evidence; n_peers carries the user-facing story.
     _ = score_pct
     return (
         f"{n_peers} customers with similar shopping patterns "
@@ -130,15 +111,13 @@ def detail_first_visit() -> str:
 
 
 def detail_consistent_pattern(cv: float) -> str:
-    # cv stays on evidence; the user sees the human-readable claim.
+    # cv kept on evidence only.
     _ = cv
     return "Very regular buying pattern — quantities stay close to the average."
 
 
 def detail_qty_recency(avg_qty: float, recent_weighted: float, trend_factor: float, capped_to: int) -> str:
-    # Drop the formula entirely; surface the recent average and the
-    # suggestion. The raw avg, trend factor, and clamping are on
-    # evidence for auditors who need the math.
+    # raw avg + trend kept on evidence only.
     _ = avg_qty, trend_factor
     return (
         f"Recent visits averaged {recent_weighted:.0f} units. "
@@ -162,10 +141,7 @@ def detail_qty_basket(median_qty: float) -> str:
 
 
 def detail_feedback_adjusted(multiplier: float, source: str, n_samples: int) -> str:
-    """Plain-language annotation when a recommendation lane was reweighted
-    based on what actually sold on this route recently. Direction reads
-    in the user's vocabulary; the multiplier + source + sample size stay
-    on Signal.evidence for auditors."""
+    """Boost/dampen annotation when a lane was reweighted by recent sales."""
     direction = "Boosted" if multiplier >= 1.0 else "Dampened"
     _ = source
     return (
@@ -174,18 +150,12 @@ def detail_feedback_adjusted(multiplier: float, source: str, n_samples: int) -> 
     )
 
 
-# ---------------------------------------------------------------------------
-# Explanation accumulator
-# ---------------------------------------------------------------------------
+# Explanation accumulator.
 
 @dataclass
 class Explanation:
-    """Accumulates signals for one candidate row.
-
-    Separate ``item_signals`` (why we're recommending the item at all)
-    from ``quantity_signals`` (how we sized the qty). The UI renders
-    them in two sections.
-    """
+    """Signals for one candidate row. Separates ``item_signals`` (why
+    the item) from ``quantity_signals`` (how the qty was sized)."""
 
     item_signals: List[Signal] = field(default_factory=list)
     quantity_signals: List[Signal] = field(default_factory=list)
@@ -232,11 +202,7 @@ class Explanation:
         return ranked[0].detail
 
     def confidence(self) -> float:
-        """Weighted average signal strength in [0, 1].
-
-        Higher when we have multiple corroborating signals. Falls back to the
-        max single-signal weight when only one signal fired.
-        """
+        """Weighted avg signal strength [0, 1]; boosted by corroborating signals."""
         all_sig = self.item_signals + self.quantity_signals
         if not all_sig:
             return 0.0

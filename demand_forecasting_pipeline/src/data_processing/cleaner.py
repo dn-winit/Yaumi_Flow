@@ -31,20 +31,24 @@ _BOUND_HI = "bound_hi"
 
 
 def _iqr_bounds(series: pd.Series, mult: float) -> tuple[float, float]:
+    """IQR clipping bounds for ``series``.
+
+    Returns ``(NaN, NaN)`` when the series is degenerate (Q3 <= 0,
+    i.e. at least 75% of values are zero). Without this guard, an
+    intermittent / lumpy pair that wasn't filtered out upstream (any
+    of three known misfire paths: missing classification file, key
+    mismatch in ``_lookup_class``, or the bare-except swallowing a
+    KeyError) would produce ``(0, 0)`` bounds and the apply step
+    would clip every real positive sale to zero -- silent total
+    data destruction. The NaN signal is filtered out by the caller
+    so the pair is skipped instead.
+    """
     q1 = series.quantile(0.25)
     q3 = series.quantile(0.75)
+    if not (q3 > 0):
+        return float("nan"), float("nan")
     iqr = q3 - q1
     return q1 - mult * iqr, q3 + mult * iqr
-
-
-def _lookup_class(classes: pd.DataFrame | None, keys) -> str | None:
-    if classes is None:
-        return None
-    try:
-        idx = keys if isinstance(keys, tuple) else (keys,)
-        return classes.loc[idx, "class"]
-    except Exception:
-        return None
 
 
 def fit_outlier_bounds(
@@ -74,6 +78,11 @@ def fit_outlier_bounds(
         if int((s > 0).sum()) < min_nonzero:
             continue
         lo, hi = _iqr_bounds(s, mult)
+        # Skip degenerate pairs (NaN bounds from _iqr_bounds when Q3<=0).
+        # Belt-and-braces against the three classification misfire paths;
+        # an emitted (0,0) row would have clipped every real sale to zero.
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            continue
         key_tuple = keys if isinstance(keys, tuple) else (keys,)
         row = {k: v for k, v in zip(group_keys, key_tuple)}
         row[_BOUND_LO] = float(max(lo, 0.0))
@@ -106,38 +115,55 @@ def apply_outlier_bounds(
     skip_intermittent = bool(cfg.get("skip_if_intermittent", True))
     skip_flag_cols = [c for c in (cfg.get("skip_if_flagged") or []) if c in df.columns]
 
-    # Build the lookup once for fast per-pair access.
-    bounds_lookup: dict = {}
-    for _, r in bounds.iterrows():
-        key_tuple = tuple(r[k] for k in group_keys)
-        key = key_tuple if len(group_keys) > 1 else key_tuple[0]
-        bounds_lookup[key] = (float(r[_BOUND_LO]), float(r[_BOUND_HI]))
+    # Vectorised path: merge ``bounds`` onto ``df`` and clip with one np.clip.
+    # The previous per-pair groupby + Python loop + per-pair g.copy() was the
+    # single dominant cost of the inference pre-feature stage at ~6000 pairs
+    # (each loop iteration allocated a fresh frame; concat at the end did
+    # another O(N) copy). Merging on group_keys preserves row order via a
+    # stable left join, so the output ordering matches the input.
+    merged = df.merge(bounds[group_keys + [_BOUND_LO, _BOUND_HI]],
+                      on=group_keys, how="left")
 
-    out_parts: list[pd.DataFrame] = []
-    for keys, g in df.groupby(group_keys):
-        g = g.copy()
-        cls = _lookup_class(classes, keys)
+    # Pairs without bounds (absent from the fit, or absent because they're
+    # intermittent/lumpy and bounds are skipped at fit-time) pass through.
+    have_bounds = merged[_BOUND_LO].notna() & merged[_BOUND_HI].notna()
 
-        if skip_intermittent and cls in ("intermittent", "lumpy"):
-            out_parts.append(g)
-            continue
-        if keys not in bounds_lookup:
-            out_parts.append(g)
-            continue
+    # Class-aware skip: build the per-row class via the same MultiIndex lookup
+    # without iterating. ``classes`` is indexed by group_keys with a ``class``
+    # column; reindex onto the merged frame's key columns -> NaN for unknown.
+    if skip_intermittent and classes is not None and "class" in classes.columns:
+        cls_indexed = classes["class"]
+        cls_per_row = pd.Series(
+            cls_indexed.reindex(
+                pd.MultiIndex.from_frame(merged[group_keys])
+                if len(group_keys) > 1
+                else merged[group_keys[0]]
+            ).to_numpy(),
+            index=merged.index,
+        )
+        protect_class = cls_per_row.isin({"intermittent", "lumpy"})
+    else:
+        protect_class = pd.Series(False, index=merged.index)
 
-        lo, hi = bounds_lookup[keys]
-        original = g[target_col].astype(float).to_numpy()
-        clipped = np.clip(original, lo, hi)
+    # Per-row protection flag from caller-listed columns (lifecycle / anomaly).
+    if skip_flag_cols:
+        protect_flag = merged[skip_flag_cols].any(axis=1)
+    else:
+        protect_flag = pd.Series(False, index=merged.index)
 
-        if skip_flag_cols:
-            protect_mask = g[skip_flag_cols].any(axis=1).to_numpy()
-            g[target_col] = np.where(protect_mask, original, clipped)
-        else:
-            g[target_col] = clipped
+    # Clip only rows that (a) have bounds AND (b) are not protected.
+    clip_mask = have_bounds & ~protect_class & ~protect_flag
+    original = merged[target_col].astype(float).to_numpy()
+    lo_arr = merged[_BOUND_LO].to_numpy()
+    hi_arr = merged[_BOUND_HI].to_numpy()
+    # np.clip with row-wise bounds; rows where lo/hi are NaN are filtered
+    # out via clip_mask so the NaN-propagation in np.clip is irrelevant.
+    clipped_all = np.clip(original, lo_arr, hi_arr)
+    out_target = np.where(clip_mask.to_numpy(), clipped_all, original)
 
-        out_parts.append(g)
-
-    return pd.concat(out_parts, ignore_index=True)
+    result = merged.drop(columns=[_BOUND_LO, _BOUND_HI])
+    result[target_col] = out_target
+    return result.reset_index(drop=True)
 
 
 def per_pair_outlier_treatment(

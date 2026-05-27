@@ -1,36 +1,15 @@
-"""Rolling per-(route, item) reconciliation cache.
+"""Rolling per-(route, item) reconciliation cache; two values per pair.
 
-Two values per pair, both computed from the same trailing window of
-``demand_forecast.csv`` rows:
+  bias_pct          = clipped mean relative error (legacy fallback).
+  calibration_ratio = sum(actual) / sum(predicted) (preferred; uncapped).
 
-  bias_pct           = mean( (Predicted - ActualQty) / ActualQty )
-                       clipped to +/- ``bias_cap_pct``.   [legacy]
-
-  calibration_ratio  = sum(ActualQty) / sum(Predicted)
-                       uncapped; saturates naturally at 0 (dormant
-                       pair) and at large positive values when the
-                       model under-predicts.                  [strong]
-
-Both are produced from rows where Predicted > 0 (anchor scope). Days
-with ActualQty = 0 ARE included in the calibration sum so a pair that
-sells only 1 day in 28 gets a small ratio (correctly shrinks forecast
-on the other 27 days). The bias_pct still requires ActualQty > 0 to
-avoid divide-by-zero (kept as the legacy fallback).
-
-Engine usage (engine.py):
-    if calibration_ratio is supplied:
-        P_corrected = Predicted * calibration_ratio   # symmetric, uncapped
-    else:
-        P_corrected = Predicted / (1 + bias_pct)      # legacy
-
-Both numbers persist in DB + parquet; engine prefers the ratio.
-The table is recomputed only when the underlying ``demand_forecast.csv``
-mtime changes; the result is persisted as a small parquet artefact so
-cold restarts don't re-scan the whole CSV.
+Engine prefers ratio; bias_pct used when no calibration history exists.
+mtime-keyed against demand_forecast.csv; parquet artifact for cold starts.
 """
 from __future__ import annotations
 
 import logging
+import os
 import threading
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -44,37 +23,23 @@ logger = logging.getLogger(__name__)
 
 
 class BiasService:
-    """Per-(route, item) reconciliation cache.
-
-    Vends two values per pair:
-      * ``bias_pct``          -- legacy clipped mean of relative error
-      * ``calibration_ratio`` -- adaptive sum(actual) / sum(predicted)
-                                 with exponential decay + Bayesian
-                                 shrinkage toward 1.0
-    Both are recomputed when ``demand_forecast.csv`` changes; both are
-    persisted to a parquet artefact for fast cold starts.
-    """
+    """Per-(route, item) bias_pct + calibration_ratio cache; parquet-persisted, mtime-keyed."""
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
         self._lock = threading.Lock()
         self._cache_key: Optional[Tuple[int, int]] = None
-        # Two parallel tables, same key shape; computed in one pass.
+        # Parallel tables computed in one pass.
         self._cache_bias: Optional[Dict[Tuple[str, str], float]] = None
         self._cache_calibration: Optional[Dict[Tuple[str, str], float]] = None
 
-    # ------------------------------------------------------------------
-    # Public
-    # ------------------------------------------------------------------
-
     def get_table(self) -> Dict[Tuple[str, str], float]:
-        """Legacy: returns the bias_pct table."""
+        """Legacy bias_pct table."""
         self._ensure_cached()
         return self._cache_bias or {}
 
     def get_calibration_table(self) -> Dict[Tuple[str, str], float]:
-        """Adaptive calibration ratios. Pairs with no history are
-        absent; callers should default to 1.0 (no correction)."""
+        """Calibration ratios; pairs without history are absent (caller defaults to 1.0)."""
         self._ensure_cached()
         return self._cache_calibration or {}
 
@@ -82,15 +47,13 @@ class BiasService:
         return self.get_table().get((str(route_code), str(item_code)), 0.0)
 
     def lookup_calibration(self, route_code: str, item_code: str) -> float:
-        """Calibration ratio for the pair, defaulting to 1.0 (no
-        correction) when no history exists."""
+        """Calibration ratio; defaults to 1.0 (no correction) when no history."""
         return self.get_calibration_table().get(
             (str(route_code), str(item_code)), 1.0,
         )
 
     def correct(self, predicted: float, route_code: str, item_code: str) -> float:
-        """Adaptive correction: prefers calibration_ratio when available,
-        falls back to legacy bias_pct for pairs with no history."""
+        """Adaptive: calibration_ratio if available, else legacy bias_pct."""
         if predicted <= 0:
             return 0.0
         ratio = self.get_calibration_table().get((str(route_code), str(item_code)))
@@ -190,10 +153,19 @@ class BiasService:
             ]
         )
         df.attrs["source_key"] = list(key)
+        # Atomic write: a concurrent engine read mid-publish would otherwise
+        # hit a half-written parquet and crash. tmp+os.replace is the same
+        # idiom every other artifact in this pipeline uses.
+        tmp = path.with_suffix(path.suffix + ".tmp")
         try:
-            df.to_parquet(path, index=False)
+            df.to_parquet(tmp, index=False)
+            os.replace(tmp, path)
         except Exception as exc:
             logger.warning("BiasService: failed to persist table (%s)", exc)
+            try:
+                tmp.unlink(missing_ok=True)
+            except Exception:
+                pass
 
     def _compute(
         self, path: Path,
@@ -231,7 +203,23 @@ class BiasService:
         if preds.empty:
             return {}, {}
 
-        anchor = preds["TrxDate"].max()
+        # Exclude unsettled days from the calibration window. The
+        # ``preds`` frame carries the full forecast horizon (30+ days
+        # ahead), so anchoring on its max would slide the window into
+        # the future where no actuals exist. Anchor on today's wall
+        # clock minus the settlement guard the accuracy_service
+        # already uses: today + (settle-1) prior days are excluded
+        # (partial-day sales, late-return-lag adjustments).
+        #
+        # ``preds["TrxDate"]`` is naive local-day after the to_datetime
+        # parse above; anchoring on ``utcnow().normalize()`` would drift
+        # by a day in non-UTC deployments. Cap the anchor at the
+        # frame's own max so the window can never slide into the future
+        # of the data we have.
+        settle = int(getattr(self._s, "accuracy_settlement_window_days", 2))
+        today_local = pd.Timestamp.now().normalize()
+        preds_max = preds["TrxDate"].max()
+        anchor = min(today_local, preds_max) - pd.Timedelta(days=settle)
         cutoff = anchor - pd.Timedelta(days=days)
         preds = preds[(preds["TrxDate"] >= cutoff) & (preds["TrxDate"] <= anchor)]
         if preds.empty:

@@ -87,12 +87,20 @@ def build_training_metadata(
     *,
     feature_cols: Iterable[str],
     resolved_recursive_iterations: int,
+    test_date_start: str | None = None,
+    test_date_end: str | None = None,
 ) -> dict[str, Any]:
     """Assemble the metadata block written to ``training_summary.json``.
 
     Schema is stable; reading code in inference depends on these keys
     existing. Add fields freely - never rename or remove without a
     coordinated update to ``check_inference_compatibility``.
+
+    ``test_date_end`` is the last date of the Test split. Inference
+    anchors its future-skeleton at ``test_date_end + 1`` so the Forecast
+    split picks up exactly where Test left off, eliminating the
+    "training-day gap" where a date between test_end and inference's
+    own per-pair last-date would have neither a Test nor a Forecast row.
     """
     return {
         "schema_version": "1.0",
@@ -101,6 +109,8 @@ def build_training_metadata(
         "config_hash": config_hash(cfg),
         "feature_schema_hash": feature_schema_hash(feature_cols),
         "forecast_horizon": int(cfg.get("inference", {}).get("forecast_horizon", 0)),
+        "test_date_start": test_date_start,
+        "test_date_end": test_date_end,
         "recursive_iterations": int(resolved_recursive_iterations),
         "horizon_safe_lags": bool(
             cfg.get("feature_engineering", {}).get("horizon_safe_lags", False)

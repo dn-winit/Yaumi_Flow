@@ -11,9 +11,13 @@ from pathlib import Path
 from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
-from common.settings_base import read_allow_origins as _read_allow_origins
+from common.settings_base import data_root as _shared_data_root, read_allow_origins as _read_allow_origins
 
-_MODULE_ROOT = Path(__file__).resolve().parent.parent
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
+
+
+def _data_root() -> Path:
+    return _shared_data_root(_PROJECT_ROOT)
 
 
 class DbSettings(BaseSettings):
@@ -28,13 +32,9 @@ class DbSettings(BaseSettings):
     password: str = Field(default="")
     driver: str = Field(default="{ODBC Driver 17 for SQL Server}")
     connection_timeout: int = Field(default=120, ge=10)
-    # Per-query (cursor) timeout. Bounds the longest a save_session
-    # write can stall the supervisor UI when the warehouse is slow --
-    # without this a hung server keeps the request open indefinitely.
+    # Per-cursor timeout: bounds how long a hung warehouse can stall save_session.
     query_timeout: int = Field(default=60, ge=5)
-    # Bulk-write batch size. Items per visit are bounded (~10-20) so this
-    # rarely fires more than one chunk, but caps the worst-case payload
-    # so an unusual customer can't ship a multi-megabyte batch.
+    # Caps worst-case payload size in a single executemany chunk.
     executemany_chunk_size: int = Field(default=1000, ge=1, le=10000)
 
     @property
@@ -64,18 +64,13 @@ class Settings(BaseSettings):
     log_level: str = Field(default="INFO")
     api_prefix: str = Field(default="/api/v1")
 
-    # In-memory session registry knobs. Supervisors typically work a
-    # single-shift day; the registry caps both the max parallel sessions
-    # and how long an idle session is held before reclamation. Both are
-    # env-overridable so deployments with longer shifts (e.g. 12-hour
-    # depots) can extend the TTL without a code change.
+    # In-memory session registry. Env-overridable for longer shifts.
     session_registry_max: int = Field(default=256, ge=16, le=4096,
         description="LRU cap on concurrent in-memory supervision sessions.")
     session_ttl_seconds: int = Field(default=8 * 60 * 60, ge=60 * 60,
         description="Idle TTL before an in-memory session is reclaimed.")
 
-    # Upstream: data_import owns all DB access (single source of truth).
-    # We call it over HTTP to fetch live actuals when a visit is processed.
+    # Upstream data_import owns all DB access; called over HTTP for live actuals.
     data_import_url: str = Field(
         default="http://localhost:8005",
         description="Base URL for data_import service",
@@ -85,57 +80,48 @@ class Settings(BaseSettings):
     # CORS allow-list -- shared ``YF_ALLOW_ORIGINS`` env var.
     allow_origins: list[str] = Field(default_factory=_read_allow_origins)
 
-    # ------------------------------------------------------------------
-    # Auto-visit reconciler -- background job that mirrors live YaumiLive
-    # invoices into yf_supervision_* without depending on a browser tab
-    # being open. All knobs are env-overridable.
-    # ------------------------------------------------------------------
+    # Auto-visit reconciler: background job that mirrors live YaumiLive
+    # invoices into yf_supervision_* tables independent of the browser.
     auto_visit_enabled: bool = Field(default=True,
         description="Master switch for the supervision auto-fill background job.")
     auto_visit_timezone: str = Field(default="Asia/Dubai",
-        description="Scheduler timezone -- matches the demand-forecasting + recommended-order schedulers so log timestamps line up across services.")
+        description="Scheduler timezone (matches sibling services for log alignment).")
     auto_visit_poll_seconds: int = Field(default=60, ge=30, le=3600,
-        description="Interval between reconciliation ticks. Min 30s to avoid hammering YaumiLive. "
-                    "Default 60s -- with the data/LLM phase split, each tick stays sub-10s, so a "
-                    "minute-cadence is the right balance between freshness and downstream load.")
+        description="Reconciliation tick interval. Min 30s to avoid hammering YaumiLive.")
     auto_visit_route_codes: list[str] = Field(default_factory=list,
-        description="Routes to reconcile each tick. Empty -> falls back to demand-forecasting's live_route_codes (single source of truth).")
-    auto_visit_llm_enabled: bool = Field(default=True,
-        description="Fire customer + route LLM analyses as part of the reconciler. Set False to suppress LLM cost while keeping DB sync.")
+        description="Routes to reconcile each tick. Empty -> falls back to demand-forecasting's live_route_codes.")
     auto_visit_data_phase_workers: int = Field(default=8, ge=1, le=64,
-        description="Concurrency cap for the data-sync phase of reconcile_route. "
-                    "Tuned hot enough to overlap HTTP + DB I/O, bounded so a busy "
-                    "tick does not flood data_import or the supervision DB.")
-    auto_visit_llm_phase_workers: int = Field(default=2, ge=1, le=16,
-        description="Concurrency cap for the LLM phase. Stays small because LLM "
-                    "providers rate-limit aggressively and per-call latency runs "
-                    "multi-second; raising this rarely improves throughput.")
+        description="Concurrency cap for the data-sync phase of reconcile_route.")
+    # Pool must exceed data_phase_workers so UI hot paths never block behind the cron.
+    db_pool_max_connections: int = Field(default=16, ge=1, le=64,
+        description="Total DB connection slots. Must be >= auto_visit_data_phase_workers with UI headroom.")
     auto_visit_session_ttl_seconds: int = Field(default=14400, ge=300, le=86400,
-        description="In-memory session cache eviction TTL. Entries for (route, date) "
-                    "pairs not touched by any tick within this window are dropped so "
-                    "``_sessions`` cannot grow unbounded across days of operation. "
-                    "Default 4h is comfortably longer than the typical end-of-shift "
-                    "(rep usually finishes within 3h of arriving on route) so an "
-                    "active session is never evicted under the operator's nose.")
+        description="Eviction TTL for cached (route, date) sessions so _sessions can't grow unbounded across days.")
+    # Leader-election lock: one worker per host runs the auto-visit reconciler.
+    # ``workers>1`` without this would race N copies of the same YaumiAIML MERGEs.
+    scheduler_lock_path: str = Field(
+        default_factory=lambda: str(_data_root() / "supervision" / "scheduler.lock"),
+        description="Filesystem path for the auto-visit reconciler leader-election lock.",
+    )
+    # Saved-visits hot-path cache: absorbs UI polling without explicit invalidation; staleness bounded by cron cadence.
+    saved_visits_cache_ttl_seconds: float = Field(default=0.0, ge=0.0, le=600.0,
+        description="In-process TTL for load_session_visits. 0 = adaptive (auto_visit_poll_seconds / 2).")
+    saved_visits_warmup_enabled: bool = Field(default=True,
+        description="Pre-load /session/saved per configured route at startup so first poll hits warm cache.")
 
     # Recommended-order client (used by the reconciler to scope a session).
     recommended_order_url: str = Field(default="http://localhost:8001",
         description="Base URL of the recommended_order service.")
     recommended_order_timeout: int = Field(default=30, ge=1)
     recommendation_cache_seconds: int = Field(default=300, ge=0,
-        description="Per-(route, date) recommendation cache so repeated ticks "
-                    "don't re-fetch the same plan.")
+        description="Per-(route, date) recommendation cache TTL.")
     recommendation_fetch_limit: int = Field(default=10000, ge=1, le=100000)
 
     # LLM analytics client (best-effort during the reconciler).
-    # Default points at the local llm_analytics dev port so the in-flow
-    # briefing + analysis pipeline works out of the box. Production
-    # deployments override via env to point at an internal hostname or
-    # set to "" to disable LLM calls in the reconciler.
     llm_analytics_url: str = Field(default="http://localhost:8003",
         description="Base URL of llm_analytics. Empty -> the reconciler skips all LLM calls.")
     llm_analytics_timeout: int = Field(default=120, ge=10, le=600,
-        description="Per-call timeout. LLMs are slow; default is generous so a thinking model doesn't get cut.")
+        description="Per-call timeout in seconds.")
 
     @field_validator("auto_visit_route_codes", mode="before")
     @classmethod
@@ -146,17 +132,20 @@ class Settings(BaseSettings):
             return [str(x).strip() for x in v if x is not None and str(x).strip()]
         return v
 
+    @property
+    def effective_saved_visits_cache_ttl(self) -> float:
+        """Resolve load_session_visits cache TTL; 0 -> half of auto_visit_poll_seconds."""
+        return float(
+            self.saved_visits_cache_ttl_seconds
+            or (self.auto_visit_poll_seconds / 2.0)
+        )
+
     # DB (optional -- saves to DB in addition to file)
     db: DbSettings = Field(default_factory=DbSettings)
     route_summary_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_route_summary]")
     customer_summary_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_customer_summary]")
     item_details_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yaumi_supervision_item_details]")
-    # Source-of-truth recommendation table -- queried only to dedupe
-    # ``alsoBought`` against the CURRENT plan when the visit's snapshot
-    # was captured against an older recommendation generation. The table
-    # lives in the same DB as the supervision tables; bare name resolves
-    # via the configured SS_DB_DATABASE. Env override available for
-    # deployments that prefix the table or use a different schema.
+    # Current-plan source for alsoBought dedupe vs older recommendation snapshots; bare name resolves via SS_DB_DATABASE.
     recommendations_table: str = Field(
         default="yf_recommended_orders",
         description="Current-plan source for alsoBought dedupe (default: yf_recommended_orders).",

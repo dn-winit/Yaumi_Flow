@@ -1,23 +1,8 @@
-"""Prediction endpoints -- test predictions and future forecasts.
+"""Prediction endpoints: test predictions + reconciled future forecasts.
 
-Reconciled-only contract
-------------------------
-The future-forecast endpoint is the source of "what to load on the van".
-Every row that leaves this endpoint goes through the V5_b reconciliation
-layer first, and the row's ``prediction`` field is overwritten with the
-reconciled value (``recommended_load``) before serialisation. The raw
-model output never leaves the backend on this surface -- callers that
-need it (training accuracy, model-quality drilldowns) read it through
-``accuracy_service`` or the ``/predictions/test`` endpoint instead.
-
-Same for ``/forecast/route-summary``: the response carries ``predicted_qty``
-which is the reconciled per-route total. There is no separate ``raw``
-field; the contract is that the API never returns a raw van-load number.
-
-The enrichment is a thin loop over the page being returned -- it does
-not re-fetch the forecast frame, and it caches nothing the underlying
-services don't already cache (bias table is mtime-keyed, closing-stock
-CSV is mtime-keyed in the van-load service).
+Reconciled-only contract: ``/forecast`` and ``/forecast/route-summary`` overwrite
+``prediction`` with V5_b ``recommended_load`` before serialisation. Raw model
+output stays internal; callers needing it use ``/predictions/test`` or accuracy_service.
 """
 from __future__ import annotations
 
@@ -42,17 +27,11 @@ router = APIRouter(prefix="/predictions", tags=["predictions"])
 
 
 def _detect_predicted_col(df: pd.DataFrame) -> Optional[str]:
-    """Future-forecast / test-prediction artefacts use lowercase ``prediction``;
-    raw demand_forecast.csv uses PascalCase ``Predicted``. Try both."""
+    """Artefacts use ``prediction``; raw demand_forecast.csv uses ``Predicted``."""
     for c in ("prediction", "Predicted"):
         if c in df.columns:
             return c
     return None
-
-
-# ----------------------------------------------------------------------
-# Endpoints
-# ----------------------------------------------------------------------
 
 
 @router.get("/test", response_model=PredictionResponse)
@@ -80,30 +59,14 @@ def get_future_route_summary(
 ):
     """Per-route aggregates for the VanLoad page tiles.
 
-    Contract (matches the ``VanLoadSummary`` tile so the grid card and the
-    detail summary always show the **same** number):
-
-      ``predicted_qty`` = sum of ``(opening_stock + recommended_load)``
-                          across items on the route -- i.e. the rep's
-                          TOTAL van load for the day (leftover already on
-                          the truck + V5_b fresh-issuance to add).
-
-      ``skus``          = distinct items physically on the truck for the
-                          day -- ``(opening_stock + recommended_load) > 0``.
-                          Mirrors the drill-down's carry-aware items count
-                          (``page_views.py``) so the route grid and the
-                          per-route page never disagree.
-
-      ``peak_day``      = day with the highest van-load total within the
-                          horizon (only meaningful when ``date`` is None;
-                          when scoped to one day it equals that day).
-
-      ``reconciled``    = True when the V5_b engine produced reconciled
-                          values for every row; False when it degraded to
-                          raw forecast (bias table missing, cold start).
-                          The UI surfaces this as a warning chip.
+    predicted_qty = sum(opening_stock + recommended_load) per route (rep's TOTAL van load).
+    skus = distinct ItemCodes with (opening + fresh) > 0 (mirrors drill-down's carry-aware count).
+    peak_day = highest van-load day in horizon; equals ``date`` when scoped to one day.
+    reconciled = False when engine degraded to raw forecast; UI shows a warning chip.
     """
-    fc_df = svc.van_load_view()
+    # van_load_view_enriched returns reconciled frame (DB-stored past/today + engine-computed future).
+    # Unenriched view would drop future rows; this is the same source page_views/van-load uses.
+    fc_df = svc.van_load_view_enriched()
     pred_col = _detect_predicted_col(fc_df) if not fc_df.empty else None
     if fc_df.empty or pred_col is None:
         return FutureRouteSummaryResponse(
@@ -119,39 +82,24 @@ def get_future_route_summary(
             date=date, routes=[], reconciled=True,
         )
 
-    # Prefer the DB-stored reconciled values (written by the daily 03:30
-    # cron and ``db_pusher`` at training time) -- zero CPU on the hot
-    # path, and matches the row contract the table beneath the tile
-    # serves. Detect "stored value present" via the column existing AND
-    # not being uniformly zero (the migration default for un-pushed rows).
-    have_stored = (
-        "recommended_load" in scope.columns
-        and "opening_stock" in scope.columns
-        and pd.to_numeric(scope["recommended_load"], errors="coerce").fillna(0.0).abs().sum() > 0
+    # van_load_view_enriched populates recommended_load/opening_stock for every row;
+    # no inline enrich_with_load needed (view layer owns cache).
+    enriched = scope
+    have_recon = (
+        "recommended_load" in enriched.columns
+        and "opening_stock" in enriched.columns
     )
-    if have_stored:
-        enriched = scope
-        have_recon = True
-    else:
-        # Lazy fallback: brand-new dates, fresh deploys, post-cron skips.
-        # ``enrich_with_load`` is the same canonical function ``db_pusher``
-        # and the cron use, so any value computed here is identical to
-        # what the next cron tick will write back -- the gap closes
-        # itself on the next refresh.
-        enriched = enrich_with_load(scope, predicted_col=pred_col)
-        have_recon = (
-            "recommended_load" in enriched.columns
-            and "opening_stock" in enriched.columns
-        )
 
     if have_recon:
+        # Per-cell pack quantity via shared pack_qty helper so grid card and detail tile agree byte-for-byte.
+        from common.numeric import pack_qty
         opening = pd.to_numeric(enriched["opening_stock"], errors="coerce").fillna(0.0)
         fresh = pd.to_numeric(enriched["recommended_load"], errors="coerce").fillna(0.0)
-        enriched = enriched.assign(_van_load=(opening + fresh).clip(lower=0.0))
+        enriched = enriched.assign(
+            _van_load=opening.apply(pack_qty) + fresh.apply(pack_qty)
+        )
     else:
-        # Degraded path: surface the raw forecast as the headline so the
-        # tile isn't blank. ``reconciled=False`` on the response tells
-        # the UI to render a warning chip.
+        # Degraded: surface raw forecast; reconciled=False prompts UI warning chip.
         logger.error(
             "route_summary_reconciliation_degraded -- engine outputs absent; "
             "tile will show raw forecast until bias table / engine recovers"
@@ -160,15 +108,8 @@ def get_future_route_summary(
             _van_load=pd.to_numeric(enriched[pred_col], errors="coerce").fillna(0.0)
         )
 
-    # "Items on the truck today" -- distinct ItemCodes with non-zero van
-    # load (opening + fresh). Mirrors the drill-down's carry-aware mask
-    # in ``page_views.py`` (``carry_mask = (units_to_load > 0) | (opening
-    # > 0)``) so the tile's items count matches the per-route page by
-    # construction. Filtering on raw ``prediction > 0`` here used to
-    # double-count guard-zeroed rows (pred > 0 but engine zeroed the
-    # load because the dominant buyer was off-plan) and drop pure
-    # carry-only items -- both bugs collapsed into one off-by-N items
-    # mismatch on the route grid.
+    # Distinct items with non-zero van load; mirrors drill-down's carry-aware mask
+    # in page_views.py so tile count matches per-route page by construction.
     enriched = enriched[enriched["_van_load"] > 0]
     if enriched.empty:
         return FutureRouteSummaryResponse(
@@ -182,8 +123,7 @@ def get_future_route_summary(
              skus=("ItemCode", "nunique"))
     )
 
-    # Peak-day per route: only meaningful when the response sums multiple
-    # days. When ``date`` is given, peak_day is just that date.
+    # Peak-day per route only meaningful across multiple days; with ``date`` it equals that date.
     peak_by_route: dict[str, Optional[str]] = {}
     if date:
         for r in by_route.itertuples(index=False):
@@ -226,24 +166,10 @@ def get_future_forecast(
     offset: int = Query(0, ge=0),
     svc: ArtifactService = Depends(get_artifact_service),
 ):
-    """Per-(route, item, date) rows -- always reconciled van load.
+    """Per-(route, item, date) rows; ``prediction`` is always V5_b reconciled load.
 
-    Read path (production): the row's ``recommended_load`` is already
-    populated in the DB (filled by ``db_pusher`` at training/inference
-    time and refreshed daily by the reconciliation cron). We just copy
-    it onto ``prediction`` so the wire field ``prediction`` carries the
-    reconciled V5_b value, and drop the helper column.
-
-    Lazy fallback: when the DB column is zero (cron skipped, brand-new
-    date, or pre-migration row), the ArtifactService's
-    ``van_load_view_enriched`` runs the canonical engine once per
-    mtime window and caches the result -- so the value served here is
-    byte-identical to what the next cron run will write back, with no
-    per-request engine cycles.
-
-    Engine intermediates (``forecast_corrected``, ``bias_pct``,
-    ``opening_stock``, bounds, demand class, etc.) stay on the row for
-    the explainability popup.
+    DB-populated by db_pusher + daily cron; lazy fallback runs canonical engine via
+    van_load_view_enriched (mtime-cached). Engine intermediates stay on the row.
     """
     df, total = svc.get_future_forecast(route_code, item_code, limit, offset)
     pred_col = _detect_predicted_col(df) if not df.empty else None
@@ -253,12 +179,8 @@ def get_future_forecast(
             data=df.to_dict("records") if not df.empty else [],
         )
 
-    # Reconciled-only contract on the wire:
-    #   * ``prediction``  carries V5_b reconciled load (was raw model output)
-    #   * ``lower_bound`` carries the bias-corrected, leftover-aware low band
-    #   * ``upper_bound`` carries the same for the high band
-    # Helper columns the engine produced are dropped so the wire has
-    # exactly one source of truth per concept.
+    # Wire contract: prediction = V5_b load; lower/upper_bound = leftover-aware bands.
+    # Engine helper columns dropped (one source of truth per concept on the wire).
     if "recommended_load" in df.columns:
         df[pred_col] = pd.to_numeric(df["recommended_load"], errors="coerce").fillna(0.0).astype(float)
         df = df.drop(columns="recommended_load")

@@ -1,27 +1,7 @@
-"""
-Structured logging + Prometheus metrics for the pipeline and API.
+"""Structured logging + Prometheus metrics. Logs to stdout + rotating file.
 
-Logs go to stdout (so container log drivers collect them) AND to a
-rotating file under ``artifacts/logs/pipeline.log`` (10MB x 5) so a
-crashed worker thread leaves a forensic trail even when stdout has
-already been rotated by the host.
-
-Format is controlled by ``DF_LOG_FORMAT``:
-  - ``json`` (default in prod) - one JSON object per line.
-  - ``console`` - colored, human-readable; auto-selected when stdout is a TTY.
-
-Metrics are exposed at ``/api/v1/forecast/metrics/prometheus``.
-
-Usage:
-    from demand_forecasting_pipeline.observability import (
-        configure_logging, get_logger, step_timer,
-    )
-
-    configure_logging(level="INFO")
-    log = get_logger(__name__)
-
-    with step_timer("load_raw_data", run_id=run_id):
-        df = load_raw(...)
+Format via DF_LOG_FORMAT (json | console); console auto-selected on TTY.
+Metrics exposed at /api/v1/forecast/metrics/prometheus.
 """
 
 from __future__ import annotations
@@ -42,12 +22,7 @@ from prometheus_client import Counter, Gauge, Histogram
 
 _configured = False
 
-# ---------------------------------------------------------------------------
-# Prometheus metric singletons. Registered against the default REGISTRY so the
-# ASGI app mounted at ``/metrics/prometheus`` exposes them automatically.
-# Defined at module import time so any module can `from .observability import
-# PIPELINE_RUNS` without worrying about registration order.
-# ---------------------------------------------------------------------------
+# Prometheus singletons on default REGISTRY; module-import time for ordering-safe import.
 
 PIPELINE_RUNS = Counter(
     "df_pipeline_runs_total",
@@ -119,13 +94,7 @@ def _resolve_format(fmt: str | None) -> str:
     return "console" if sys.stdout.isatty() else "json"
 
 def _resolve_logs_dir() -> Path:
-    """Resolve the logs directory without importing settings (which would
-    create a circular dependency at observability bootstrap time).
-
-    Mirrors the resolution in ``config/settings.py``: explicit
-    ``DF_LOGS_DIR`` wins, otherwise lives under the unified
-    ``YF_DATA_ROOT`` (default ``<project>/data``) at ``forecast/logs/``.
-    """
+    """Logs dir without importing settings (avoid bootstrap cycle); DF_LOGS_DIR > YF_DATA_ROOT/forecast/logs."""
     env = os.getenv("DF_LOGS_DIR")
     if env:
         return Path(env)
@@ -134,12 +103,7 @@ def _resolve_logs_dir() -> Path:
     return root / "forecast" / "logs"
 
 def _resolve_int_env(name: str, default: int) -> int:
-    """Read an integer env var, falling back to ``default`` on absence
-    or parse failure. Used so ``configure_logging`` can size the
-    rotating handler without importing ``Settings`` (which would create
-    a bootstrap cycle: settings imports nothing this module needs, but
-    the inverse import here would pull pydantic-settings before the
-    logger is ready)."""
+    """Read int env var; default on absence/parse failure (avoids importing Settings)."""
     raw = os.getenv(name)
     if raw is None:
         return default
@@ -148,16 +112,29 @@ def _resolve_int_env(name: str, default: int) -> int:
     except (TypeError, ValueError):
         return default
 
-def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
-    """Configure structlog + stdlib logging. Idempotent.
+def _make_local_timestamper(tz_name: str):
+    """ISO-8601 timestamps in the given IANA TZ; avoids structlog's UTC fallback in containers."""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
 
-    Sets up two handlers on the root logger:
-      * StreamHandler(sys.stdout)            - for container log drivers.
-      * RotatingFileHandler(pipeline.log)    - for post-mortem inspection.
+    tz = ZoneInfo(tz_name)
 
-    Both handlers share the same processor chain so the file copy is
-    byte-identical to stdout (modulo TTY-only color codes when format
-    is ``console``).
+    def _proc(_logger, _method, event_dict):
+        event_dict["timestamp"] = datetime.now(tz).isoformat(timespec="microseconds")
+        return event_dict
+
+    return _proc
+
+
+def configure_logging(
+    level: str = "INFO",
+    fmt: str | None = None,
+    timezone: str | None = None,
+) -> None:
+    """Configure structlog + stdlib logging (idempotent).
+
+    Adds stdout StreamHandler + rotating pipeline.log; file copy is byte-identical
+    modulo TTY color codes. ``timezone`` is an IANA zone (default UTC).
     """
     global _configured
     if _configured:
@@ -166,7 +143,10 @@ def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
     resolved = _resolve_format(fmt)
     lvl = getattr(logging, level.upper(), logging.INFO)
 
-    timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
+    if timezone is None or timezone.upper() == "UTC":
+        timestamper = structlog.processors.TimeStamper(fmt="iso", utc=True)
+    else:
+        timestamper = _make_local_timestamper(timezone)
 
     shared: list[Any] = [
         structlog.contextvars.merge_contextvars,
@@ -183,10 +163,7 @@ def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
     else:
         renderer = structlog.dev.ConsoleRenderer(colors=sys.stdout.isatty())
 
-    # ``LoggerFactory`` (stdlib) gives every bound logger a ``.name``
-    # attribute, which the ``add_logger_name`` processor requires. The
-    # alternative (``PrintLoggerFactory``) yields a ``PrintLogger`` that
-    # lacks ``.name`` and crashes the processor chain on first emit.
+    # stdlib LoggerFactory; PrintLoggerFactory lacks .name and breaks add_logger_name.
     structlog.configure(
         processors=[*shared, renderer],
         wrapper_class=structlog.make_filtering_bound_logger(lvl),
@@ -207,8 +184,7 @@ def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
 
     handlers: list[logging.Handler] = [stream_handler]
 
-    # Rotating file handler. Failures (read-only filesystem, missing parent)
-    # downgrade to stdout-only so the service still boots.
+    # Rotating file handler; downgrade to stdout-only on filesystem failure.
     try:
         logs_dir = _resolve_logs_dir()
         logs_dir.mkdir(parents=True, exist_ok=True)
@@ -220,8 +196,7 @@ def configure_logging(level: str = "INFO", fmt: str | None = None) -> None:
             backupCount=backup_count,
             encoding="utf-8",
         )
-        # File copy is always JSON regardless of TTY format -- forensic logs
-        # are easier to grep when they're machine-parseable.
+        # File copy is always JSON (forensic logs are easier to grep).
         if resolved != "json":
             file_handler.setFormatter(
                 structlog.stdlib.ProcessorFormatter(
@@ -263,19 +238,9 @@ def step_timer(
     logger: structlog.stdlib.BoundLogger | None = None,
     extra: dict[str, Any] | None = None,
 ) -> Iterator[dict[str, Any]]:
-    """Time a pipeline step. Emits one structured log line on exit and
-    records duration in the ``df_pipeline_step_duration_seconds`` histogram.
+    """Time a pipeline step; logs + records to df_pipeline_step_duration_seconds.
 
-    The yielded dict can be mutated to attach payload to the completion
-    log line:
-
-        with step_timer("build_features", run_id=run_id) as ctx:
-            df = build_features(...)
-            ctx["rows"] = len(df)
-            ctx["features"] = df.shape[1]
-
-    Re-raises any exception after recording duration + status=failed so
-    callers don't have to wrap themselves.
+    Mutate the yielded dict to attach payload. Re-raises after recording status=failed.
     """
     log = logger or get_logger("demand_forecasting_pipeline.pipeline")
     rid = run_id or uuid.uuid4().hex[:12]

@@ -1,20 +1,9 @@
-"""
-Health check endpoints.
+"""Health check endpoints.
 
-Three endpoints:
-  * ``/health/live``  - always 200 if the process is alive. Kubernetes
-                        liveness probe target. Should never fail because
-                        of downstream dependencies (DB outages, cache
-                        issues, etc.) - killing the pod won't fix those.
-  * ``/health/ready`` - 200 only when every critical dependency is
-                        green: DB write+read pings, data_import
-                        reachability (when configured), artifact
-                        presence, last-train freshness. Returns 503 with
-                        a structured detail body otherwise. Kubernetes
-                        readiness probe target.
-  * ``/health``       - legacy summary endpoint (always 200, body shows
-                        degraded fields). Kept so existing dashboards
-                        and scripts don't break.
+/health/live  -- K8s liveness; always 200 if process alive.
+/health/ready -- K8s readiness; 200 only when DB pings, data_import, artifacts,
+                 last-train freshness all green. 503 with detail body otherwise.
+/health       -- legacy summary endpoint (200 unless dead) for back-compat.
 """
 
 from __future__ import annotations
@@ -40,8 +29,7 @@ router = APIRouter(tags=["health"])
 
 
 def _ping_db(conn_str: str, *, timeout: int) -> dict[str, Any]:
-    """Open a short-timeout connection and run ``SELECT 1``. Returns
-    structured status; never raises."""
+    """Short-timeout SELECT 1; returns structured status, never raises."""
     if not conn_str:
         return {"ok": False, "reason": "not_configured"}
     started = time.perf_counter()
@@ -71,13 +59,8 @@ def _ping_db(conn_str: str, *, timeout: int) -> dict[str, Any]:
 
 
 def _ping_data_import(base_url: str, *, timeout: float) -> dict[str, Any]:
-    """Hit the data_import liveness endpoint. ``base_url`` empty -> skip.
-
-    Only 2xx counts as healthy. 4xx means the upstream is reachable but
-    rejecting the request (auth, missing endpoint, mis-routed proxy)
-    which we MUST treat as not-ready - readiness must flip 503 so a
-    misconfigured deployment can't silently serve stale data.
-    """
+    """Hit data_import liveness; empty base_url -> skip. Only 2xx counts as healthy
+    (4xx means reachable but mis-routed -- must flip readiness to 503)."""
     if not base_url:
         return {"ok": True, "skipped": True, "reason": "not_configured"}
     started = time.perf_counter()
@@ -101,10 +84,8 @@ def _ping_data_import(base_url: str, *, timeout: float) -> dict[str, Any]:
 def _last_train_age(
     art_svc: ArtifactService, *, threshold_seconds: int,
 ) -> dict[str, Any]:
-    """Seconds since the last successful training. Reads ``trained_at``
-    from training_summary.json; returns ``available=False`` when the
-    artifact is absent so callers can decide what to do (fresh
-    deployments are legitimately empty)."""
+    """Seconds since last successful training (from trained_at in training_summary.json);
+    available=False on missing artifact so fresh deployments can pass."""
     try:
         summary = art_svc.get_training_summary() or {}
     except Exception as exc:
@@ -134,33 +115,15 @@ def health_check(
     art_svc: ArtifactService = Depends(get_artifact_service),
     pipe_svc: PipelineService = Depends(get_pipeline_service),
 ):
-    """Runtime-health summary -- always 200 unless the process is dead.
-    Kept for back-compat; new monitoring targets ``/health/live`` and
-    ``/health/ready``.
-
-    ``status`` reflects RUNTIME readiness (the predictions, page-views,
-    and reconciliation surfaces can serve requests), NOT training-
-    pipeline state. Missing model artifacts are listed in
-    ``artifacts`` as informational state -- consumers that care about
-    "has training ever completed" inspect that field or call
-    ``/health/training-state`` (dedicated endpoint).
-
-    Pre-split, this endpoint reported ``degraded`` whenever any of the
-    seven training artifacts was missing -- which made every fresh
-    deployment look broken in the dashboard even though predictions,
-    reconciliation, and page-views were all healthy. Pipeline error
-    statuses still mark the service degraded since those reflect
-    runtime concerns.
+    """Runtime-health summary; reflects RUNTIME readiness only, NOT training state.
+    Missing artifacts shown for info; use /health/training-state for training status.
     """
     settings = get_settings()
     artifacts = art_svc.check_artifacts()
 
     statuses = pipe_svc.get_all_status()
     pipe_summary = {k: dict(v).get("status", "unknown") for k, v in statuses.items()}
-    # ``error`` is the only runtime-fatal pipeline state; ``idle``,
-    # ``running``, ``success`` are all healthy. ``unknown`` is treated
-    # as healthy because it's the legitimate "never ran" cold-start
-    # state, not a failure signal.
+    # Only ``error`` is fatal; idle/running/success/unknown are all healthy.
     pipelines_runtime_ok = not any(
         s == "error" for s in pipe_summary.values()
     )
@@ -178,18 +141,8 @@ def health_check(
 def training_state(
     art_svc: ArtifactService = Depends(get_artifact_service),
 ) -> dict[str, Any]:
-    """Dedicated endpoint for "has training run, and is it fresh?".
-    Separated from ``/health`` so a fresh deployment with no trained
-    model yet (legitimate cold-start) doesn't read as degraded in the
-    runtime health dashboard.
-
-    The retrain UI consumes this directly. ``status``:
-      * ``trained``    -- all artifacts present
-      * ``partial``    -- some artifacts present (mid-training, or
-                          older training that doesn't produce every
-                          modern artifact)
-      * ``untrained``  -- no artifact present yet
-    """
+    """Has training run, is it fresh? Separated from /health so cold-start deploys
+    don't look degraded. status: trained / partial / untrained."""
     artifacts = art_svc.check_artifacts()
     present = sum(1 for v in artifacts.values() if v)
     total = len(artifacts)
@@ -209,9 +162,7 @@ def training_state(
 
 @router.get("/health/live")
 def liveness() -> dict[str, Any]:
-    """K8s liveness probe - if this returns 200, the process is alive
-    enough to handle traffic eventually. Never reports unhealthy on
-    downstream issues; killing the pod won't fix those."""
+    """K8s liveness probe; 200 if process is alive. Never fails on downstream issues."""
     return {
         "status": "alive",
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -224,9 +175,7 @@ def readiness(
     art_svc: ArtifactService = Depends(get_artifact_service),
     pipe_svc: PipelineService = Depends(get_pipeline_service),
 ) -> dict[str, Any]:
-    """K8s readiness probe - 200 only when every critical dependency
-    is green. Returns 503 with a detail body otherwise so the failure
-    surface is debuggable from the response."""
+    """K8s readiness; 200 when every critical dep is green, else 503 with detail body."""
     settings: Settings = get_settings()
 
     artifacts = art_svc.check_artifacts()
@@ -278,9 +227,7 @@ def readiness(
         and read_db.get("ok", False)
         and data_import.get("ok", False)
         and pipelines_ok
-        # Train freshness is informational once any successful train
-        # exists. A fresh deployment with no trained model yet still
-        # passes ready -- /pipeline/train can be called regardless.
+        # Fresh deploys with no trained model still pass ready (informational once trained).
         and (not train_age.get("available") or train_age.get("fresh", True))
     )
 

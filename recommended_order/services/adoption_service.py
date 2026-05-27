@@ -1,14 +1,7 @@
-"""
-Adoption analytics -- did the recommendations we produced actually convert?
-
-Joins historical rows from ``yf_recommended_orders`` (read via
-:class:`RecommendationStore`) with the customer-level sales CSV that
-``data_import`` maintains in ``data/customer_data.csv`` (already cached in the
-``DataManager``). No live DB round-trip, no regeneration of past recs.
-
-An adoption event is a ``(trx_date, route_code, customer_code, item_code)``
-tuple that exists in both the recommendation set and the customer-sales set.
-"""
+"""Adoption analytics: did stored recommendations convert?
+Joins ``yf_recommended_orders`` (via RecommendationStore) with the cached
+customer-sales frame; adoption = same (date, route, customer, item) tuple
+on both sides. No live DB round-trip, no past-rec regeneration."""
 
 from __future__ import annotations
 
@@ -29,19 +22,12 @@ logger = logging.getLogger(__name__)
 
 _JOIN_KEYS = ["trx_date", "route_code", "customer_code", "item_code"]
 
-# "Perfect pick" tolerance: total recommended quantity for an adopted SKU is
-# within this fraction of total actual quantity. Mirrors the ±20% convention
-# used in the VanLoad accuracy drawer (webapp/src/lib/format.ts TOLERANCE_PCT)
-# so both dashboards reason about "on target" the same way.
+# "Perfect pick" tolerance (matches VanLoad drawer's TOLERANCE_PCT).
 _PERFECT_PICK_TOLERANCE = 0.20
 
 
 class AdoptionService:
-    """Compute adoption KPIs over a date window.
-
-    Results are cached by ``(start_date, end_date, route_code)`` with a short
-    TTL so repeated drawer opens don't rerun the cross-frame merge.
-    """
+    """Adoption KPIs over a date window; per-(start, end, route) cached."""
 
     def __init__(
         self,
@@ -67,8 +53,7 @@ class AdoptionService:
         category_codes: Optional[List[str]] = None,
         item_codes: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
-        # Sorted-tuple cache key so different orderings of the same filter
-        # selection share a slot.
+        # Sorted-tuple key so reordered selections share a slot.
         cats = tuple(sorted(set(map(str, category_codes or []))))
         items = tuple(sorted(set(map(str, item_codes or []))))
         key = (start_date, end_date, route_code or "", cats, items)
@@ -113,9 +98,7 @@ class AdoptionService:
         sales = self._load_sales(start_date, end_date, route_code, recs, item_filter)
         merged = self._merge(recs, sales)
 
-        # Attach avg unit price per SKU so revenue metrics can be computed
-        # over the same merged frame. Missing prices map to 0 -- callers check
-        # whether any price > 0 before emitting revenue fields.
+        # Attach avg unit price per SKU; missing -> 0 (caller skips revenue fields).
         prices = self._dm.get_item_prices()
         merged["unit_price"] = (
             merged["item_code"].map(prices).fillna(0.0)
@@ -123,22 +106,14 @@ class AdoptionService:
             else pd.Series(0.0, index=merged.index)
         )
 
-        # Single source of truth for "what counts as a working day" in
-        # this window: dates with actual sales activity for the chosen
-        # scope. Same input as the dashboard's working-day axis, so the
-        # padded chart and the dashboard line up by construction.
+        # Working days = dates with actual sales (matches dashboard).
         active_dates = self._active_dates(merged, sales)
 
-        # ``daily`` is padded to every active date so the X-axis never
-        # skips a day. Days without recommendations land with
-        # ``adoption_pct=None`` so the line chart breaks cleanly instead
-        # of dragging to the floor.
+        # Pad daily to every active date so the X-axis doesn't skip;
+        # no-rec days emit adoption_pct=None for clean chart breaks.
         daily = self._daily_padded(merged, active_dates)
         summary = self._summary(merged)
-        # Attach the derived metrics that used to be computed on the
-        # client (pick / perfect-pick percentages, best-performing day,
-        # working-day count) so the drawer never aggregates the daily
-        # series itself.
+        # Derived metrics computed server-side so the drawer never re-aggregates.
         summary.update(self._derived_metrics(summary, daily, active_dates))
 
         return {
@@ -159,13 +134,9 @@ class AdoptionService:
         item_codes: tuple,
         route_code: Optional[str] = None,
     ) -> Optional[set]:
-        """Translate (categories, items) filter into a flat ItemCode set.
-
-        Returns None when there is no filter (caller should not narrow the
-        recs / sales frames). Returns an empty set when the filter is
-        non-empty but resolves to zero items (caller should short-circuit
-        and return an empty response). Otherwise returns the explicit set.
-        """
+        """Resolve (categories, items) to a flat ItemCode set.
+        None = no filter; empty set = filter resolves to zero items
+        (caller should short-circuit); otherwise the explicit set."""
         if not category_codes and not item_codes:
             return None
 
@@ -173,13 +144,10 @@ class AdoptionService:
 
         if category_codes:
             cats = set(map(str, category_codes))
-            # Prefilter to the active route when the request is route-
-            # scoped -- avoids loading the corpus-wide customer frame
-            # just to expand a category list.
+            # Prefilter to active route when scoped.
             sales_all = self._dm.get_customer_data(route_code)
             if sales_all.empty or "CategoryName" not in sales_all.columns:
-                # No way to expand category -> item; if explicit items also
-                # absent, treat as "no match" rather than "no filter".
+                # Can't expand category -> item; "no match" not "no filter".
                 return explicit_items if explicit_items is not None else set()
             cat_items = set(
                 sales_all.loc[
@@ -263,8 +231,8 @@ class AdoptionService:
             sub[col] = sub[col].astype(str).str.strip()
         if item_filter is not None:
             sub = sub[sub["item_code"].isin(item_filter)]
-        # Scope sales further to the (customer, date) pairs that were actually visited
-        # -- keeps "missed SKUs" focused on the same trip rather than the whole route-day.
+        # Scope sales to visited (customer, date) pairs so "missed SKUs"
+        # tracks the same trip, not the whole route-day.
         visit_keys = recs[["trx_date", "route_code", "customer_code"]].drop_duplicates()
         if not visit_keys.empty:
             sub = sub.merge(visit_keys, on=["trx_date", "route_code", "customer_code"], how="inner")
@@ -272,11 +240,8 @@ class AdoptionService:
 
     @staticmethod
     def _merge(recs: pd.DataFrame, sales: pd.DataFrame) -> pd.DataFrame:
-        """Outer merge so we can count three categories:
-            * adopted: in both (sold_actually > 0 and was recommended)
-            * over_recommended: in recs only
-            * missed: in sales only (customer bought something we didn't push)
-        """
+        """Outer-merge yields adopted (both, qty>0), over_recommended
+        (recs only or zero actual), missed (sales only)."""
         merged = recs.merge(sales, on=_JOIN_KEYS, how="outer", indicator=True)
         merged["recommended_qty"] = pd.to_numeric(merged.get("recommended_qty"), errors="coerce").fillna(0)
         merged["actual_qty"] = pd.to_numeric(merged.get("actual_qty"), errors="coerce").fillna(0)
@@ -289,17 +254,9 @@ class AdoptionService:
 
     @staticmethod
     def _summary(merged: pd.DataFrame) -> Dict[str, Any]:
-        """Business-facing summary with a clean arithmetic identity.
-
-        Decomposes total recommended volume/revenue on the SAME rows using the
-        SAME base so Tile 1 and Tile 4 reconcile:
-
-            driven_* + unsold_* = recommended_*   (per SKU and in aggregate)
-
-        driven = Σ min(recommended_qty, actual_qty)  -- recs that converted
-        unsold = Σ max(0, recommended_qty − actual)  -- recs that didn't
-        This mirrors the VanLoad drawer's decomposition on the forecast side.
-        """
+        """Business summary preserving the identity
+        ``driven_* + unsold_* = recommended_*`` (per SKU and aggregate):
+        driven = sum(min(rec, actual)); unsold = sum(max(0, rec - actual))."""
         recommended_rows = merged[merged["_merge"].isin(["left_only", "both"])]
         adopted_rows = merged[merged["adopted"]]
         prices_available = (
@@ -316,9 +273,7 @@ class AdoptionService:
         )
         adopted_skus = rec_skus & bought_skus
 
-        # --- Vectorised decomposition of recommended volume/revenue ---
-        # Both tiles pull from the same rec_qty and actual_qty columns on the
-        # same row set, so there's no base-mismatch or universe-mismatch.
+        # Decomposed volume/revenue on a shared row set (no base mismatch).
         rec_q = recommended_rows["recommended_qty"]
         act_q = recommended_rows["actual_qty"]
         driven_q = np.minimum(rec_q, act_q)
@@ -338,8 +293,7 @@ class AdoptionService:
             unsold_revenue = None
             recommended_revenue = None
 
-        # Items with any shortfall (aggregate rec > aggregate actual). Broader
-        # than strict dud SKUs -- captures partial over-recommendation too.
+        # SKUs with any aggregate shortfall (rec > actual).
         if not recommended_rows.empty:
             by_sku = recommended_rows.groupby("item_code").agg(
                 rec=("recommended_qty", "sum"),
@@ -383,14 +337,7 @@ class AdoptionService:
 
     @staticmethod
     def _active_dates(merged: pd.DataFrame, sales: pd.DataFrame) -> List[str]:
-        """Working-day axis for the window. A day counts when either
-        the rep was on the road (recs OR sales activity in scope).
-
-        The union keeps days with recs but no sales (engine ran on a
-        no-sale day) and days with sales but no recs (rep delivered
-        without a list) both visible in the chart -- the supervisor
-        needs to see both kinds of gaps.
-        """
+        """Union of dates with either recs or sales activity in scope."""
         seen: set[str] = set()
         for frame in (merged, sales):
             if frame.empty or "trx_date" not in frame.columns:
@@ -403,13 +350,8 @@ class AdoptionService:
     def _daily_padded(
         merged: pd.DataFrame, active_dates: List[str]
     ) -> List[Dict[str, Any]]:
-        """Daily adoption rate padded to every working day in the window.
-
-        Days without any recommendation rows land with
-        ``adoption_pct=None`` (the chart treats them as a break in the
-        line). A real zero (rec > 0 but adopted = 0) plots as 0.0 --
-        the honest signal a supervisor needs to see.
-        """
+        """Daily adoption rate padded over every active date; no-rec days
+        emit adoption_pct=None (chart break); honest zero plots as 0.0."""
         if not active_dates and merged.empty:
             return []
         by_date: Dict[str, Dict[str, Any]] = {}
@@ -451,13 +393,8 @@ class AdoptionService:
         daily: List[Dict[str, Any]],
         active_dates: List[str],
     ) -> Dict[str, Any]:
-        """Server-side compute for the four "derived" values the drawer
-        used to recompute on every render: pick accuracy, perfect-pick
-        rate, days-with-recommendations count, best-performing day.
-
-        Each is None when the source counts can't yield a meaningful
-        number (e.g. no recommendations at all in the window).
-        """
+        """Derived values (pick accuracy, perfect-pick rate, days-with-recs,
+        best day); None when source counts can't yield a meaningful number."""
         skus_recommended = int(summary.get("skus_recommended") or 0)
         skus_adopted = int(summary.get("skus_adopted") or 0)
         skus_perfect = int(summary.get("skus_perfect") or 0)

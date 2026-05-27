@@ -1,21 +1,8 @@
-/**
- * Semantic tone helpers — replace ad-hoc threshold colouring in the UI.
- *
- * Consumers pass numeric values and receive a `Tone` that maps to a Badge
- * variant, icon colour, or any other token-driven styling. Keep the set of
- * helpers limited to genuinely reused thresholds; one-off mappings belong in
- * the calling site.
- */
+/** Semantic tone helpers; reused threshold mappers only. One-offs belong at the call site. */
 
 export type Tone = "success" | "warning" | "danger" | "info" | "neutral";
 
-/**
- * Generic threshold mapper.
- *
- * `thresholds` is an ascending list of `[breakpoint, tone]` pairs: the first
- * entry whose breakpoint is >= `value` wins. If no breakpoint matches (value
- * exceeds the last breakpoint) the last tone is returned.
- */
+/** Threshold mapper; ascending `[breakpoint, tone]` -- first match wins, falls through to last. */
 export function toneFromValue(
   value: number | null | undefined,
   thresholds: Array<[number, Tone]>,
@@ -36,9 +23,7 @@ export const accuracyTone = (pct: number | null | undefined): Tone => {
   return "danger";
 };
 
-/** Confidence score: 0..1, higher is better.
- *  Breakpoints come from format.ts so the badge and the "Risky items"
- *  KPI tile share one source of truth. */
+/** Confidence score 0..1; breakpoints sourced from format.ts. */
 import { AT_RISK_CONFIDENCE, STRONG_CONFIDENCE } from "./format";
 
 export const confidenceTone = (value: number | null | undefined): Tone =>

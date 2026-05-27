@@ -17,26 +17,19 @@ import DashboardKpis from "./DashboardKpis";
 import DashboardDailyTrend from "./DashboardDailyTrend";
 
 export default function DashboardPage() {
-  // Reporting period drives every tile, chart, and table on this page so
-  // a single picker controls the whole executive view in lockstep.
+  // One picker controls the whole executive view; cascading filters with []="all".
   const [period, setPeriod] = useState<ReportingPeriod>(() => defaultReportingPeriod());
-  // Cascading dashboard filters. Empty arrays === "all" (matches backend).
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
   const sales = useSalesOverview(period, filters);
   const kpis = useBusinessKpis(period, filters);
-  // lastActiveDate surfaces in the empty-state hint so the user has a
-  // concrete "try this date instead" anchor when they land on a weekend
-  // or holiday with zero rows. Static-tier cached so it costs nothing.
+  // Powers the "try this date instead" hint on weekend/holiday landings.
   const { date: lastActiveDate } = useLastActiveDate();
   const { toast } = useToast();
 
   const salesData = sales.data?.available ? sales.data : null;
   const k = kpis.data?.available ? kpis.data : null;
-  // Transparent no-data signal: the backend returned ``available: true``
-  // but the window had zero activity in scope -- almost always a
-  // weekend / holiday pick. Compute once here so the banner, KPI grid,
-  // and chart all read from the same flag.
+  // Backend returned available:true but window has zero rows -- shared flag for the banner/grid/chart.
   const noActivityInWindow =
     sales.data?.available === true &&
     !sales.loading &&
@@ -58,9 +51,7 @@ export default function DashboardPage() {
     }
   };
 
-  // Top routes / categories arrive already sorted by revenue desc from
-  // the backend (single source of truth). We just take the leaderboard
-  // cap so the cards stay scannable -- no re-sort here.
+  // Server-sorted; just take the leaderboard cap (no client re-sort).
   const topRouteRevenueBars = useMemo<HBarDatum[]>(
     () =>
       (salesData?.top_routes ?? [])

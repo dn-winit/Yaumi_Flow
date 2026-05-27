@@ -53,6 +53,34 @@ META_FEATURE_EXCLUDE = {"class", *_FLAG_COLUMNS}
 # facts (weekdays per week, months per year, ...), not tuning choices.
 _SEASONAL_PERIODS_BY_FREQ = {"D": 7, "W": 52, "M": 12, "Q": 4, "Y": 1}
 
+_DEFAULT_SELECTION_METRIC = "wape"
+
+
+def _resolve_selection_metric(selection_metric, cls: str) -> str:
+    """Pick the champion-selection metric for one demand class.
+
+    ``selection_metric`` may be either a plain string (one metric used for
+    every class, the legacy form) or a dict mapping class name to metric.
+    The dict form supports an optional ``default`` key for unmapped
+    classes; absence of that key falls back to WAPE.
+
+    Industry-standard pattern for FMCG van panels:
+
+      - smooth / erratic  -> ``wape`` (revenue-weighted, interpretable when
+        the demand signal has meaningful positive mass)
+      - intermittent / lumpy -> ``mase`` (Hyndman-Koehler 2006; scale-free
+        and well-defined when most actuals are zero, where WAPE's
+        positive-only mask collapses)
+
+    The function returns a single metric name; direction inference
+    (minimize vs maximize) stays a property of the metric itself and is
+    resolved separately by the Optuna tuner via _resolve_direction.
+    """
+    if isinstance(selection_metric, dict):
+        chosen = selection_metric.get(cls) or selection_metric.get("default")
+        return str(chosen) if chosen else _DEFAULT_SELECTION_METRIC
+    return str(selection_metric) if selection_metric else _DEFAULT_SELECTION_METRIC
+
 
 def _resolve_model_defaults(cfg_defaults: dict, model_name: str, cls: str) -> dict:
     """Merge flat + per-class defaults for a ``(model, class)`` pair.
@@ -89,23 +117,50 @@ def _reset_artifact_dirs(cfg: dict) -> int:
     longer exist, prediction CSVs with stale schema columns, outlier bounds
     fit on a different config, etc.
 
-    ``.gitkeep`` sentinels are preserved so the directory scaffolding stays
-    intact for source-control and the storage layer. Returns the number of
-    files removed (for logging).
+    PRESERVES (never touched):
+      * ``.gitkeep`` sentinels (directory scaffolding for source-control)
+      * ``versions/`` subtree (the model registry's rollback safety net --
+        snapshots of every recorded version; owned by
+        ``services/model_registry.py``; retention is managed by the
+        registry's retention sweep, NOT by training cleanup. Wiping
+        these would leave orphan ``retrain_config.json`` history rows
+        pointing at missing model files and the rollback endpoint
+        would 404.)
+      * ``scheduler.lock`` / ``scheduler.lock.pid`` (held open by the
+        running service for leader election; deletion would race the
+        APScheduler's reaper.)
+      * Any open log handle (``logs/pipeline.log``) -- skipped via the
+        ``OSError`` swallow below.
+
+    Returns the number of files removed (for logging).
     """
     artifacts_dir = Path(cfg["paths"]["artifacts_dir"])
     if not artifacts_dir.exists():
         return 0
+    versions_dir = artifacts_dir / "versions"
+    preserve_names = {".gitkeep", "scheduler.lock", "scheduler.lock.pid"}
     removed = 0
     for p in artifacts_dir.rglob("*"):
-        if p.is_file() and p.name != ".gitkeep":
-            try:
-                p.unlink()
-                removed += 1
-            except OSError:
-                # Best-effort: a file held open by another process (rare
-                # - usually only an open log handle) is skipped, not fatal.
-                pass
+        if not p.is_file():
+            continue
+        if p.name in preserve_names:
+            continue
+        # NEVER touch the versions/ subtree -- the model registry owns it.
+        # ``Path.is_relative_to`` is Python 3.9+; the codebase requires 3.10+
+        # per requirements so this is safe.
+        try:
+            if p.is_relative_to(versions_dir):
+                continue
+        except AttributeError:  # extremely defensive; pre-3.9
+            if versions_dir in p.parents:
+                continue
+        try:
+            p.unlink()
+            removed += 1
+        except OSError:
+            # Best-effort: a file held open by another process (rare
+            # - usually only an open log handle) is skipped, not fatal.
+            pass
     return removed
 
 
@@ -362,12 +417,48 @@ def run_training(config_path, on_step=None):
     _step("classification", "running")
     logger.info("Step 8: segmentation on train window (date < %s)", test_start.date())
     classification_cfg = cfg["classification"]
+    # Exclude each pair's silent EOL tail (rows flagged is_likely_eol by
+    # the lifecycle stage above) from ADI / CV^2 inputs. A mature pair
+    # that went dormant for the last N periods would otherwise have ADI
+    # inflated by those silent rows and get mis-routed to intermittent
+    # models. Industry-standard practice (Syntetos active-window guidance)
+    # is to classify on the active history. Gated by config so legacy
+    # behaviour stays one-flag away. Edge cases: a pair with zero sales
+    # ever has no last_sale anchor -> lifecycle leaves all rows
+    # is_likely_eol=False -> classification source unchanged -> the
+    # min_observations guard inside classify_dataset still forces those
+    # pairs to ``intermittent``.
+    exclude_eol_tail = bool(classification_cfg.get("exclude_eol_tail", True))
+    classification_source = train_window
+    if exclude_eol_tail and "is_likely_eol" in classification_source.columns:
+        pre_rows = len(classification_source)
+        classification_source = classification_source[~classification_source["is_likely_eol"]]
+        excluded = pre_rows - len(classification_source)
+        if excluded:
+            logger.info(
+                "Classification: excluded %d EOL-tail rows so ADI/CV^2 "
+                "reflect active history (set classification."
+                "exclude_eol_tail=false to keep legacy behaviour).",
+                excluded,
+            )
     classes_df = classify_dataset(
-        train_window, group_keys, target_col,
+        classification_source, group_keys, target_col,
         float(classification_cfg["adi_intermittent_threshold"]),
         float(classification_cfg["cv2_erratic_threshold"]),
         min_observations=int(classification_cfg.get("min_observations_for_classification", 3)),
     )
+    # Surface the class mix so ops can sanity-check it against FMCG priors
+    # (typical: smooth 20-40%, intermittent 30-50%, erratic 5-15%, lumpy
+    # 15-30%). A wildly skewed split (e.g. 95% intermittent) usually points
+    # at a data quality issue upstream rather than a real demand pattern.
+    if not classes_df.empty:
+        class_counts = classes_df["class"].value_counts().to_dict()
+        total = int(sum(class_counts.values()))
+        mix = ", ".join(
+            f"{cls}={n} ({n / total:.1%})"
+            for cls, n in sorted(class_counts.items(), key=lambda kv: -kv[1])
+        )
+        logger.info("Class distribution (%d pairs): %s", total, mix)
 
     logger.info("Step 9: per-pair outlier treatment (flag-aware, bounds from train window)")
     outlier_cfg = cfg["cleaning"].get("per_pair_outlier", {}) or {}
@@ -433,6 +524,27 @@ def run_training(config_path, on_step=None):
             len(te_df_frozen), te_global_mean, te_smoothing,
         )
 
+    # Persist the per-pair origin map so the trend feature
+    # ``periods_since_start`` stays date-anchored at the same point in
+    # both train AND inference. Computed from the FULL training window
+    # (``agg``) so we capture each pair's true earliest observation
+    # before split. Inference reads this artifact and falls back to
+    # inline min only for pairs that didn't exist at training (cold
+    # start).
+    from ..feature_engineering.temporal_features import (
+        fit_pair_origins, save_pair_origins,
+    )
+    pair_origins_df = fit_pair_origins(agg, group_keys, date_col)
+    if not pair_origins_df.empty:
+        save_pair_origins(
+            os.path.join(cfg["paths"]["artifacts_dir"], "pair_origins.json"),
+            origins_df=pair_origins_df, group_keys=group_keys,
+        )
+        logger.info(
+            "pair_origins: persisted %d entries to artifacts_dir",
+            len(pair_origins_df),
+        )
+
     feats = build_features(
         agg, group_keys, date_col, target_col, classes_df, cfg["feature_engineering"],
         holiday_cfg=cfg.get("holidays"),
@@ -441,6 +553,7 @@ def run_training(config_path, on_step=None):
         granularity=freq,
         full_date_range=full_date_range,
         target_encoding_artifact=te_artifact,
+        pair_origins=pair_origins_df,
         forecast_horizon=horizon,
     )
 
@@ -449,6 +562,29 @@ def run_training(config_path, on_step=None):
         "Split: train=%d val=%d test=%d (test_horizon=%d, val_horizon=%d periods)",
         len(train), len(val), len(test), test_horizon, val_horizon,
     )
+
+    # K-fold OOF target encoding for training rows ONLY. The full-window
+    # encoding ``build_features`` applied above leaks each training row's
+    # own target back into its own ``te_pair_mean`` (weight ~ 1/(n+
+    # smoothing) per row; ~9% per row at n=1, m=10). We overwrite the
+    # train-split portion with an OOF map so each train row's encoding
+    # is fit on the OTHER K-1 folds. Val/test rows weren't in the
+    # training fold set at all, so the full-window encoding they
+    # received from ``build_features`` is leak-free for them. Inference
+    # uses the saved full-window artifact for the same reason.
+    if te_cfg.get("enabled", False) and not train.empty and "te_pair_mean" in train.columns:
+        from ..feature_engineering.target_encoding import fit_oof_encoding
+        n_folds = int(te_cfg.get("oof_folds", 5))
+        oof_series, _, _ = fit_oof_encoding(
+            train, group_keys, target_col, te_smoothing, n_folds=n_folds,
+        )
+        train = train.copy()
+        train["te_pair_mean"] = oof_series.values
+        logger.info(
+            "target_encoding: applied %d-fold OOF to %d train rows "
+            "(val/test/inference keep full-window encoding)",
+            n_folds, len(train),
+        )
     _step("feature_engineering", "completed")
 
     # ------------------------------------------------------------------
@@ -749,9 +885,13 @@ def run_training(config_path, on_step=None):
                         m_name, cls_train, cls_val, group_keys, date_col, target_col, cls_feature_cols,
                         n_trials=scaled_n_trials,
                         timeout=int(cfg["hyperparameter_tuning"]["timeout_seconds"]),
-                        metric=selection_metric,
+                        metric=_resolve_selection_metric(selection_metric, cls),
                         tuning_cfg=cfg["hyperparameter_tuning"],
                         random_seed=cfg["project"].get("random_seed"),
+                        # Persist the study so a future run can warm-start
+                        # and an operator can audit which params won.
+                        artifacts_dir=cfg["paths"]["artifacts_dir"],
+                        demand_class=cls,
                     )
                     # Tuned output overrides matching params but keeps
                     # granularity/seed defaults that Optuna doesn't know about.
@@ -794,7 +934,7 @@ def run_training(config_path, on_step=None):
 
                 m_metrics = compute_all(test_merged[target_col].values, test_merged["prediction"].values, metrics_names)
                 logger.info("{} {} test metrics: {}".format(cls, m_name, m_metrics))
-                cls_class_metric[m_name] = m_metrics.get(selection_metric)
+                cls_class_metric[m_name] = m_metrics.get(_resolve_selection_metric(selection_metric, cls))
                 # ``regime=direct``: 1-step direct prediction over the test
                 # window. The recursive multi-step regime is scored by
                 # _recursive_test_predict() after the per-class loop and
@@ -936,7 +1076,7 @@ def run_training(config_path, on_step=None):
             sel_label = "validation" if can_select_on_val else "test"
             logger.info("Per-pair model selection for {} on {} set".format(cls, sel_label))
             pair_best = _per_pair_evaluate(
-                selection_source, group_keys, date_col, target_col, selection_metric,
+                selection_source, group_keys, date_col, target_col, _resolve_selection_metric(selection_metric, cls),
                 pair_routes=pair_routes,
             )
             best_pred = _build_per_pair_predictions(pair_best, cls_test_predictions, group_keys, cls)
@@ -1037,6 +1177,26 @@ def run_training(config_path, on_step=None):
             history_for_recursive = pd.concat(
                 [train, val], ignore_index=True,
             ) if not val.empty else train.copy()
+
+            # Build per-pair best-model lookup from the pair_model_lookup
+            # rows accumulated during the per-class direct pass. This is
+            # the SAME selection that drove the direct-pass predictions
+            # written to test_predictions.csv, so the recursive pass
+            # scores each pair against the same model -- the only thing
+            # varying between the two metric rows is the regime (direct
+            # vs recursive), not the model. Previously this code passed
+            # ``pair_routes`` (Route dataclass instances), but Route has
+            # no ``best_model`` field, so the lookup inside the
+            # recursive evaluator returned None for every pair and fell
+            # through to the class's first captured model -- silently
+            # confounding direct-vs-recursive metrics.
+            pair_best_models: dict[tuple, str] = {}
+            for row in pair_model_lookup:
+                pk = tuple(row[k] for k in group_keys)
+                bm = row.get("best_model")
+                if isinstance(bm, str) and bm:
+                    pair_best_models[pk] = bm
+
             recursive_preds = recursive_test_predict(
                 val_fit_models_by_class=val_fit_models_by_class,
                 classes_df=classes_df,
@@ -1054,12 +1214,7 @@ def run_training(config_path, on_step=None):
                 granularity=freq,
                 forecast_horizon=horizon,
                 feature_cols_by_class=feature_cols_by_class,
-                # Pass per-pair routing so each pair is predicted with
-                # its own winner (matching the direct-pass selection).
-                # Without this, every pair would fall back to the first
-                # captured model in its class -- direct vs recursive
-                # metrics would compare different models, not regimes.
-                pair_routes=pair_routes,
+                pair_best_models=pair_best_models,
             )
             if not recursive_preds.empty:
                 joined = test[group_keys + [date_col, target_col]].merge(
@@ -1280,6 +1435,22 @@ def run_training(config_path, on_step=None):
                     pred = final_test_pred["prediction"]
                     final_test_pred["q_10"] = pd.concat([raw_q10, raw_q90, pred], axis=1).min(axis=1)
                     final_test_pred["q_90"] = pd.concat([raw_q10, raw_q90, pred], axis=1).max(axis=1)
+    # Attach meta columns (ItemName, CategoryName, WarehouseName) from
+    # the aggregated panel before write so DbPusher (which reads
+    # ``ItemName`` from this CSV) populates ``yf_demand_forecast.item_name``
+    # for the Test split too. Mirror of the same merge in
+    # inference_pipeline.py just before its ``future_forecast.csv``
+    # write -- keep the two in lockstep so both DataSplits land
+    # populated, never NULL.
+    if meta_cols:
+        meta_present = [c for c in meta_cols if c in agg.columns]
+        if meta_present:
+            meta_lookup = (
+                agg[group_keys + meta_present]
+                .drop_duplicates(subset=group_keys, keep="last")
+            )
+            final_test_pred = final_test_pred.merge(meta_lookup, on=group_keys, how="left")
+
     # Quantities ship as physical units -- ceiling at the source so every
     # downstream reader (drift, drawer, /summary) sees ints without
     # having to re-round.
@@ -1292,7 +1463,8 @@ def run_training(config_path, on_step=None):
     # Audit snapshot of training-time composite accuracy. UI tiles still
     # recompute from the CSV so this is a self-describing artifact only.
     if not final_test_pred.empty and target_col in final_test_pred.columns and "prediction" in final_test_pred.columns:
-        cls_arr = final_test_pred["class"].astype(str).to_numpy() if "class" in final_test_pred.columns else None
+        from demand_forecasting_pipeline.src.evaluation.metrics import resolve_class_array
+        cls_arr = resolve_class_array(final_test_pred)
         artifacts["composite_accuracy_pct"] = composite_summary(
             final_test_pred[target_col].to_numpy(),
             final_test_pred["prediction"].to_numpy(),
@@ -1326,10 +1498,19 @@ def run_training(config_path, on_step=None):
     # framework versions). Resolves the YAML's ``recursive_iterations:
     # auto`` to the concrete value used at inference time so a config
     # change after training trips the guard.
+    # Persist test-window bounds so inference can anchor its future
+    # skeleton at ``test_date_end + 1`` (no gap between Test and
+    # Forecast splits even when inference runs against a panel that
+    # has advanced beyond the training cutoff).
+    _test_dates = pd.to_datetime(test[date_col], errors="coerce").dropna() if not test.empty else None
+    _test_start = _test_dates.min().date().isoformat() if _test_dates is not None and not _test_dates.empty else None
+    _test_end   = _test_dates.max().date().isoformat() if _test_dates is not None and not _test_dates.empty else None
     artifacts["metadata"] = build_training_metadata(
         cfg,
         feature_cols=union_cols,
         resolved_recursive_iterations=resolve_recursive_iterations(cfg),
+        test_date_start=_test_start,
+        test_date_end=_test_end,
     )
 
     save_json(artifacts, os.path.join(cfg["paths"]["artifacts_dir"], "training_summary.json"))

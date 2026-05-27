@@ -1,8 +1,4 @@
-/**
- * Shared presentational block for AI analysis lists (strengths / weaknesses /
- * actions / root causes). Kept tiny and consistent with the rest of the app --
- * coloured card + bullet list.
- */
+/** Tone-coloured AI analysis card; strengths/weaknesses/actions/causes. */
 interface Props {
   title: string;
   items: string[];

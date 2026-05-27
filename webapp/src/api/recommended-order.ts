@@ -12,11 +12,7 @@ import type { RecommendationSummary } from "@/types/common";
 
 const c = () => getClient("recommendedOrder");
 
-/**
- * Frontend surface for the recommended-order service. Mirrors the
- * server-side route list: summary, generate, get, filter-options,
- * analytics/adoption, analytics/upcoming.
- */
+/** Recommended-order service surface. */
 export const recommendedOrderApi = {
   getSummary: () => c().get<RecommendationSummary>("/summary").then((r) => r.data),
 

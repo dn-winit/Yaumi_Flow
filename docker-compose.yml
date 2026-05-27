@@ -63,6 +63,11 @@ services:
     env_file: .env
     ports: ["${SS_PORT:-8004}:8004"]
     volumes:
+      # ``./data`` is mounted because leader-election writes the supervision
+      # scheduler.lock under <data-root>/supervision/. Without it, every
+      # container would get its own lock and the multi-replica guard would
+      # be useless.
+      - ./data:/app/data
       - ./sales_supervision/data:/app/sales_supervision/data
     restart: unless-stopped
     healthcheck:
@@ -102,10 +107,13 @@ services:
         VITE_SUPERVISION_URL: ""
         VITE_ANALYTICS_URL: ""
     ports: ["${WEBAPP_PORT:-80}:80"]
+    # ``service_healthy`` (not just ``service_started``) so the proxy doesn't
+    # accept browser requests before every backend has passed its healthcheck.
+    # Eliminates the cold-start flash of 502s when the stack boots.
     depends_on:
-      - data-import
-      - forecast
-      - orders
-      - supervision
-      - analytics
+      data-import: { condition: service_healthy }
+      forecast:    { condition: service_healthy }
+      orders:      { condition: service_healthy }
+      supervision: { condition: service_healthy }
+      analytics:   { condition: service_healthy }
     restart: unless-stopped

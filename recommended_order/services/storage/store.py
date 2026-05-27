@@ -1,10 +1,5 @@
-"""
-Recommendation store -- file-based canonical storage.
-
-One CSV per (date, route) in ``file_storage_dir``. Reads and writes go through
-this class only. DB replication is orthogonal and lives in ``DbPusher``; the
-store does not know or care whether a DB copy exists.
-"""
+"""Recommendation file store: one CSV per (date, route) under
+``file_storage_dir``. DB replication is orthogonal (DbPusher)."""
 
 from __future__ import annotations
 
@@ -57,8 +52,7 @@ class RecommendationStore:
     # ------------------------------------------------------------------
 
     def get(self, date: str, route_code: Optional[str] = None) -> pd.DataFrame:
-        """Return the recommendations for a date (optionally a single route).
-        Returns an empty frame when nothing is stored yet."""
+        """Recommendations for ``date`` (optionally one route); empty if absent."""
         if route_code:
             path = self._path(date, route_code)
             if not path.exists():
@@ -80,8 +74,7 @@ class RecommendationStore:
         return bool(list(self._dir.glob(f"recommendations_{date}_*.csv")))
 
     def exists_batch(self, date: str, route_codes: List[str]) -> Dict[str, bool]:
-        # One glob beats N stat() calls -- builds the present-routes set
-        # once, then a dict comprehension over the requested codes.
+        # One glob beats N stat() calls.
         present = {
             p.stem.rsplit("_", 1)[-1]
             for p in self._dir.glob(f"recommendations_{date}_*.csv")
@@ -108,7 +101,7 @@ class RecommendationStore:
         total = int(len(df))
         customers = int(df["CustomerCode"].nunique()) if "CustomerCode" in df.columns else 0
         items = int(df["ItemCode"].nunique()) if "ItemCode" in df.columns else 0
-        # newest mtime across the per-route files = "latest generated at"
+        # Newest mtime across per-route files = "latest generated at".
         newest_mtime = max(f.stat().st_mtime for f in files)
         generated_at = pd.Timestamp.fromtimestamp(newest_mtime).isoformat()
 

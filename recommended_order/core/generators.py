@@ -1,16 +1,7 @@
-"""
-Candidate generators -- each produces ``Candidate`` rows for one scoring lane.
+"""Candidate generators (one scoring lane each, pure functions).
 
-Ordered evaluation in the engine:
-
-    gen_history            -- the customer's own purchase patterns
-    gen_peer_cross_sell    -- items popular on the route this customer doesn't buy
-    gen_basket_complement  -- items that co-purchase with the history picks
-    gen_reactivation       -- long-dormant customers on today's journey
-    gen_seed               -- zero-history customers (first visit)
-
-Each generator is a pure function: (inputs) -> list[Candidate]. No I/O,
-no mutation of its inputs. The engine de-dupes and ranks across lanes.
+Order: history -> peer_cross_sell -> basket_complement -> reactivation -> seed.
+Engine de-dupes and ranks across lanes.
 """
 
 from __future__ import annotations
@@ -56,9 +47,7 @@ def _finalize(cand: Candidate, expl: Explanation) -> Candidate:
     return cand
 
 
-# ===========================================================================
-# gen_history -- the customer's own purchase patterns
-# ===========================================================================
+# gen_history: customer's own purchase patterns.
 
 def gen_history(
     customer: str,
@@ -192,26 +181,9 @@ def gen_history(
     return out
 
 
-# ===========================================================================
-# gen_peer_cross_sell -- lookalike-customer cross-sell (Sprint 2)
-# ===========================================================================
-#
-# Replaces the Sprint-1 route-popularity heuristic. New algorithm:
-#
-#   1. ``lookalike_ctx`` holds a recency-weighted customer x item matrix and
-#      the precomputed pairwise cosine similarities (built once per route by
-#      ``engine._lookalike_context`` using ``calibration.recency_half_life_days``).
-#   2. For the target customer we pick top-K most-similar peers where
-#      K = ``calibration.peer_lookalike_k``.
-#   3. For every van item the target has not bought, score =
-#      sum(sim_p * weight[p, item]) / sum(sim_p). Normalisation uses ONLY
-#      the similarities of peers who actually bought the item -- a peer
-#      who didn't buy the item shouldn't pull the denominator up.
-#   4. Emit candidates whose score clears the data-driven floor
-#      ``max(calibration.peer_lookalike_floor, P75(observed_scores))``.
-#   5. Quantity = similarity-weighted median across the K peers who bought
-#      the item (never the route median -- fixes the Sprint-1 bug).
-#   6. Top-``calibration.peer_max_per_customer`` per target.
+# gen_peer_cross_sell: top-K similar peers weight a candidate van item;
+# similarity-weighted median qty across buyers; floor = max(calibration
+# floor, P75 of observed scores).
 
 def gen_peer_cross_sell(
     customer: str,
@@ -248,15 +220,8 @@ def gen_peer_cross_sell(
     peer_weights = matrix[top_k_idx]                    # (K, n_items)
     peer_qty = qty_matrix[top_k_idx]                    # (K, n_items)
 
-    # Score items: per-item similarity-weighted mean of recency weights,
-    # normalised only across peers who bought the item.
-    #
-    # Edge case (Sprint-3, Theme C.3): brand-new SKUs.
-    # A van item that nobody on the route has ever bought (e.g. a product
-    # launched yesterday) will have ``peer_weights[:, j] == 0`` for every
-    # peer. ``denom`` collapses to 0 for that column, ``np.where`` yields
-    # score=0, and the item is cleanly filtered out by the ``>= floor`` gate
-    # below. No exception, no special casing.
+    # Per-item similarity-weighted mean, normalised across actual buyers
+    # only. Brand-new SKUs (no peer buyers) yield score=0 cleanly.
     bought_mask = peer_weights > 0                      # (K, n_items)
     sim_col = top_sims[:, None]                         # (K, 1)
     numer = (sim_col * peer_weights).sum(axis=0)        # (n_items,)
@@ -264,10 +229,8 @@ def gen_peer_cross_sell(
     with np.errstate(invalid="ignore", divide="ignore"):
         scores = np.where(denom > 0, numer / denom, 0.0)
 
-    # We intentionally do NOT drop items the target has in their own history:
-    # history-lane picks will outrank peer for those, but a high-conviction peer
-    # signal still flows through merge_and_rank as a corroborating Signal, and
-    # items with only faint or stale history get a useful second opinion here.
+    # Don't drop items already in history: history outranks peer in
+    # merge_and_rank, but the corroborating peer signal still attaches.
 
     # Restrict to van items that exist in the matrix
     van_mask = np.zeros_like(scores, dtype=bool)
@@ -316,7 +279,7 @@ def gen_peer_cross_sell(
         median_qty = float(_weighted_median(qtys, weights))
         if median_qty <= 0:
             continue
-        # Quantity ceil so a 17.4 median reads as 18, never 17.
+        # Ceil so a 17.4 median reads as 18.
         qty = min(van_qty, max(1, int(np.ceil(median_qty))))
         n_peer_buyers = int(buyers_mask.sum())
         score_val = float(scores[j])
@@ -347,13 +310,9 @@ def gen_peer_cross_sell(
         pscore = calibration.tier_cuts["consider"] + min(1.0, score_val) * (
             calibration.tier_cuts["should_stock"] - calibration.tier_cuts["consider"]
         )
-        # When the customer HAS bought this item before, populate the
-        # per-customer history fields directly so the saved row carries
-        # truthful values (peer becomes a "second opinion on a known
-        # item"). When they have NOT, leave them at 0 -- ``purchase_count
-        # == 0`` is the load-bearing contract that downstream consumers
-        # use to mean "no personal history; days_since / cycle / freq are
-        # not applicable for this customer-item pair".
+        # If the customer has bought this item, fill history fields
+        # truthfully; else leave at 0 (purchase_count==0 is the canonical
+        # "no personal history" contract).
         own_hist = item_dict.get(item)
         if own_hist is not None and not own_hist.empty:
             own_purchase_count = int(len(own_hist))
@@ -405,9 +364,7 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
     return float(v[idx])
 
 
-# ===========================================================================
-# gen_basket_complement -- items that co-purchase with the history picks
-# ===========================================================================
+# gen_basket_complement: items that co-purchase with history picks.
 
 def gen_basket_complement(
     history_picks: List[Candidate],
@@ -510,14 +467,8 @@ def gen_reactivation(
         return []
     days_since_any = (target_dt - last).days
 
-    # Edge case (Sprint-3, Theme C.6): returning customer (was dormant, now active).
-    # A customer who had a 100-day silence but bought again 3 days ago is NOT
-    # dormant today -- their last-buy is well inside calibration.dormancy_days
-    # so we simply don't emit reactivation recs. The engine's history lane
-    # drives their plan using the items they used to buy, and the quantity
-    # recency-weighting (fresh purchases dominate) naturally supplies the
-    # "fresh-start qty signal" the product brief calls for. This early exit
-    # makes that behaviour explicit.
+    # Re-awakened customers (recent buy inside dormancy window) flow through
+    # history lane instead; this early exit makes that explicit.
     if days_since_any <= calibration.dormancy_days:
         return []
 
@@ -560,9 +511,7 @@ def gen_reactivation(
     return out
 
 
-# ===========================================================================
-# gen_seed -- zero-history customers
-# ===========================================================================
+# gen_seed: zero-history customers (first visit).
 
 def gen_seed(
     customer: str,
@@ -610,14 +559,12 @@ def gen_seed(
     return out
 
 
-# ===========================================================================
-# merge_and_rank
-# ===========================================================================
+# merge_and_rank.
 
 def merge_and_rank(candidates: List[Candidate]) -> List[Candidate]:
-    """De-dupe by item_code (keep highest priority, merge signal lists +
-    promote real metric values from the loser when the winner has only
-    placeholder zeros), then sort by priority desc."""
+    """De-dupe by item_code (keep highest priority; merge signal lists;
+    promote real metric values from loser when winner has 0 placeholders)
+    then sort by priority desc."""
     by_item: Dict[str, Candidate] = {}
     for cand in candidates:
         prev = by_item.get(cand.item_code)
@@ -630,10 +577,8 @@ def merge_and_rank(candidates: List[Candidate]) -> List[Candidate]:
     return sorted(by_item.values(), key=lambda c: -c.priority_score)
 
 
-# Per-customer-history fields a peer/basket/seed/reactivation candidate
-# emits as 0/0.0 placeholders (they're not in scope for those generators).
-# When merging, prefer the loser's value if it's non-zero -- a HISTORY-source
-# loser carries real days_since/cycle/freq/etc. for the same item.
+# History-derived metric fields that non-history generators emit as 0
+# placeholders; merge promotes the loser's value when it's informative.
 _HISTORY_METRIC_FIELDS: Tuple[str, ...] = (
     "days_since", "cycle_days", "frequency_pct", "pattern_quality",
     "purchase_count", "trend_factor", "avg_qty", "churn_probability",
@@ -641,23 +586,19 @@ _HISTORY_METRIC_FIELDS: Tuple[str, ...] = (
 
 
 def _merge(winner: Candidate, loser: Candidate) -> Candidate:
-    """Merge loser into winner: signals (de-duped by kind) plus any real
-    history-derived metric the winner lacks. Keeps the winner's score,
-    source and qty -- those are load-bearing for ranking and allocation."""
+    """Merge loser into winner: signals (de-duped by kind) + any real
+    history-derived metric the winner lacks. Winner's score/source/qty
+    are load-bearing and preserved."""
     # Signals
     seen = {s["kind"] for s in winner.signals}
     extra = [s for s in loser.signals if s["kind"] not in seen]
     if extra:
         winner.signals = winner.signals + extra
-    # Metric backfill: if the winner has the field at its default (0 / 0.0
-    # / 1.0 for trend_factor) and the loser has a real value, take the
-    # loser's. This keeps peer-wins-over-history rows from saving zeros for
-    # fields the customer's history actually answers.
+    # Metric backfill: take loser's value when winner has the field at its
+    # default (trend_factor==1.0 treated as neutral).
     for name in _HISTORY_METRIC_FIELDS:
         wv = getattr(winner, name)
         lv = getattr(loser, name)
-        # Treat trend_factor==1.0 as "neutral / no signal" -- a history
-        # loser may carry an informative non-1 factor.
         winner_default = (wv == 0 or wv == 0.0) or (name == "trend_factor" and wv == 1.0)
         loser_informative = (lv != 0 and lv != 0.0) and not (name == "trend_factor" and lv == 1.0)
         if winner_default and loser_informative:

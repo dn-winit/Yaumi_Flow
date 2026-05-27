@@ -92,16 +92,18 @@ def main() -> int:
     active_dates_df = db.execute_query(
         "SELECT DISTINCT CAST(trx_date AS NVARCHAR(10)) AS d "
         "FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-        f"WHERE route_code='{ROUTE}' AND trx_date BETWEEN '{START}' AND '{END}' "
+        "WHERE route_code=? AND trx_date BETWEEN ? AND ? "
         "  AND (ISNULL(yaumi_fresh_load,0) > 0 OR ISNULL(yaumi_leftover,0) > 0 "
         "       OR ISNULL(actual_sold,0) > 0);",
+        params=(ROUTE, START, END),
         db="aiml",
     )
     active_set = {str(d) for d in active_dates_df["d"].tolist()}
     api_dates = {pd.Timestamp(row["date"]).strftime("%Y-%m-%d") for row in (resp.daily or [])}
     print(f"  API active_days={sorted(api_dates)}")
     print(f"  DB  active_days={sorted(active_set)}")
-    active_list = "','".join(sorted(api_dates))
+    active_list = sorted(api_dates)
+    placeholders = ",".join(["?"] * len(active_list)) if active_list else "NULL"
     db_t = db.execute_query(
         "SELECT "
         "  SUM(ISNULL(yaumi_total_van_load,0)) AS rep_van, "
@@ -109,8 +111,9 @@ def main() -> int:
         "  SUM(ISNULL(actual_sold,0)) AS sold, "
         "  COUNT(*) AS rows_in_scope "
         "FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-        f"WHERE route_code='{ROUTE}' AND trx_date IN ('{active_list}') "
+        f"WHERE route_code=? AND trx_date IN ({placeholders}) "
         "  AND (ISNULL(fresh_load,0) + ISNULL(opening_stock,0)) > 0;",
+        params=(ROUTE, *active_list),
         db="aiml",
     ).iloc[0]
     print(f"  DB (carry-aware + same active days): rep_van={float(db_t['rep_van']):.1f} "
@@ -187,7 +190,8 @@ def main() -> int:
         "SUM(ISNULL(total_van_load,0)) AS our_van, "
         "SUM(CASE WHEN forecast_dormant=1 THEN 1 ELSE 0 END) AS dormant "
         "FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-        f"WHERE route_code='{ROUTE}' AND trx_date='{TODAY}';",
+        "WHERE route_code=? AND trx_date=?;",
+        params=(ROUTE, TODAY),
         db="aiml",
     ).iloc[0]
     print(
@@ -209,7 +213,8 @@ def main() -> int:
             db_r = db.execute_query(
                 "SELECT SUM(ISNULL(total_van_load,0)) AS v "
                 "FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-                f"WHERE route_code='{r.route_code}' AND trx_date='{TODAY}';",
+                "WHERE route_code=? AND trx_date=?;",
+                params=(r.route_code, TODAY),
                 db="aiml",
             ).iloc[0]
             delta = abs(float(r.predicted_qty) - float(db_r["v"]))
@@ -229,29 +234,30 @@ def main() -> int:
         "SELECT 'rec.cust' AS m, "
         "CAST(COUNT(DISTINCT customer_code) AS BIGINT) AS v "
         "FROM [YaumiAIML].[dbo].[yf_recommended_orders] "
-        f"WHERE trx_date='{TODAY}' "
+        "WHERE trx_date=? "
         "UNION ALL SELECT 'rec.qty', "
         "CAST(ISNULL(SUM(recommended_quantity),0) AS BIGINT) "
         "FROM [YaumiAIML].[dbo].[yf_recommended_orders] "
-        f"WHERE trx_date='{TODAY}' "
+        "WHERE trx_date=? "
         "UNION ALL SELECT 'sup.cust', "
         "CAST(COUNT(DISTINCT c.customer_code) AS BIGINT) "
         "FROM [YaumiAIML].[dbo].[yf_supervision_customers] c "
         "JOIN [YaumiAIML].[dbo].[yf_supervision_routes] r "
         "ON r.session_id=c.session_id "
-        f"WHERE r.supervision_date='{TODAY}' "
+        "WHERE r.supervision_date=? "
         "UNION ALL SELECT 'sup.qty_rec', "
         "CAST(ISNULL(SUM(c.qty_recommended),0) AS BIGINT) "
         "FROM [YaumiAIML].[dbo].[yf_supervision_customers] c "
         "JOIN [YaumiAIML].[dbo].[yf_supervision_routes] r "
         "ON r.session_id=c.session_id "
-        f"WHERE r.supervision_date='{TODAY}' "
+        "WHERE r.supervision_date=? "
         "UNION ALL SELECT 'sup.qty_act', "
         "CAST(ISNULL(SUM(c.qty_actual),0) AS BIGINT) "
         "FROM [YaumiAIML].[dbo].[yf_supervision_customers] c "
         "JOIN [YaumiAIML].[dbo].[yf_supervision_routes] r "
         "ON r.session_id=c.session_id "
-        f"WHERE r.supervision_date='{TODAY}';",
+        "WHERE r.supervision_date=?;",
+        params=(TODAY, TODAY, TODAY, TODAY, TODAY),
         db="aiml",
     )
     print(xc.to_string(index=False))
@@ -286,13 +292,14 @@ def main() -> int:
         "      OVER (PARTITION BY item_code ORDER BY trx_date) AS prev_left, "
         "    LAG(trx_date,1) OVER (PARTITION BY item_code ORDER BY trx_date) AS prev_date "
         "  FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-        f"  WHERE route_code='{ROUTE}' AND trx_date BETWEEN '{START}' AND '{END}'"
+        "  WHERE route_code=? AND trx_date BETWEEN ? AND ?"
         ") "
         "SELECT COUNT(*) AS pairs, "
         "  SUM(CASE WHEN DATEDIFF(day, prev_date, trx_date)=1 THEN 1 ELSE 0 END) AS contig, "
         "  SUM(CASE WHEN DATEDIFF(day, prev_date, trx_date)=1 "
         "       AND ABS(prev_left - our_open) < 0.001 THEN 1 ELSE 0 END) AS chain_ok "
         "FROM c WHERE prev_date IS NOT NULL;",
+        params=(ROUTE, START, END),
         db="aiml",
     ).iloc[0]
     print(f"  adjacent_pairs: {int(chain['pairs'])}  "
@@ -314,9 +321,10 @@ def main() -> int:
         "  ISNULL(actual_sold,0) AS sold, "
         "  ISNULL(leftover_to_next_day,0) AS leftover "
         "FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
-        f"WHERE route_code='{ROUTE}' AND item_code='50-0730' "
-        f"  AND trx_date BETWEEN '{START}' AND '{END}' "
+        "WHERE route_code=? AND item_code=? "
+        "  AND trx_date BETWEEN ? AND ? "
         "ORDER BY trx_date;",
+        params=(ROUTE, "50-0730", START, END),
         db="aiml",
     )
     print(f"    {'date':<12}{'open':>8}{'fresh':>8}{'van':>8}{'sold':>8}"
@@ -362,7 +370,7 @@ def main() -> int:
         "    LAG(trx_date,1) "
         "      OVER (PARTITION BY route_code, item_code ORDER BY trx_date) AS prev_date"
         "  FROM [YaumiAIML].[dbo].[yf_sales_transactions]"
-        "  WHERE trx_date BETWEEN DATEADD(day,-14,'2026-05-13') AND '2026-05-13'"
+        "  WHERE trx_date BETWEEN DATEADD(day,-14,?) AND ?"
         "),"
         " checked AS ("
         "  SELECT *,"
@@ -381,6 +389,7 @@ def main() -> int:
         " FROM checked"
         " GROUP BY route_code"
         " ORDER BY route_code;",
+        params=(TODAY, TODAY),
         db="aiml",
     )
     print(f"  {'route':<8}{'pairs':>8}{'contig':>9}{'chain_ok':>11}{'X-Y_ok':>10}{'(non-cap)':>11}")

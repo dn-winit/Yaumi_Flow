@@ -23,12 +23,7 @@ interface Props {
   emptyMessage?: string;
 }
 
-/**
- * Clickable customer grid for the Supervision live session. Mirrors
- * RouteGrid's visual language so the workflow tabs feel of-a-piece, but
- * each tile carries a customer-specific header (code — name) plus the
- * recommendation summary the supervisor needs at a glance.
- */
+/** Clickable customer grid for the live session; mirrors RouteGrid's tile language. */
 export default function CustomerGrid({
   customers,
   onSelect,

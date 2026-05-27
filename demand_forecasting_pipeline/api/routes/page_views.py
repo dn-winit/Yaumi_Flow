@@ -1,15 +1,7 @@
-"""Page-view endpoints.
+"""Page-view endpoints; one HTTP fetch per page state.
 
-One HTTP fetch per page state. Every number on a page (tile, chart,
-table) is computed inside one request handler from one snapshot of the
-source frame, so the surfaces on the same page cannot disagree.
-
-The webapp is a render layer. It never aggregates, sorts, filters, or
-substitutes business fields. All such logic lives here -- single source
-of truth, byte-for-byte consistent.
-
-ASCII-only: no smart quotes, em-dashes, mathematical symbols, or other
-non-ASCII bytes anywhere in this file or in any string returned by it.
+All aggregation/sort/filter lives here (single source of truth, byte-consistent).
+The webapp is a render layer. ASCII-only output.
 """
 
 from __future__ import annotations
@@ -54,23 +46,13 @@ _DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 
 router = APIRouter(prefix="/page-views", tags=["page-views"])
 
-# Demand classes whose p_demand is a real probability. Smooth / erratic
-# emit synthetic 0/1 fallbacks that would skew the risky count, so they
-# are excluded from at_risk and from has_real_confidence.
+# Real-probability classes; smooth/erratic emit synthetic 0/1 fallbacks (excluded from at_risk).
 REAL_PROBABILITY_CLASSES = frozenset({"intermittent", "lumpy"})
 
 
 def _guard_masked_items(route_code: str, date: str) -> frozenset[str]:
-    """Items on (route, date) where the journey-aware concentration mask
-    would zero the load. Used to tag rows in the explainability popup so
-    a 0 load reads as "skipped: top buyer not on today's plan" rather
-    than an unexplained zero.
-
-    Identical inputs to ``enrich_with_load``'s mask, just inferred at
-    read-time so we don't need a new column on yf_demand_forecast.
-    Both indices are mtime-cached, so the cost is paid once per CSV
-    revision per process.
-    """
+    """Items on (route, date) where the journey-aware concentration mask zeroes the load.
+    Same inputs as enrich_with_load's mask; both indices mtime-cached."""
     s = get_settings()
     if not getattr(s, "concentration_guard_enabled", False):
         return frozenset()
@@ -98,9 +80,7 @@ def _guard_masked_items(route_code: str, date: str) -> frozenset[str]:
     return frozenset(masked)
 
 
-# ----------------------------------------------------------------------
-# Helpers (route-local, not shared -- page-view-shaping concerns only)
-# ----------------------------------------------------------------------
+# Helpers (route-local; page-view-shaping concerns only).
 
 
 def _opt_float(x: object) -> Optional[float]:
@@ -129,34 +109,40 @@ def _first_present(df: pd.DataFrame, names: tuple[str, ...]) -> Optional[str]:
     return None
 
 
-# Item catalog (price + name) for revenue + display. Single source of
-# truth: ``data/imports/sales_recent.csv``, which data_import's
-# /eda/items endpoint also reads from. We keep an in-process mtime-keyed
-# cache so consecutive page-view requests don't re-aggregate the file.
+def _count_csv_rows_on_date(csv_path, column: str, target: str) -> int:
+    """Count CSV rows where ``column`` equals ``target`` without materialising
+    the file in pandas. Streams line-by-line; constant memory.
+
+    Used by the staleness probe to compare CSV vs DB row counts for one
+    date; a full ``pd.read_csv(... usecols=[col])`` of a 500MB mirror was
+    the dominant cost on miss-path requests.
+    """
+    import csv as _csv
+    with open(csv_path, "r", encoding="utf-8", newline="") as fh:
+        reader = _csv.reader(fh)
+        try:
+            header = next(reader)
+        except StopIteration:
+            return 0
+        try:
+            idx = header.index(column)
+        except ValueError:
+            return 0
+        target_s = str(target)
+        count = 0
+        for row in reader:
+            if idx < len(row) and row[idx] == target_s:
+                count += 1
+        return count
+
+
+# Item catalog (price + name); mtime-keyed cache against sales_recent.csv.
 _CATALOG_CACHE: dict[str, object] = {"mtime": 0.0, "by_item": {}}
 
 
-# Cross-source staleness signal. CSV-backed endpoints serve from the
-# data_import mirror; if the cascade between the recon cron and
-# data_import is lagging, the mirror can be missing rows the DB already
-# has. We use a CONTENT-based check (row count on today's date) rather
-# than a timestamp comparison because:
-#   * SQL Server returns ``GETDATE()`` in the server's local TZ (UTC in
-#     this deployment); Windows ``os.stat().st_mtime`` is Unix epoch
-#     anchored to the OS's local TZ (Dubai). Naive datetimes from pyodbc
-#     carry no TZ, so any time-arithmetic between the two surfaces is
-#     ambiguous by exactly the server vs OS offset.
-#   * Atomic CSV rewrites bump ``mtime`` even when no rows changed, so
-#     ``mtime`` is a "last write" signal, not a "newest data" signal.
-#
-# Comparing today's row count is robust to both: a missing day-of cron
-# cascade leaves the CSV's row count for today below the DB's, which
-# the probe catches; cosmetic re-writes leave row counts equal, so no
-# false positive.
-#
-# The probe is mtime-cached: re-query only when the CSV is rewritten.
-# Between rewrites the comparison can only widen (DB grows, CSV stays
-# put), so a single warning per CSV revision is sufficient.
+# Cross-source staleness signal: row count on today's date (CSV vs DB).
+# Content-based (not mtime-based) to avoid SQL Server TZ vs OS TZ ambiguity
+# and to ignore cosmetic CSV rewrites. Mtime-cached: one DB probe per CSV revision.
 _STALENESS_CACHE: dict[str, Any] = {
     "mtime": -1.0,
     "csv_today_rows": None,
@@ -165,18 +151,10 @@ _STALENESS_CACHE: dict[str, Any] = {
 
 
 def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
-    """Emit a WARNING when the sales_transactions CSV is missing rows
-    for ``date`` that exist in the DB.
+    """WARN when sales_transactions CSV is missing date rows that exist in DB.
 
-    Content-based check: compares CSV row count to DB row count for the
-    queried date. Robust to:
-      * SQL Server TZ vs OS TZ (no time math involved).
-      * Cosmetic CSV rewrites (atomic rename bumps mtime even when row
-        count is unchanged -- this probe stays silent in that case).
-
-    Mtime-keyed: one DB probe per CSV revision. Between rewrites the
-    answer cannot change in the direction that fires (DB only grows;
-    CSV stays put), so caching is safe.
+    Content-based (CSV row count vs DB row count); robust to TZ ambiguity and
+    cosmetic CSV rewrites. Mtime-keyed: one DB probe per CSV revision.
     """
     s = get_settings()
     csv_path = s.shared_data_path(s.sales_transactions_file)
@@ -194,14 +172,14 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
         if csv_today is None or db_today is None:
             return
     else:
-        # Count CSV rows for the queried date. Streamed read with usecols
-        # so we never pull the whole frame into memory -- one column,
-        # one filter, one count.
+        # Count CSV rows for date via line-streaming so a 500MB sales_transactions
+        # mirror doesn't materialise in RAM just to compute one integer.
+        # The CSV is comma-separated with TrxDate as the FIRST column; we scan
+        # the header to locate it, then count lines whose first matching field
+        # equals the target date. Falls back to pd.read_csv usecols if the
+        # column order changes.
         try:
-            csv_today = int(
-                pd.read_csv(csv_path, usecols=["TrxDate"], low_memory=False)
-                .pipe(lambda d: (d["TrxDate"].astype(str) == str(date)).sum())
-            )
+            csv_today = _count_csv_rows_on_date(csv_path, "TrxDate", str(date))
         except Exception as exc:
             logger.warning(
                 "van_load_staleness_csv_count_failed route=%s date=%s err=%s",
@@ -209,22 +187,26 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
             )
             return
         try:
+            # Use a tight (5s) connect timeout: this probe is a diagnostic
+            # warning logger, not part of the response payload. The default
+            # ``s.db.connection_timeout`` (120s) was blocking the UI for
+            # 2 minutes when YaumiAIML was unreachable. Same for the
+            # per-query budget -- the COUNT is a single row, sub-second
+            # under normal load.
             probe_pool = get_pool(
                 s.db.connection_string(),
                 max_connections=max(int(s.db.retry_attempts) + 1, 4),
-                connect_timeout=int(s.db.connection_timeout),
-                query_timeout=int(s.db.query_timeout),
+                connect_timeout=5,
+                query_timeout=10,
                 autocommit=True,
             )
-            # Compare like-for-like: the CSV mirror is restricted to
-            # ``live_route_codes`` at the source, so the DB count has to
-            # be filtered the same way or the probe would always look
-            # "DB > CSV" and fire a false-positive warning on every
-            # tick. Empty config falls back to the unfiltered count so
-            # legacy behavior is preserved when the registry isn't set.
+            # CSV mirror restricted to live_route_codes; filter DB count likewise to avoid false positives.
             routes = list(getattr(s, "live_route_codes", []) or [])
+            # Single source of truth -- the FQN constant lives in reconciliation_refresh
+            # so a future rename touches one place.
+            from demand_forecasting_pipeline.services.reconciliation_refresh import _SALES_TARGET_TABLE
             db_sql = (
-                "SELECT COUNT(*) FROM [YaumiAIML].[dbo].[yf_sales_transactions] "
+                f"SELECT COUNT(*) FROM {_SALES_TARGET_TABLE} "
                 "WITH (NOLOCK) WHERE trx_date = ?"
             )
             db_params: list = [str(date)]
@@ -246,10 +228,7 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
         _STALENESS_CACHE["csv_today_rows"] = csv_today
         _STALENESS_CACHE["db_today_rows"]  = db_today
 
-    # Only fire when DB has MORE rows than CSV for this date -- the
-    # direction that indicates a failed cascade. Equal counts (the
-    # healthy case) and CSV-has-more (impossible under correct flow,
-    # but treated as benign) stay silent.
+    # Fire only when DB > CSV (failed cascade); equal or CSV-more is benign.
     if db_today > csv_today:
         logger.warning(
             "sales_transactions_csv_missing_rows route=%s date=%s "
@@ -259,12 +238,7 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
 
 
 def _load_item_catalog() -> dict[str, dict[str, object]]:
-    """Return ``{ItemCode: {"name": str, "price": float | None}}``.
-
-    Reads from ``shared_data_dir/sales_recent_file`` (the same CSV
-    data_import's catalog endpoint reads from). Cached by file mtime so
-    a hot file is read at most once per refresh.
-    """
+    """{ItemCode: {name, price}} from sales_recent.csv (data_import's source); mtime-cached."""
     s = get_settings()
     path = s.shared_data_path(s.sales_recent_file)
     if not path.exists():
@@ -283,9 +257,7 @@ def _load_item_catalog() -> dict[str, dict[str, object]]:
     df["ItemCode"] = df["ItemCode"].astype(str).str.strip()
     df["AvgUnitPrice"] = pd.to_numeric(df["AvgUnitPrice"], errors="coerce")
 
-    # Mean unit price per item over the available window. Mirrors the
-    # avg_price field /eda/items emits. Last name wins when an item has
-    # been renamed (rare in this dataset; deterministic via groupby).
+    # Mean price per item over window; last-name on rename (deterministic via groupby).
     has_category = "CategoryName" in df.columns
     agg_spec: dict[str, tuple[str, str]] = {
         "name":  ("ItemName",     "last"),
@@ -330,31 +302,16 @@ def van_load_page_view(
     svc: ArtifactService = Depends(get_artifact_service),
     van_svc: VanLoadService = Depends(get_van_load_service),
 ) -> VanLoadPageView:
-    """Composite payload for the VanLoad route-detail page.
+    """Composite payload for the VanLoad route-detail page (one frame snapshot).
 
-    Pipeline (all inside one request, one frame snapshot):
-      1. Read the unified van-load forecast frame (Forecast + Test).
-      2. Scope to (route_code, date).
-      3. Reconcile via the V5_b engine if DB-stored values are absent.
-         Same canonical function ``db_pusher`` and the daily 03:30 cron
-         use, so the inline value equals what the next cron will write.
-      4. Compute the carry-aware summary (van_load = carried + issued).
-      5. Slice top-N for the chart, sorted desc by units_to_load.
-      6. Emit table rows, sorted desc, with reconciled bounds and the
-         server-side has_real_confidence verdict.
-      7. Cross-check the identity carried + issued == van_load_qty.
+    Reads enriched van-load frame, scopes to (route, date), reconciles via V5_b if
+    DB values absent, computes carry-aware summary, top-N chart, table rows, and
+    cross-checks the identity carried + issued == van_load_qty.
     """
-    # Surface CSV-vs-DB staleness via WARNING log. No fallback -- the
-    # CSV is still the served source; this is purely an ops signal so
-    # a lagging cascade is visible rather than silent.
+    # WARN on CSV-vs-DB staleness; CSV stays the served source (ops signal only).
     _log_sales_transactions_staleness(str(route_code), str(date))
 
-    # ``van_load_view_enriched`` returns the reconciled van-load frame --
-    # DB-stored when the cron has filled ``recommended_load`` for the
-    # window, else lazily computed via the canonical engine and cached
-    # behind a multi-file mtime key. Centralised so the engine runs at
-    # most once per (forecast, sales_transactions, sales_recent,
-    # customer_data, journey_plan) snapshot fleet-wide.
+    # van_load_view_enriched: DB-stored when cron filled it, else lazily engine-computed and mtime-cached.
     fc_df = svc.van_load_view_enriched()
     if fc_df.empty:
         return VanLoadPageView(
@@ -440,9 +397,7 @@ def van_load_page_view(
 
     df["_item_code"] = df["ItemCode"].astype(str)
 
-    # Forecast frame's own price column wins when present; otherwise
-    # fall back to the shared sales-recent catalog. Same source the
-    # /eda/items endpoint serves so prices match across the stack.
+    # Forecast frame's price column wins; sales-recent catalog as fallback.
     price_col = _first_present(
         df, ("AvgUnitPrice", "avg_unit_price", "unit_price")
     )
@@ -459,9 +414,7 @@ def van_load_page_view(
 
     catalog = _load_item_catalog()
     if catalog:
-        # Fill missing prices and names from the catalog. Rows that
-        # already carry a value keep it -- the forecast frame is the
-        # authoritative source when both have a value.
+        # Fill missing prices/names from catalog; forecast frame wins when both have values.
         price_missing = df["_price"].isna()
         if price_missing.any():
             df.loc[price_missing, "_price"] = (
@@ -479,12 +432,8 @@ def van_load_page_view(
                 name_missing, "_item_code"
             ].map(lambda c: str(catalog.get(c, {}).get("name") or c))
 
-    # ``expected_demand`` is the engine's final per-day target (post bias
-    # correction + recent-pattern envelope); ``recent_avg_per_selling_day``
-    # is the historical anchor for context. Together they tell the
-    # supervisor *why* this size. CSV mirror exposes either the
-    # PascalCase (DB-canonical) or the snake_case (post-FileStorage
-    # rename) form; both accepted.
+    # expected_demand = engine's final per-day target; recent_avg = historical anchor.
+    # CSV mirror exposes PascalCase or snake_case; both accepted.
     _recent_avg_col = _first_present(
         df, ("recent_avg_per_selling_day", "RecentAvgPerSellingDay"),
     )
@@ -523,16 +472,17 @@ def van_load_page_view(
     df["_guard_skipped"] = df["_item_code"].astype(str).isin(_guard_set) if _guard_set else False
 
 
-    # ---- Summary tile (carry-aware) -----------------------------------
+    # Summary tile (carry-aware). _opening_stock/_units_to_load come from the enrich
+    # idempotency overlay so DB-persisted rows match the cron's written values exactly.
     carry_mask = (df["_units_to_load"] > 0) | (df["_opening_stock"] > 0)
     carry_df = df.loc[carry_mask]
 
-    carried_qty = float(
-        carry_df.loc[carry_df["_opening_stock"] > 0, "_opening_stock"].sum()
-    )
-    issued_qty = float(
-        carry_df.loc[carry_df["_units_to_load"] > 0, "_units_to_load"].sum()
-    )
+    # Tile aggregates use per-row pack_qty (same as table) for byte-consistent identity.
+    from common.numeric import pack_qty
+    carried_per_item = carry_df.loc[carry_df["_opening_stock"] > 0, "_opening_stock"].apply(pack_qty)
+    issued_per_item  = carry_df.loc[carry_df["_units_to_load"] > 0, "_units_to_load"].apply(pack_qty)
+    carried_qty = float(carried_per_item.sum())
+    issued_qty  = float(issued_per_item.sum())
     carried_items = int(
         carry_df.loc[carry_df["_opening_stock"] > 0, "_item_code"].nunique()
     )
@@ -542,11 +492,17 @@ def van_load_page_view(
     van_load_items = int(carry_df["_item_code"].nunique())
     van_load_qty = carried_qty + issued_qty
 
-    # Revenue + at-risk: load-this set only (units_to_load > 0).
+    # Revenue from ceiled cells (whole packs * price); currency() rounds once at wire boundary.
+    from common.numeric import currency
     load_df = df.loc[df["_units_to_load"] > 0]
     has_revenue = bool(load_df["_price"].notna().any())
     revenue_val = (
-        float((load_df["_units_to_load"] * load_df["_price"].fillna(0.0)).sum())
+        float(
+            (
+                load_df["_units_to_load"].apply(pack_qty)
+                * load_df["_price"].fillna(0.0)
+            ).sum()
+        )
         if has_revenue
         else None
     )
@@ -558,9 +514,7 @@ def van_load_page_view(
         ).sum()
     )
 
-    # Wire precision matches /predictions/forecast/route-summary (1 dp
-    # on quantities, 2 dp on revenue) so the page-view tile is byte-
-    # for-byte identical to the route-grid tile a click earlier.
+    # Quantities are integer; round(x, 1) retained for wire-contract stability.
     summary = VanLoadSummaryView(
         van_load_qty=round(van_load_qty, 1),
         van_load_items=van_load_items,
@@ -568,14 +522,12 @@ def van_load_page_view(
         carried_items=carried_items,
         issued_qty=round(issued_qty, 1),
         issued_items=issued_items,
-        revenue=round(revenue_val, 2) if revenue_val is not None else None,
+        revenue=currency(revenue_val) if revenue_val is not None else None,
         has_revenue=has_revenue,
         at_risk=at_risk,
     )
 
-    # Cross-check the summary identity. Floating-point sum should equal
-    # the components within 1e-6 by construction; a larger delta means
-    # the masks drifted apart and the caller should be alerted.
+    # Cross-check identity carried + issued == van_load_qty (delta > 1e-6 means masks drifted).
     identity_delta = abs((carried_qty + issued_qty) - van_load_qty)
     if identity_delta > 1e-6:
         logger.error(
@@ -597,32 +549,24 @@ def van_load_page_view(
         VanLoadChartItem(
             item_code=str(r["_item_code"]),
             item_name=str(r["_item_name"]),
-            # Same integer-ceil contract as the table row so chart and
-            # table always show identical numbers per SKU.
-            predicted=float(math.ceil(_to_float(r["_units_to_load"]))),
+            # Integer-ceil to match table per-SKU.
+            predicted=float(pack_qty(r["_units_to_load"])),
         )
         for _, r in chart_df.iterrows()
     ]
 
-    # ---- Table --------------------------------------------------------
-    # Carry-aware: keep rows with ANY truck contribution -- fresh load,
-    # yesterday's leftover, or both. Pure-carry rows (opening > 0,
-    # fresh = 0) are real physical inventory the rep is managing today
-    # and must surface in the table so the tile total (= sum of
-    # recommended_van_load) reconciles with the table by construction.
-    # Guard-masked rows stay in so the explainability popup can reach
-    # them and explain the zero. Chart stays load-only (zero-load bars
-    # would render as gaps anyway). Sort by total truck weight so
-    # heavy items lead, regardless of which side (fresh vs carry)
-    # produced the weight.
+    # Table (carry-aware): keep rows with any truck contribution (fresh, carry, or both).
+    # Pure-carry rows are real inventory; guard-masked rows kept so the popup can explain
+    # the zero. Sort by total truck weight.
     table_df = df.loc[
         (df["_units_to_load"] > 0)
         | (df["_opening_stock"] > 0)
         | df["_guard_skipped"].astype(bool)
     ].copy()
+    from common.numeric import pack_qty
     table_df["_recommended_van_load"] = (
-        table_df["_units_to_load"].apply(lambda x: math.ceil(_to_float(x)))
-        + table_df["_opening_stock"].apply(lambda x: math.ceil(_to_float(x)))
+        table_df["_units_to_load"].apply(pack_qty)
+        + table_df["_opening_stock"].apply(pack_qty)
     )
     table_df = table_df.sort_values("_recommended_van_load", ascending=False)
     table_rows: list[VanLoadTableRow] = []
@@ -633,16 +577,7 @@ def van_load_page_view(
             if pd.notna(cls_raw) and str(cls_raw).strip() and str(cls_raw) != "nan"
             else None
         )
-        # Minimal explain dict -- every field has a direct render in
-        # ExplainabilityModal. Three sections:
-        #   "How we got the load":
-        #     opening_stock (carry) + fresh-load -> total truck weight.
-        #     expected_demand (engine target) + recent_avg (anchor) as
-        #     the "why this size" pair.
-        #   forecast_below_recent: warning banner driven server-side.
-        #   guard_skipped: banner for journey-mask zeroed rows.
-        # All values are stored columns on yf_sales_transactions, surfaced
-        # here verbatim -- no client-side derivation.
+        # Minimal explain dict; ExplainabilityModal renders each field verbatim.
         def _opt_bool(v: Any) -> Optional[bool]:
             if v is None:
                 return None
@@ -660,26 +595,16 @@ def van_load_page_view(
             "forecast_below_recent": _opt_bool(r.get("_forecast_below_recent")),
             "guard_skipped": bool(r.get("_guard_skipped", False)),
         }
-        # Per-item truck weight = fresh load (engine recommendation) +
-        # carried stock (yesterday's leftover, forward-filled). Both
-        # ceil to whole packs so the headline equals the sum of its
-        # parts without rounding drift.
-        units_to_load_int = float(math.ceil(_to_float(r["_units_to_load"])))
-        opening_int = float(math.ceil(_to_float(r["_opening_stock"])))
+        # Per-item truck weight = fresh + carried, both ceiled to whole packs.
+        units_to_load_int = float(pack_qty(r["_units_to_load"]))
+        opening_int = float(pack_qty(r["_opening_stock"]))
         table_rows.append(
             VanLoadTableRow(
                 item_code=str(r["_item_code"]),
                 item_name=str(r["_item_name"]),
-                # Ceil to integer: matches the truck-load reality (a SKU
-                # ships in whole packs) and the RO data-manager's
-                # ``get_van_items`` rounding. Also kills the cosmetic
-                # "0.0" display that 1dp rounding produced for sub-half
-                # predictions (0 < x < 0.05) -- those rows now render as
-                # 1, the smallest pack the rep would actually load.
+                # Ceil to integer: SKU ships in whole packs (matches RO's get_van_items rounding).
                 units_to_load=units_to_load_int,
-                # Total truck weight for THIS item. The modal headline
-                # reads this; the math chain explains it as
-                # ``opening_stock + units_to_load``.
+                # Total truck weight = opening_stock + units_to_load.
                 recommended_van_load=units_to_load_int + opening_int,
                 p_demand=_opt_float(r["_p_demand"]),
                 demand_class=cls,
@@ -690,48 +615,48 @@ def van_load_page_view(
             )
         )
 
-    # ---- Per-(item, date) rows for the headline tile's popovers ------
-    # Same shape as PastPerformanceItem so a frontend renderer can share
-    # the row component between the past-performance drawer and today's
-    # van-load page. ``date`` is the queried date for every row.
-    #
-    # Single source: every per-item value below is read from ``df`` (=
-    # van_load_view, which LEFT JOINs sales_transactions.csv onto the
-    # forecast frame). Rep side comes from the persisted ``yaumi_*``
-    # columns -- same cells the daily cron writes from VW_GET_CLOSING_STOCK
-    # and VW_GET_LOAD_ALLOCATION_DETAILS, so the tile, the popover,
-    # and the past-performance drawer always agree.
+    # Per-(item, date) rows for tile popovers; same shape as PastPerformanceItem.
+    # All values read from df (van_load_view); rep side from persisted yaumi_* columns.
     catalog = _load_item_catalog()
+    # Vectorise the row materialisation: iterate over ``df.to_dict("records")``
+    # so each access is an O(1) dict lookup instead of a pandas Series
+    # __getitem__ (which is ~50x slower per access). On the hot drill-down
+    # path for a large route this cuts a multi-second response to milliseconds.
     items_payload: list[VanLoadPageViewItem] = []
-    for _, r in df.iterrows():
+    needed_cols = (
+        "_item_code", "_item_name", "_opening_stock", "_units_to_load",
+        "yaumi_opening_stock", "yaumi_fresh_load", "yaumi_total_van_load",
+        "yaumi_leftover", "actual_sold", "leftover_to_next_day",
+        "forecast_dormant",
+    )
+    # Ensure every column exists so we can rely on plain dict access below.
+    for c in needed_cols:
+        if c not in df.columns:
+            df[c] = None
+    records = df[list(needed_cols)].to_dict("records")
+    date_str = str(date)
+    for r in records:
         ic = str(r["_item_code"])
         rec_carry = _to_float(r["_opening_stock"])
         rec_fresh = _to_float(r["_units_to_load"])
         rec_van   = rec_carry + rec_fresh
-        past_left   = _to_float(r.get("yaumi_opening_stock"))
-        today_alloc = _to_float(r.get("yaumi_fresh_load"))
-        rep_van     = _to_float(r.get("yaumi_total_van_load", past_left + today_alloc))
-        sold_v      = _to_float(r.get("actual_sold"))
-        # Canonical sources: yaumi_leftover[d] for actual; leftover_to_next_day[d] for recommended.
-        # NULL stays NULL so the UI can render "no rep data" honestly.
-        actual_lo   = _to_float(r.get("yaumi_leftover"))
-        rec_lo      = _to_float(r.get("leftover_to_next_day"))
+        past_left   = _to_float(r["yaumi_opening_stock"])
+        today_alloc = _to_float(r["yaumi_fresh_load"])
+        yaumi_total_raw = r["yaumi_total_van_load"]
+        rep_van     = _to_float(yaumi_total_raw if yaumi_total_raw is not None
+                                else past_left + today_alloc)
+        sold_v      = _to_float(r["actual_sold"])
+        # actual_lo = yaumi_leftover[d]; rec_lo = leftover_to_next_day[d]. NULL preserved for "no rep data".
+        actual_lo   = _to_float(r["yaumi_leftover"])
+        rec_lo      = _to_float(r["leftover_to_next_day"])
         cat_name    = str(catalog.get(ic, {}).get("category") or "")
-        # Rep's actual loading from yf_sales_transactions.yaumi_*. The
-        # row carries NULL when reconciliation_refresh found no rep
-        # activity (no closing, no allocation) for the (route, item,
-        # date). ``_opt_float`` preserves that distinction so the UI
-        # can render "no rep data" instead of a fake zero.
-        yaumi_open  = _opt_float(r.get("yaumi_opening_stock"))
-        yaumi_fresh = _opt_float(r.get("yaumi_fresh_load"))
-        yaumi_total = _opt_float(r.get("yaumi_total_van_load"))
-        yaumi_left  = _opt_float(r.get("yaumi_leftover"))
-        # Dormancy flag from yf_sales_transactions.forecast_dormant.
-        # Defensive parse: the CSV mirror surfaces it as 0/1/NaN (DB
-        # roundtrip via CAST AS INT), and pre-backfill rows are NULL.
-        # NaN / missing -> None (no diagnostic yet populated), otherwise
-        # cast to bool through int so "0" / "1" string forms also work.
-        _dormant_raw = r.get("forecast_dormant")
+        # _opt_float preserves NULL distinction so UI shows "no rep data" instead of fake zero.
+        yaumi_open  = _opt_float(r["yaumi_opening_stock"])
+        yaumi_fresh = _opt_float(r["yaumi_fresh_load"])
+        yaumi_total = _opt_float(r["yaumi_total_van_load"])
+        yaumi_left  = _opt_float(r["yaumi_leftover"])
+        # forecast_dormant: CSV surfaces 0/1/NaN; NaN/missing -> None.
+        _dormant_raw = r["forecast_dormant"]
         if _dormant_raw is None:
             forecast_dormant_val: Optional[bool] = None
         else:
@@ -756,7 +681,7 @@ def van_load_page_view(
                 itemCode=ic,
                 itemName=str(r["_item_name"]),
                 categoryName=cat_name,
-                date=str(date),
+                date=date_str,
                 rep_van_load=round(rep_van, 2),
                 recommended_van_load=round(rec_van, 2),
                 actual_sold=round(sold_v, 2),
@@ -769,8 +694,7 @@ def van_load_page_view(
                 forecast_dormant=forecast_dormant_val,
             )
         )
-    # Sort: recommended_leftover desc (items still left over under our
-    # policy surface first), then recommended_van_load desc, itemCode asc.
+    # Sort: recommended_leftover desc, recommended_van_load desc, itemCode asc.
     items_payload.sort(
         key=lambda it: (
             -it.recommended_leftover,
@@ -779,10 +703,7 @@ def van_load_page_view(
         )
     )
 
-    # Identity log: sum(items[*].recommended_van_load) on today's rows
-    # equals today's headline van_load_qty. Both walk the same fc_df
-    # rows so the only way they diverge is a row included in one and
-    # filtered from the other. Tolerance lifted from settings.
+    # Identity: sum(items[*].recommended_van_load) == summary.van_load_qty (drift -> log).
     drift_threshold = float(get_settings().reconciliation_items_drift_threshold)
     items_van_load_sum = round(sum(it.recommended_van_load for it in items_payload), 2)
     if abs(items_van_load_sum - round(summary.van_load_qty, 2)) > drift_threshold:
@@ -812,13 +733,7 @@ def van_load_page_view(
 
 
 def _today_iso() -> str:
-    """Today as YYYY-MM-DD in the local timezone of the service host.
-
-    Mirrors the legacy frontend ``todayIso()`` helper -- both round to
-    midnight local. The drawer is strictly forward-looking so the
-    cutoff matters when the cron has produced a same-day forecast that
-    the supervisor has already acted on.
-    """
+    """Today as YYYY-MM-DD in local TZ; mirrors legacy frontend todayIso()."""
     return pd.Timestamp.now().normalize().strftime("%Y-%m-%d")
 
 
@@ -838,23 +753,15 @@ def forecast_drawer_page_view(
     ),
     svc: ArtifactService = Depends(get_artifact_service),
 ) -> ForecastDrawerView:
-    """Composite payload for the Upcoming-plan drawer.
+    """Composite payload for the Upcoming-plan drawer; scope (route, items, date>=from_date).
 
-    Pipeline:
-      1. Read the unified van-load forecast frame.
-      2. Scope to (route_code, optional item_codes, date >= from_date).
-      3. Reconcile via the engine if DB-stored values are absent.
-      4. Aggregate per-day predicted/q10/q90 (band only on single-SKU).
-      5. Emit table rows sorted (date asc, units_to_load desc).
-      6. Cross-check identity: total_van_load == sum(chart predicted).
+    Reconciles via engine if DB values absent; band only on single-SKU scope.
+    Cross-checks identity total_van_load == sum(chart predicted).
     """
     cutoff = (from_date or _today_iso()).strip()
     items_in = [str(c).strip() for c in (item_codes or []) if str(c).strip()]
 
-    # Same source-of-truth read as ``van_load_page_view`` -- the service
-    # method handles the DB-stored vs engine-fallback decision and caches
-    # the enriched frame so both endpoints share a single engine run per
-    # mtime window.
+    # Same enriched view as van_load_page_view; shared engine run per mtime window.
     fc_df = svc.van_load_view_enriched()
     if fc_df.empty:
         return ForecastDrawerView(
@@ -952,12 +859,7 @@ def forecast_drawer_page_view(
     df["_opening_stock"] = pd.to_numeric(
         df.get("opening_stock", 0.0), errors="coerce"
     ).fillna(0.0)
-    # ``expected_demand`` is the engine's final per-day target;
-    # ``recent_avg_per_selling_day`` is the historical anchor for the
-    # "why this size" pair on the modal. Mirrors the van-load explain
-    # dict so the same modal renders consistently on both surfaces.
-    # Forward-only rows skip the below-recent banner -- there's no past
-    # pattern to compare to yet.
+    # expected_demand + recent_avg drive the "why this size" pair (mirrors van-load explain).
     _recent_avg_col = _first_present(
         df, ("recent_avg_per_selling_day", "RecentAvgPerSellingDay"),
     )
@@ -971,11 +873,7 @@ def forecast_drawer_page_view(
         if _expected_col else pd.Series([0.0] * len(df), index=df.index)
     )
 
-    # The drawer drops zero-load rows from the table because they would
-    # be misleading to act on; the chart band derives from the same set
-    # so totals across surfaces remain consistent. Journey-aware mask
-    # is already applied upstream in the cron, so guarded rows have
-    # _units_to_load == 0 and never make it past this filter.
+    # Drop zero-load rows so chart/table totals stay consistent; guard mask applied upstream.
     df = df[df["_units_to_load"] > 0]
     if df.empty:
         return ForecastDrawerView(
@@ -986,35 +884,40 @@ def forecast_drawer_page_view(
             from_date=cutoff,
         )
 
-    # Quantiles are not additive across SKUs. The band is meaningful only
-    # when the drawer is scoped to a single SKU.
+    # Quantiles not additive across SKUs; band shown only for single-SKU scope.
     distinct_skus = int(df["_item_code"].nunique())
     show_band = distinct_skus == 1
 
-    # ---- Per-day chart series ----------------------------------------
+    # Per-day chart values use the same pack_qty cells as the table so identities hold.
+    from common.numeric import pack_qty
+    df = df.assign(
+        _qty_pack=df["_units_to_load"].apply(pack_qty),
+        _lb_pack=df["_lower_bound"].apply(pack_qty),
+        _ub_pack=df["_upper_bound"].apply(pack_qty),
+    )
     if show_band:
         chart_grouped = (
             df.groupby("TrxDate", as_index=False)
             .agg(
-                predicted=("_units_to_load", "sum"),
-                q10=("_lower_bound", "sum"),
-                q90=("_upper_bound", "sum"),
+                predicted=("_qty_pack", "sum"),
+                q10=("_lb_pack", "sum"),
+                q90=("_ub_pack", "sum"),
             )
             .sort_values("TrxDate")
         )
     else:
         chart_grouped = (
             df.groupby("TrxDate", as_index=False)
-            .agg(predicted=("_units_to_load", "sum"))
+            .agg(predicted=("_qty_pack", "sum"))
             .sort_values("TrxDate")
         )
 
     chart_data = [
         ForecastDrawerChartPoint(
             date=str(r["TrxDate"]),
-            predicted=round(_to_float(r["predicted"]), 2),
-            q10=round(_to_float(r["q10"]), 2) if show_band else None,
-            q90=round(_to_float(r["q90"]), 2) if show_band else None,
+            predicted=float(r["predicted"]),
+            q10=float(r["q10"]) if show_band else None,
+            q90=float(r["q90"]) if show_band else None,
         )
         for _, r in chart_grouped.iterrows()
     ]
@@ -1038,8 +941,7 @@ def forecast_drawer_page_view(
             if pd.notna(cls_raw) and str(cls_raw).strip() and str(cls_raw) != "nan"
             else None
         )
-        # Minimal explain dict -- same field set as the VanLoad page-view's
-        # explain so the modal renders identically on both surfaces.
+        # Minimal explain dict; same field set as VanLoad page-view.
         explain = {
             "opening_stock": _to_float(r["_opening_stock"]),
             "recent_avg_per_selling_day": _to_float(r["_recent_avg_per_selling_day"]),
@@ -1050,11 +952,8 @@ def forecast_drawer_page_view(
                 date=str(r["TrxDate"]),
                 item_code=str(r["_item_code"]),
                 item_name=str(r["_item_name"]),
-                # Ceil to integer (same contract as VanLoadTableRow):
-                # 0 < x < 0.05 rows previously rendered as 0.0 due to
-                # 1dp rounding; ceil emits 1, the smallest pack the rep
-                # actually loads.
-                units_to_load=float(math.ceil(_to_float(r["_units_to_load"]))),
+                # Ceil to integer (matches VanLoadTableRow); smallest loadable pack = 1.
+                units_to_load=float(pack_qty(r["_units_to_load"])),
                 p_demand=_opt_float(r["_p_demand"]),
                 demand_class=cls,
                 lower_bound=_opt_float(r["_lower_bound"]),
@@ -1064,8 +963,7 @@ def forecast_drawer_page_view(
             )
         )
 
-    # Cross-check identity: total_van_load equals the chart series sum
-    # by construction; flag if rounding pushed them apart.
+    # Identity: total_van_load == sum(chart.predicted); flag drift.
     chart_sum = round(sum(p.predicted for p in chart_data), 2)
     if abs(chart_sum - round(total_van_load, 2)) > float(get_settings().reconciliation_items_drift_threshold):
         logger.error(

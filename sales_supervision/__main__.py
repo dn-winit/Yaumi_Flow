@@ -18,12 +18,7 @@ from sales_supervision.config.settings import get_settings
 
 def main() -> None:
     settings = get_settings()
-    # Production guard: supervision can technically boot without any
-    # cross-service URL (the cron fail-soft path silently logs and
-    # returns empty), but in production this would mean zero visit
-    # data, zero LLM briefings, and zero recommendations -- the entire
-    # supervisor surface goes dark. Hard-fail at boot keeps the
-    # configuration error from looking like "feature is broken".
+    # Hard-fail boot on missing cross-service URLs; fail-soft would mean a silently-dark supervisor.
     require_env(
         [
             "SS_DATA_IMPORT_URL",

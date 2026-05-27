@@ -30,42 +30,21 @@ const MISSING = "--";
 interface Props {
   open: boolean;
   onClose: () => void;
-  // The drawer is opened from a route's live session, so the route is
-  // fixed in the filter scope. Warehouse + route are hidden in the
-  // filter bar (redundant); the user can further narrow by category or
-  // item via the same multi-select cascade the dashboard uses.
+  // Route is fixed (drawer opens from a live session); warehouse + route are hidden.
   routeCode?: string;
 }
 
-/**
- * Past-analysis drawer for recommendation adoption. Mirrors the Plan
- * step's Past-analysis drawer: same filter bar (Reporting period +
- * Category + Item, with Warehouse / Route hidden as redundant), same
- * shared FilterDimensions hook, and the same ``(start_date, end_date)``
- * wire shape every dashboard surface now uses.
- *
- * Backend `/analytics/adoption` honours category_codes + item_codes
- * directly so the metrics + charts here are real scoped views, not a
- * cosmetic filter bar over unfiltered data.
- */
+/** Past-analysis drawer for recommendation adoption; mirrors the Plan-step drawer.
+ *  /analytics/adoption honours category + item filters, so the views are real scoped data. */
 export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
-  // Adoption pivots on the most recent date sales_recent.csv actually
-  // covers, not on a hardcoded calendar offset -- a Monday open onto a
-  // Saturday "yesterday" would surface the empty state. Hook is static-
-  // tier cached so subsequent opens are instant.
+  // Anchor on actual last active date so a Monday open onto Saturday doesn't show empty.
   const { date: lastActiveDate, loading: lastActiveLoading } = useLastActiveDate();
 
   const [period, setPeriod] = useState<ReportingPeriod | null>(null);
   const [filters, setFilters] = useState<DashboardFilters>(EMPTY_FILTERS);
 
-  // Seed both filters and the period whenever the drawer opens, the
-  // route changes, or the data's last active date shifts (e.g. after
-  // the morning data_import cron). Period gates downstream queries so
-  // nothing fires against a wrong calendar default.
-  //
-  // Wait for ``useLastActiveDate`` to resolve, then fall back to today
-  // if the CSV is empty -- otherwise the drawer would render its
-  // loading state indefinitely with no way for the user to recover.
+  // Seed filters + period on open/route-change/last-active-shift. Falls back to today
+  // if CSV is empty so the drawer always renders (instead of infinite loading state).
   useEffect(() => {
     if (!open) return;
     if (lastActiveLoading) return;
@@ -81,10 +60,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode, lastActiveDate, lastActiveLoading]);
 
-  // The picker emits ISO ``(start_date, end_date)`` directly -- no
-  // working-day resolution round-trip required. Empty windows / weekend-
-  // only selections naturally surface as "no recommendations stored" in
-  // the empty-state path below.
+  // Picker emits ISO (start_date, end_date) directly; empty windows surface as empty-state below.
   const params = useMemo(
     () =>
       period
@@ -111,11 +87,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   );
   const s = data?.summary ?? null;
 
-  // Window label and the padded daily series both come straight from
-  // the backend response -- no client-side date math, no client-side
-  // padding. The server returns ``daily`` already aligned to every
-  // working day in the window, with ``adoption_pct=null`` on days
-  // without recommendations (the chart treats nulls as a break).
+  // Server-aligned daily series (adoption_pct=null on no-rec days → chart shows a break).
   const windowLabel =
     data?.start_date && data?.end_date
       ? fmtDateRange(data.start_date, data.end_date)

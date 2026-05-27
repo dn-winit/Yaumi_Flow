@@ -7,9 +7,7 @@ interface Command {
   keywords: string;
 }
 
-// Visit is intentionally absent: it is a sub-step of Plan (reachable
-// only after the supervisor picks a route in Van Load), so a top-level
-// shortcut would land users on a guard that bounces them back to Plan.
+// Visit is omitted: it requires Plan's route pick, so a direct shortcut would bounce.
 const COMMANDS: Command[] = [
   { label: "Dashboard", path: "/", keywords: "home overview kpi" },
   { label: "Forecasting Pipeline", path: "/pipeline", keywords: "train retrain model" },

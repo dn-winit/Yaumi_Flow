@@ -1,16 +1,7 @@
-"""
-Business constants for the recommendation engine.
+"""Constants for the recommendation engine.
 
-Sprint 1 overhaul: every threshold that used to be a guess (0.75 completion
-gate, 75/55/35/15 tier cuts, 50-unit qty benchmark, 90-day dormancy, etc.)
-now lives in ``RouteCalibration`` -- derived per route from observed data.
-
-What remains here is strictly:
-    * safety clamps (hard floors/ceilings on calibration outputs)
-    * tiny, non-business constants (cache TTL, storage settings)
-    * the top-level container imported by DI
-
-No hardcoded business thresholds. No dead code.
+Business thresholds live in ``RouteCalibration`` (per-route, data-driven);
+this module only carries safety clamps and infra constants.
 """
 
 from __future__ import annotations
@@ -25,12 +16,8 @@ from typing import Dict
 
 @dataclass(frozen=True)
 class SafetyClamps:
-    """Hard bounds that calibration outputs are clamped to.
-
-    These are not business thresholds -- they are guardrails preventing
-    pathological calibration results when a route has too little data or
-    a weird distribution (e.g. a route with one customer skewing P25).
-    """
+    """Hard bounds clamped onto calibration outputs (guardrails, not
+    business thresholds)."""
 
     # Item-frequency floor (share of visits that include the item)
     freq_floor_min: float = 0.02
@@ -119,21 +106,14 @@ class SafetyClamps:
     feedback_ema_alpha: float = 0.3               # smoothing for per-source multipliers
     feedback_multiplier_min: float = 0.5
     feedback_multiplier_max: float = 1.5
-    # ---- Sprint-4: feedback shrinkage / attribution ----
-    # Empirical-Bayes prior strength is derived per-run as
-    #   k = max(1, corpus_median_n / feedback_prior_strength_divisor).
-    # A route needs roughly k attributed samples to overcome the corpus prior.
+    # Feedback shrinkage / attribution. EB prior strength is derived per-run
+    # as k = max(1, corpus_median_n / feedback_prior_strength_divisor).
     feedback_prior_strength_divisor: float = 4.0
-    # Sessions whose per-route reject-rate exceeds this many stdevs from the
-    # route's session-level distribution are treated as adversarial and
-    # excluded from attribution (pure data-driven; no hardcoded supervisors).
+    # Sessions with reject-rate > N stdevs from route's distribution are
+    # treated as adversarial and excluded from attribution.
     feedback_adversarial_zscore: float = 3.0
-    # Corpus-wide hit-rate floor: if a source's corpus hit rate falls below
-    # this we log a warning (the source itself is weak; fix is out-of-scope
-    # for the multiplier which is relative).
+    # Warn when a source's corpus hit-rate falls below this (weak source).
     feedback_bad_source_floor: float = 0.05
-    # Persisted multipliers path (relative to shared_data_dir). Small (KB) --
-    # stores only the multipliers + sample count, never session data.
     feedback_multipliers_filename: str = "feedback_multipliers.json"
 
     # ---- Sprint-3: cache safety (LRU + TTL) ----
@@ -146,9 +126,8 @@ class SafetyClamps:
     # ---- Sprint-3: peer generator degeneracy guard ----
     peer_min_active_customers: int = 3
 
-    # ---- Sprint-3: reactivation refinement ----
-    # If the customer was dormant but recently bought (within this many days),
-    # they're "re-awakening" -- route them back through history lane, not seed.
+    # Dormant customers who bought within this window route back through
+    # history lane (re-awakening), not the seed lane.
     reactivation_recent_buy_days: int = 14
 
     # ---- Sprint-3: generation metrics sink ----
@@ -161,10 +140,15 @@ class SafetyClamps:
 
 @dataclass(frozen=True)
 class StorageSettings:
-    """Database storage parameters."""
+    """Database storage parameters.
+
+    ``generated_by`` is set per-write-site (``"API"`` in db_pusher, ``"file"``
+    in store.py) -- not centralised here. The previously-stored default
+    ``"SYSTEM_CRON"`` was never read and contradicted the observable values
+    in the database.
+    """
     batch_size: int = 1000
     max_save_attempts: int = 3
-    generated_by: str = "SYSTEM_CRON"
 
 
 # Analytics caches (adoption, planning) -- 5 min keeps drawer re-opens instant.
@@ -178,14 +162,8 @@ ANALYTICS_CACHE_TTL_SECONDS = 300
 @dataclass(frozen=True)
 class UniversalFilters:
     """Pre-calibration filters that apply regardless of route calibration."""
-    # 0 means "let the per-route calibrated completion gate decide". The
-    # engine already filters customer history to ``TrxDate < target_date``
-    # (see engine.generate), so the smallest possible days_since here is 1
-    # (a purchase from the calendar day before the visit). The completion
-    # gate (days_since / cycle >= calibration.completion_gate) is the
-    # right place to make the "is it due?" call -- a hard floor here just
-    # starves daily-cycle customers (e.g. supermarkets that take fresh
-    # bakery every day) of recommendations they actually need.
+    # 0 = defer to the per-route completion gate. A hard floor here would
+    # starve daily-cycle customers (e.g. fresh-bakery supermarkets).
     min_days_since_purchase: int = 0
     # "Regular" path needs at least this many purchases of an item.
     min_purchase_count_standard: int = 3
@@ -197,9 +175,8 @@ class UniversalFilters:
 
 @dataclass(frozen=True)
 class RecommendationConstants:
-    """Top-level container. All *business* thresholds have moved to
-    ``RouteCalibration`` in ``core/calibration.py``; this object only
-    carries safety clamps and infra settings."""
+    """Top-level DI container. Business thresholds live in
+    ``RouteCalibration``; this carries safety clamps + infra only."""
     clamps: SafetyClamps = field(default_factory=SafetyClamps)
     filters: UniversalFilters = field(default_factory=UniversalFilters)
     storage: StorageSettings = field(default_factory=StorageSettings)

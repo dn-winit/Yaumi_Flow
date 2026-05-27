@@ -1,6 +1,4 @@
-"""
-Metrics endpoints -- model performance data.
-"""
+"""Metrics endpoints -- model performance data."""
 
 from __future__ import annotations
 

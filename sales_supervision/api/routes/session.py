@@ -1,11 +1,7 @@
-"""
-Session lifecycle: initialize -> visit (auto-persisted). Plus the live
-unplanned-visits poll the live UI uses to flag drop-ins.
+"""Session lifecycle: initialize -> visit (auto-persisted) + live unplanned poll.
 
-Every ``process_visit`` call upserts the route header + the visited
-customer + that customer's items into YaumiAIML in the background.
-There is no separate "save session" step -- the DB stays in sync with
-the in-memory session as visits land.
+Each process_visit upserts route/customer/items into YaumiAIML as a BackgroundTask;
+no separate save step.
 """
 
 from __future__ import annotations
@@ -29,12 +25,8 @@ from sales_supervision.api.dependencies import (
 from sales_supervision.api.schemas import (
     AlsoBoughtRow,
     InitSessionRequest,
-    LlmSaveResponse,
     ProcessVisitRequest,
     RedistributionView,
-    SaveBriefingRequest,
-    SaveCustomerAnalysisRequest,
-    SaveRouteAnalysisRequest,
     SavedVisitsResponse,
     SessionResponse,
     SessionSummary,
@@ -57,35 +49,18 @@ from sales_supervision.services.live_actuals import LiveActualsClient
 router = APIRouter(prefix="/session", tags=["session"])
 
 
-# In-memory active sessions, keyed by session_id. Without a save the
-# entry would otherwise live forever in a long-running process and leak
-# memory. The registry caps both concurrent in-memory sessions and how
-# long an idle session is held; both come from Settings so deployments
-# with longer shifts (12-hour depots, weekend coverage) tune via env
-# vars without code changes.
+# In-memory session registry; LRU + TTL bounds long-running memory.
 from sales_supervision.config.settings import get_settings as _get_ss_settings
 
 
 class _SessionRegistry:
-    """LRU + TTL store for in-flight supervision sessions.
-
-    Also vends a per-session ``threading.Lock`` so concurrent ``/visit``
-    requests on the same session serialise their in-memory mutations.
-    Without this, a supervisor double-tap on the same customer (or a
-    rapid sequence of taps across customers) interleaves
-    ``mgr.process_visit`` writes to ``session.customers[*]`` and the
-    final session state -- and the snapshot the background DB-upsert
-    captures -- becomes non-deterministic.
-    """
+    """LRU + TTL store for in-flight sessions; vends per-session locks for /visit serialisation."""
 
     def __init__(self, maxsize: int, ttl_seconds: int) -> None:
         self._maxsize = maxsize
         self._ttl = ttl_seconds
         self._items: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
-        # Locks live alongside sessions and are evicted with them. The
-        # outer mutex protects the locks dict from concurrent allocate
-        # / pop; each per-session lock is held only during a single
-        # visit's in-memory mutation + snapshot.
+        # Locks track session lifetime; outer mutex serialises dict allocate/pop.
         self._locks: Dict[str, threading.Lock] = {}
         self._locks_mutex = threading.Lock()
 
@@ -122,8 +97,7 @@ class _SessionRegistry:
         if entry is None:
             return None
         ts, session = entry
-        # Refresh access time so an actively-used session does not get
-        # evicted purely because it was created early in the day.
+        # Refresh access time; long-lived sessions stay warm.
         self._items[session_id] = (time.time(), session)
         self._items.move_to_end(session_id)
         return session
@@ -133,8 +107,37 @@ class _SessionRegistry:
         self._drop_lock(session_id)
 
 
-_ss = _get_ss_settings()
-_sessions = _SessionRegistry(_ss.session_registry_max, _ss.session_ttl_seconds)
+# Lazy singleton: don't capture session_registry_max / session_ttl_seconds at
+# import time -- env overrides applied AFTER first import would otherwise be
+# silently ignored. ``get_settings()`` is ``@lru_cache``-d so this resolves to
+# the same instance every call after first construction.
+_REGISTRY_LOCK = threading.Lock()
+_sessions_singleton: Optional["_SessionRegistry"] = None
+
+
+def _sessions_registry() -> "_SessionRegistry":
+    global _sessions_singleton
+    if _sessions_singleton is not None:
+        return _sessions_singleton
+    with _REGISTRY_LOCK:
+        if _sessions_singleton is None:
+            s = _get_ss_settings()
+            _sessions_singleton = _SessionRegistry(
+                s.session_registry_max, s.session_ttl_seconds,
+            )
+    return _sessions_singleton
+
+
+class _SessionsProxy:
+    """Attribute-forwarding shim so existing ``_sessions.foo`` call sites keep
+    working without per-call refactors. Resolves the underlying lazy registry
+    on every access."""
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(_sessions_registry(), name)
+
+
+_sessions: Any = _SessionsProxy()
 
 
 @router.post("/initialize", response_model=SessionResponse)
@@ -145,37 +148,88 @@ def initialize_session(
     db_saver: DbSaver = Depends(get_db_saver),
     auto_visit_svc=Depends(get_auto_visit_service),
 ):
-    # Page-open is READ-ONLY: hydrate from whatever the cron has already
-    # persisted, return immediately. Reconciliation is fired as a
-    # BackgroundTask so any post-last-tick YaumiLive activity catches up
-    # in <60s via the saved-visits poll; the frontend's ``countsReady``
-    # gate keeps the tile in skeleton until /session/saved confirms, so
-    # the supervisor never sees stale numbers. Invalidating the cron's
-    # cached session here forces its next tick to pick up the journey
-    # plan that's current at page-open time.
+    # Page-open is read-only; reconciliation fires as a BackgroundTask. Invalidate
+    # the cron's cached session so its next tick picks up today's journey plan.
     if auto_visit_svc is not None and db_saver.available:
         auto_visit_svc.invalidate_route(req.route_code, req.date)
         background_tasks.add_task(
             auto_visit_svc.reconcile_route,
-            req.route_code, req.date, skip_llm=True,
+            req.route_code, req.date,
         )
 
-    # Recommendations: client-supplied take precedence (freshest after
-    # a manual regenerate); server falls back to recommended_order so
-    # the wire contract stays optional. Single source either way.
+    # Client-supplied recs win (freshest after manual regenerate); server fallback keeps the wire contract optional.
     recs = req.recommendations
     if not recs and auto_visit_svc is not None:
         recs = auto_visit_svc._recs.get_recommendations(req.route_code, req.date) or []
     session = mgr.create_session(req.route_code, req.date, recs)
+    saved: Optional[Dict[str, Any]] = None
     if db_saver.available:
-        saved = db_saver.load_session_visits(req.route_code, req.date)
+        # Hydration only consumes actualSales + score; redistributions are loaded on drill-in.
+        saved = db_saver.load_session_visits(
+            req.route_code, req.date,
+            include_redistributions=False,
+        )
         if saved:
             mgr.hydrate_saved_visits(session, saved)
     _sessions.set(session.session_id, session)
+    # Pin DB-derived visit_totals so /initialize and /session/saved emit byte-identical numbers.
+    summary_dict = session.summary()
+    if saved and saved.get("visit_totals"):
+        summary_dict["visit_totals"] = saved["visit_totals"]
     return SessionResponse(
         success=True,
-        session=SessionSummary(**session.summary()),
+        session=SessionSummary(**summary_dict),
     )
+
+
+@router.post("/internal/invalidate-day")
+def internal_invalidate_day(
+    date: str,
+    auto_visit_svc=Depends(get_auto_visit_service),
+    db_saver: DbSaver = Depends(get_db_saver),
+) -> Dict[str, Any]:
+    """Drop AutoVisitService's cached sessions for ``date`` AND repair stale rows.
+
+    Called by the demand_forecasting retrain cascade after fresh recs land in
+    yf_recommended_orders. Two effects:
+
+      1. **Cache drop** -- AutoVisitService's _sessions cache for that date is
+         dropped so the next reconcile tick re-hydrates from the canonical
+         DB state. Deliberately does NOT touch the route-handler _sessions
+         LRU: that holds the in-flight session object backing an open
+         supervisor's /visit calls, and dropping it mid-route would 404 the
+         next tap.
+
+      2. **DB repair** -- runs the supervision-side backfill SQL that closes
+         the rec-timing race. Items written with original_recommended_qty=0
+         while recs were unavailable get their rec_qty filled from
+         yf_recommended_orders; customer-level qty_recommended is recomputed
+         from the now-correct item rows; route-level
+         planned_qty_recommended / visited_qty_recommended /
+         route_performance_score / qty_fulfillment_rate are recomputed from
+         the now-correct customer rows.
+
+    Repair is idempotent: running it twice has no effect on rows that are
+    already correct. Failure of the repair branch does NOT poison the cache
+    drop (best-effort) -- the next /initialize will still see the fresh DB
+    state if the repair landed.
+    """
+    if auto_visit_svc is None:
+        return {"success": False, "reason": "auto_visit_service_disabled"}
+    dropped = auto_visit_svc.invalidate_all_for_date(date)
+    repair = {"success": False, "skipped": True, "reason": "db_saver_unavailable"}
+    if db_saver is not None and getattr(db_saver, "available", False):
+        try:
+            repair = db_saver.repair_supervision_day(date)
+        except Exception as exc:
+            logger.warning("repair_supervision_day failed for date=%s: %s", date, exc)
+            repair = {"success": False, "error": str(exc)}
+    return {
+        "success": True,
+        "date": date,
+        "auto_visit_dropped": dropped,
+        "repair": repair,
+    }
 
 
 @router.post("/visit", response_model=VisitResponse)
@@ -185,20 +239,12 @@ def process_visit(
     mgr: SessionManager = Depends(get_session_manager),
     live: LiveActualsClient = Depends(get_live_actuals),
     db_saver: DbSaver = Depends(get_db_saver),
-    auto_visit_svc=Depends(get_auto_visit_service),
 ):
-    """Mark a customer visited and persist the visit to YaumiAIML.
+    """Mark a customer visited and persist to YaumiAIML via BackgroundTasks.
 
-    Per-item actuals are pulled live from YaumiLive via data_import --
-    the client never supplies them. Once the in-memory session is
-    updated, the route header, the visited customer's row, and that
-    customer's item rows are upserted in a single transaction. The
-    upsert runs as a FastAPI ``BackgroundTask`` so the response returns
-    to the field UI immediately and warehouse latency never blocks a
-    visit tap. A second BackgroundTask then fires the LLM briefing +
-    customer analysis so every column in the supervision tables --
-    including the LLM ones -- is populated within seconds of the
-    green-dot moment.
+    Actuals are pulled live from YaumiLive; the client never supplies them.
+    BackgroundTasks handle the DB upsert + saved-visits cache invalidation.
+    LLM analyses are generated on-demand by the webapp at click-time.
     """
     session = _sessions.get(req.session_id)
     if session is None:
@@ -214,22 +260,11 @@ def process_visit(
             detail=f"Customer {req.customer_code} not in session",
         )
 
-    # Per-session lock serialises in-memory mutation across concurrent
-    # ``/visit`` calls (supervisor double-tap, rapid-fire taps across
-    # customers). Lock duration covers the live-actuals fetch, the
-    # in-memory ``mgr.process_visit`` write, and the snapshot capture
-    # for the background upsert. The DB upsert itself runs outside the
-    # lock because it's already idempotent on (session_id, customer_code).
+    # Lock serialises in-memory mutation across rapid /visit taps; DB upsert runs outside (idempotent).
     with _sessions.lock_for(req.session_id):
         actual_sales = live.get_actuals(session.route_code, session.date, req.customer_code)
 
-        # Scoring evaluates planned items only; off-plan purchases are
-        # surfaced as ``alsoBought`` for the live UI and ALSO appended to
-        # ``customer.items`` with ``recommended_qty=0, tier=UNPLANNED`` so
-        # they ride through ``upsert_visit`` into ``yf_supervision_items``.
-        # That lets the saved-visits hydration emit them again on page
-        # reload (same wire shape as the live response), so off-plan
-        # purchases never silently disappear after a refresh.
+        # Off-plan purchases ride through customer.items with rec=0/tier=UNPLANNED so saved-visits hydration mirrors live.
         planned_item_codes = {it.item_code for it in customer.items}
         also_bought_rows = [
             AlsoBoughtRow(item_code=code, qty=int(qty))
@@ -256,19 +291,14 @@ def process_visit(
                 },
             ))
 
-        # Cumulative buffer ledger across the session's visited walk so
-        # this visit's allocation decisions reflect EVERY earlier visit's
-        # deposits and withdrawals. Single pass per /visit tap; cheap
-        # relative to the live-actuals fetch. The ledger is consumed
-        # server-side only -- buffer state is not surfaced on the wire.
+        # Cumulative buffer ledger so this visit's allocation accounts for every earlier visit.
         buffer_ledger = compute_buffer_ledger(session)
         redistribution_view = shape_redistribution_view(
             session, req.customer_code, is_drop_in=False,
             buffer_ledger=buffer_ledger,
         )
 
-        # Snapshot the current session state under the lock so the
-        # background upsert sees a coherent view.
+        # Snapshot under the lock so the background upsert sees a coherent view.
         snapshot = session.to_dict()
         session_totals = snapshot["visit_totals"]
         actual_qty = customer.total_actual
@@ -280,19 +310,15 @@ def process_visit(
             snapshot,
             req.customer_code,
         )
-        # Fire briefing + customer LLM right after the visit row lands so
-        # the green-dot moment populates every supervision column,
-        # including the LLM ones. FastAPI runs BackgroundTasks
-        # sequentially, so ``upsert_visit`` completes before this fires
-        # and the saver sees the just-persisted row. The 60s cron stays
-        # as a safety net for any visit that lands while this service is
-        # unreachable.
-        if auto_visit_svc is not None:
-            background_tasks.add_task(
-                auto_visit_svc.fire_llms_for_visit,
-                session,
-                req.customer_code,
-            )
+        # Invalidate saved-visits cache AFTER upsert (FastAPI runs BackgroundTasks sequentially).
+        background_tasks.add_task(
+            db_saver.invalidate_saved_visits,
+            session.route_code,
+            session.date,
+        )
+        # LLM analyses are generated on-demand by the webapp at click-time;
+        # the cron no longer fires them, and there's no DB column to persist
+        # to. Visit completion is purely a data-write event now.
 
     visit_payload = VisitResultPayload(
         score=VisitScore(
@@ -310,93 +336,10 @@ def process_visit(
     return VisitResponse(success=True, visit=visit_payload)
 
 
-# ----------------------------------------------------------------------
-# LLM-payload persistence
-#
-# Three artifacts, three endpoints. Each runs the actual DB write as a
-# FastAPI ``BackgroundTask`` so the UI returns immediately -- the LLM
-# response is already on screen by the time this fires. Body shape is
-# always (session_id, [customer_code], content); ``content`` is the
-# JSON-stringified analytics payload, stored as-is so a future schema
-# change in the LLM response doesn't require a DB migration.
-# ----------------------------------------------------------------------
-
-
-def _snapshot_or_error(
-    session_id: str, db_saver: Optional[DbSaver] = None,
-) -> tuple[Optional[Dict[str, Any]], Optional[str]]:
-    """Locate the session and return its dict snapshot.
-
-    Order of resolution:
-      1. In-memory registry -- the live, hot path.
-      2. DB rebuild from the saved (route, date) header -- covers the
-         case where the supervisor saves an LLM payload after the
-         session has been evicted from the registry (TTL expiry, server
-         restart, or simply a re-opened tab on a previously-closed
-         session). Without this fallback, a 200 OK from the analyzer
-         would silently fail to persist and the row would stay NULL.
-
-    Returned tuple is ``(snapshot, error)`` -- exactly one is non-None.
-    """
-    session = _sessions.get(session_id)
-    if session is not None:
-        return session.to_dict(), None
-    if db_saver is not None and db_saver.available:
-        snap = db_saver.load_session_by_id(session_id)
-        if snap is not None:
-            return snap, None
-    return None, f"Session {session_id} not found"
-
-
-@router.post("/briefing", response_model=LlmSaveResponse)
-def save_pre_visit_briefing(
-    req: SaveBriefingRequest,
-    background_tasks: BackgroundTasks,
-    db_saver: DbSaver = Depends(get_db_saver),
-):
-    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
-    if err or snapshot is None:
-        return LlmSaveResponse(success=False, error=err)
-    if not db_saver.available:
-        return LlmSaveResponse(success=True)  # silently no-op; not a UI failure
-    background_tasks.add_task(
-        db_saver.save_pre_visit_briefing,
-        snapshot, req.customer_code, req.content,
-    )
-    return LlmSaveResponse(success=True)
-
-
-@router.post("/customer-analysis", response_model=LlmSaveResponse)
-def save_customer_analysis(
-    req: SaveCustomerAnalysisRequest,
-    background_tasks: BackgroundTasks,
-    db_saver: DbSaver = Depends(get_db_saver),
-):
-    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
-    if err or snapshot is None:
-        return LlmSaveResponse(success=False, error=err)
-    if not db_saver.available:
-        return LlmSaveResponse(success=True)
-    background_tasks.add_task(
-        db_saver.save_customer_analysis,
-        snapshot, req.customer_code, req.content,
-    )
-    return LlmSaveResponse(success=True)
-
-
-@router.post("/route-analysis", response_model=LlmSaveResponse)
-def save_route_analysis(
-    req: SaveRouteAnalysisRequest,
-    background_tasks: BackgroundTasks,
-    db_saver: DbSaver = Depends(get_db_saver),
-):
-    snapshot, err = _snapshot_or_error(req.session_id, db_saver)
-    if err or snapshot is None:
-        return LlmSaveResponse(success=False, error=err)
-    if not db_saver.available:
-        return LlmSaveResponse(success=True)
-    background_tasks.add_task(db_saver.save_route_analysis, snapshot, req.content)
-    return LlmSaveResponse(success=True)
+# LLM save endpoints removed -- analyses are generated on-demand by the
+# webapp calling llm_analytics directly; we no longer persist LLM output
+# to the supervision DB. The /briefing, /customer-analysis, /route-analysis
+# save routes are gone, along with their DbSaver counterparts.
 
 
 @router.get("/saved", response_model=SavedVisitsResponse)
@@ -406,17 +349,7 @@ def saved_visits(
     include_redistributions: bool = False,
     db_saver: DbSaver = Depends(get_db_saver),
 ):
-    """Already-saved visit data for a (route, date), keyed by
-    customer_code. Used by the live UI on mount so a customer with a
-    prior visit renders their actuals + score immediately, without
-    re-running the briefing -> mark-visited flow.
-
-    ``include_redistributions=False`` (default) skips the expensive
-    per-customer replay; drill-in fetches one customer at a time via
-    ``GET /session/redistribution/{route}/{date}/{customer_code}``.
-    Set to True only when the caller needs every visit's replay in one
-    response (legacy clients / one-off audit scripts).
-    """
+    """Saved visit data for (route, date) keyed by customer_code; default skips redistribution replay."""
     if not db_saver.available:
         return SavedVisitsResponse(available=False)
     payload = db_saver.load_session_visits(
@@ -434,9 +367,7 @@ def redistribution_for_customer(
     customer_code: str,
     db_saver: DbSaver = Depends(get_db_saver),
 ):
-    """On-demand redistribution replay for one customer. The saved-visits
-    hot path skips replay to keep polling cheap; the supervisor's
-    per-customer drill-in modal fires this once on open."""
+    """On-demand single-customer redistribution replay (drill-in modal only)."""
     if not db_saver.available:
         return {"available": False}
     view = db_saver.load_redistribution_for_customer(route_code, date, customer_code)
@@ -450,17 +381,10 @@ def get_unplanned_visits(
     session_id: str,
     live: LiveActualsClient = Depends(get_live_actuals),
 ):
-    """Customers who invoiced live on this session's (route, date) but
-    weren't on the journey plan. Splits the live visitor set into
-    ``planned_visited_codes`` (so planned tiles can show a live dot
-    without a second round-trip) and ``customers`` (the unplanned list).
-    """
+    """Drop-in customers for this session; also surfaces planned_visited_codes for the live-dot tile."""
     session = _sessions.get(session_id)
     if session is None:
-        # Pydantic now requires ``route_code`` + ``date`` as strings, so
-        # the error branch emits empty strings rather than nulls. The
-        # caller surfaces ``error`` to the supervisor; the empty IDs
-        # make ``!success`` rendering unambiguous.
+        # Empty route_code/date because schema requires non-null strings on the error branch.
         return UnplannedVisitsResponse(
             success=False,
             error=f"Session {session_id} not found",
@@ -473,10 +397,7 @@ def get_unplanned_visits(
 
     planned_visited: list[str] = []
     unplanned: list[dict] = []
-    # Collect drop-in items keyed by customer_code so we can compute
-    # every redistribution view in a single shaper pass at the end --
-    # avoids building an intermediate session per customer inside the
-    # request loop.
+    # Collect by customer_code so all redistribution views compute in one shaper pass at the end.
     dropin_items_per_customer: Dict[str, list[Dict[str, Any]]] = {}
     for v in visitors:
         code = str(v.get("customer_code", "")).strip()
@@ -493,9 +414,7 @@ def get_unplanned_visits(
             unplanned.append(v)
     unplanned.sort(key=lambda v: v.get("total_qty", 0), reverse=True)
 
-    # Shape each drop-in's view against the current session's
-    # downstream planned pool. Items are server-provided (lifted from
-    # the YaumiLive cut-through above), never client-supplied.
+    # Items are server-derived from the YaumiLive cut-through above, never client-supplied.
     views = compute_redistribution_for_unplanned(
         session, dropin_items_per_customer,
     )

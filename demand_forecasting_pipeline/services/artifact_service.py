@@ -1,23 +1,8 @@
-"""
-Artifact service -- reads/writes pipeline artifacts through file storage
-with an mtime-keyed cache.
+"""Artifact service: mtime-keyed reads through file storage; no TTL.
 
-Caching contract
-----------------
-Every artifact this service vends is backed by an on-disk file managed
-by the storage layer. The cache is keyed on
-``(path, st_mtime_ns, st_size)`` -- one ``stat()`` per request, no TTL.
-The moment the daily reconciliation cron rewrites the DB mirror or any
-other artifact, the next read here observes the new ``(mtime, size)``
-tuple and re-parses the file. There is no stale window -- not 5 minutes,
-not 5 seconds. The freshness signal is the filesystem itself, the same
-pattern used by ``VanLoadService._load_csv``, ``BiasService``, and the
-enrich-side ``_recent_stats_per_selling_day_index`` /
-``_concentrated_buyers_index`` / ``_journey_index`` helpers.
-
-Dtype coercion is driven by the pipeline YAML (same source of truth the
-training/inference pipelines use) so that API responses match the types
-emitted upstream -- no silent int<->string drift between CSV and JSON.
+Cache key is (path, st_mtime_ns, st_size) -- one stat() per request. Atomic
+tmp+rename writes upstream make the read observe either prior or new file fully.
+Dtype coercion driven by pipeline YAML (same source as training/inference).
 """
 
 from __future__ import annotations
@@ -33,6 +18,7 @@ import pandas as pd
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.services.storage.base import ARTIFACT_KEYS, StorageBackend
 from demand_forecasting_pipeline.services.storage.factory import create_storage
+from demand_forecasting_pipeline.services.reconciliation.enrich import activity_mask
 from demand_forecasting_pipeline.services.storage.file_storage import (
     SALES_TRANSACTIONS_RENAME,
 )
@@ -40,49 +26,27 @@ from demand_forecasting_pipeline.src.utils.config_loader import load_config, res
 
 logger = logging.getLogger(__name__)
 
-# Cache key shape used everywhere: identifies a unique on-disk file
-# snapshot. ``mtime_ns`` flips on every write (atomic tmp+rename
-# preserves this); ``size`` is a cheap second discriminator that catches
-# the rare case where two atomic rewrites land in the same nanosecond
-# with different content. Both come from a single ``stat()`` call so
-# the per-request overhead is one syscall.
+# Cache key: (path, mtime_ns, size); one stat() per request.
 _CacheKey = Tuple[str, int, int]
 
 
 class ArtifactService:
-    """Serves pipeline artifacts via mtime-keyed file reads.
-
-    The cache is a plain dict guarded by a ``threading.Lock``; entries
-    are keyed by an opaque service-level name (``test_predictions``,
-    ``future_forecast``, ``training_summary``, ...) and store
-    ``(file_snapshot_key, payload)``. A read is a ``stat()`` + dict
-    lookup on the hot path; the file is only re-parsed when the
-    snapshot key changes. No TTL -- correctness comes from observing
-    the filesystem, not from a clock.
-    """
+    """Serves pipeline artifacts via mtime-keyed file reads; no TTL."""
 
     def __init__(self, settings: Optional[Settings] = None) -> None:
         self._s = settings or get_settings()
         self._storage: StorageBackend = create_storage(self._s)
-        # Two parallel maps so a DataFrame artifact and a JSON artifact
-        # can share a key (unlikely in practice, defensive). Same lock
-        # guards both -- contention is negligible because the hot path
-        # is a dict lookup.
+        # Parallel DF/JSON maps so the same key in each surface stays isolated.
         self._df_cache: Dict[str, Tuple[_CacheKey, pd.DataFrame]] = {}
         self._json_cache: Dict[str, Tuple[_CacheKey, Dict[str, Any]]] = {}
-        # Composite-key cache for derived frames whose freshness depends
-        # on *several* on-disk files at once (e.g. the lazy-enrichment
-        # fallback for van_load_view, which reads the forecast mirror +
-        # sales_transactions + the three engine aux CSVs). Key shape is
-        # a tuple of ``_CacheKey`` entries -- identical idiom to
-        # ``_df_cache`` just compounded across files.
+        # Composite-key cache for derived frames spanning multiple on-disk files.
         self._derived_cache: Dict[str, Tuple[Tuple[Optional[_CacheKey], ...], pd.DataFrame]] = {}
+        # Cache invariants: atomic tmp+rename upstream + (path, mtime_ns, size) key;
+        # _cache_lock serialises concurrent miss-path readers on parse.
+        self._sales_tx_cache: Optional[Tuple[_CacheKey, pd.DataFrame]] = None
         self._cache_lock = threading.Lock()
 
-        # Resolve dtype contract + key column names from the pipeline YAML
-        # once. If the YAML is missing or can't be parsed we fall back to
-        # the historical column names - the API still works, it just won't
-        # adapt if a future config renames things.
+        # Dtype contract + key column names from pipeline YAML; falls back to historical defaults.
         try:
             cfg = load_config(self._s.pipeline_config)
             self._dtypes: dict[str, str] = resolve_dtypes(cfg)
@@ -109,24 +73,10 @@ class ArtifactService:
         """Second forecast-level column ('ItemCode' in the default config)."""
         return self._group_keys[1] if len(self._group_keys) >= 2 else "ItemCode"
 
-    # ------------------------------------------------------------------
-    # Test-predictions schema resolvers
-    #
-    # Two scorers (drift baseline + summary KPI) read the same
-    # test_predictions.csv and need the same column-name discipline.
-    # Centralised here so a future artifact-schema rename only has to
-    # update one resolver, not every caller. Returns None when the
-    # column is absent so callers can render an em-dash instead of
-    # crashing or silently scoring against a zero column.
-    # ------------------------------------------------------------------
+    # Test-predictions schema resolvers (shared by drift + summary KPI scorers).
 
     def resolve_actual_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Pick the column carrying realised quantity in test_predictions.
-
-        Tries the configured ``target_col`` first (legacy artifacts), then
-        the canonical ``actual_qty`` the current pipeline writes. Same
-        precedence the prior inline implementations used in summary.py
-        and retrain_scheduler.py."""
+        """Realised-quantity column; configured target_col first, then ``actual_qty``."""
         configured = (self._target_col or "").strip()
         for cand in (configured, "actual_qty"):
             if cand and cand in df.columns:
@@ -134,12 +84,7 @@ class ArtifactService:
         return None
 
     def resolve_prediction_column(self, df: pd.DataFrame) -> Optional[str]:
-        """Pick the column carrying the model's point forecast.
-
-        ``prediction`` is the canonical name the current pipeline writes;
-        ``predicted`` is kept as a fallback for legacy snapshots so an
-        older test_predictions.csv still scores rather than silently
-        evaluating to zero."""
+        """``prediction`` (canonical) or legacy ``predicted``; None if absent."""
         for cand in ("prediction", "predicted"):
             if cand in df.columns:
                 return cand
@@ -147,16 +92,53 @@ class ArtifactService:
 
     @property
     def composite_accuracy_kwargs(self) -> dict:
-        """Composite-WAPE kwargs (per-class tolerances) read from the same
-        pipeline YAML training used. Returns an empty dict if the config
-        is missing/invalid -- callers fall through to module defaults.
-
-        Cached at the metrics-module level (one parse per YAML path),
-        so this property is effectively free to re-read."""
+        """Composite-WAPE per-class tolerance kwargs from training YAML; empty dict on miss."""
         from demand_forecasting_pipeline.src.evaluation.metrics import (
             composite_kwargs_from_yaml,
         )
         return composite_kwargs_from_yaml(self._s.pipeline_config)
+
+    def score_test_predictions(
+        self, *, recent_window_days: Optional[int] = None,
+    ) -> tuple[Optional[float], int]:
+        """Score test_predictions; single source of truth for Pipeline-summary + drift.
+
+        ``recent_window_days`` (positive int) restricts to N days from max; None = full.
+        Returns (accuracy_pct, rows_compared) or (None, 0) if unscoreable.
+        """
+        if recent_window_days is not None and recent_window_days < 1:
+            raise ValueError(
+                f"recent_window_days must be a positive int or None; got {recent_window_days!r}"
+            )
+        from demand_forecasting_pipeline.src.evaluation.metrics import (
+            composite_summary, resolve_class_array,
+        )
+        try:
+            test_df, _total = self.get_test_predictions(limit=None, offset=0)
+        except Exception as exc:
+            logger.warning("score_test_predictions: fetch failed: %s", exc)
+            return None, 0
+        if test_df.empty:
+            return None, 0
+        pred_col = self.resolve_prediction_column(test_df)
+        actual_col = self.resolve_actual_column(test_df)
+        if pred_col is None or actual_col is None:
+            return None, 0
+        if recent_window_days is not None and "TrxDate" in test_df.columns:
+            dates = pd.to_datetime(test_df["TrxDate"], errors="coerce")
+            max_date = dates.max()
+            if pd.notna(max_date):
+                test_df = test_df[dates >= (max_date - pd.Timedelta(days=recent_window_days))]
+            if test_df.empty:
+                return None, 0
+        actual = pd.to_numeric(test_df[actual_col], errors="coerce").fillna(0).to_numpy()
+        predicted = pd.to_numeric(test_df[pred_col], errors="coerce").fillna(0).to_numpy()
+        cls = resolve_class_array(test_df)
+        stats = composite_summary(actual, predicted, cls, **self.composite_accuracy_kwargs)
+        rows_compared = int(stats.get("rows_compared", 0))
+        if rows_compared <= 0:
+            return None, 0
+        return float(stats["accuracy_pct"]), rows_compared
 
     # ------------------------------------------------------------------
     # Predictions
@@ -169,49 +151,21 @@ class ArtifactService:
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
+        """Filtered test predictions; (DataFrame, total). limit=None means no cap (positive int else)."""
+        if limit is not None and limit < 1:
+            raise ValueError(
+                f"limit must be a positive int or None (got {limit!r})"
+            )
         df = self._read_df("test_predictions")
         df = self._apply_filters(df, route_code=route_code, item_code=item_code)
         total = len(df)
-        eff_limit = int(limit if limit is not None else self._s.default_page_limit)
-        return df.iloc[offset : offset + eff_limit], total
+        if limit is None:
+            return df.iloc[offset:], total
+        return df.iloc[offset : offset + int(limit)], total
 
-    def van_load_view(self) -> pd.DataFrame:
-        """Unified "what's on the van" frame -- the single source of truth
-        every operational consumer reads (VanLoad page, route-summary tile,
-        recommendation engine).
-
-        Concatenates Forecast + Test splits then de-dupes by
-        (RouteCode, ItemCode, TrxDate) preferring the Forecast row when
-        both exist (it's the freshest output, regenerated by every
-        inference run).
-
-        **Filter: carry-aware reconciled van load**. Keep rows where
-        ``(recommended_load + opening_stock) > 0``. This is the rep's
-        actual physical capacity for the day:
-
-          * ``recommended_load`` -- the V5_b engine's fresh-issuance
-            recommendation (after bias correction, envelope, etc.).
-          * ``opening_stock``    -- yesterday's leftover already on the
-            truck (forward-filled across calendar gaps).
-
-        A row with ``prediction == 0`` (model said "no demand today")
-        but ``opening_stock > 0`` is STILL on the van -- the leftover
-        stock is real physical inventory the rep has to manage. The
-        earlier ``prediction > 0`` filter silently dropped these rows
-        and the tile under-reported by the carryover sum (route 9209
-        on 2026-05-13 dropped ~4338 units that way).
-
-        Cold-start fallback: when reconciliation columns are absent
-        (fresh deploy, pre-cron), fall back to ``prediction > 0`` so
-        the tile still shows something rather than a blank.
-
-        Why both splits? A date inside the test horizon (e.g. today)
-        gets predictions in BOTH artifacts but for *different* (route,
-        item) pairs -- the model assigns each pair to exactly one split
-        per inference run. The recommendation engine already unions them
-        upstream (data_manager.get_van_items); doing the same here keeps
-        VanLoad's tile, table, and recommendation count aligned.
-        """
+    def _van_load_unfiltered(self) -> pd.DataFrame:
+        """Forecast + Test deduped with sales_transactions LEFT JOIN; NO activity_mask
+        so future rows survive for van_load_view_enriched to engine-enrich."""
         forecast = self._read_df("future_forecast")
         test = self._read_df("test_predictions")
         if forecast.empty and test.empty:
@@ -233,41 +187,31 @@ class ArtifactService:
                 .drop(columns="_split")
                 .reset_index(drop=True)
             )
-        # Reconciliation columns moved out of yf_demand_forecast into
-        # yf_sales_transactions. We LEFT JOIN them in here at read time
-        # and alias the new column names back to the legacy ones the
-        # downstream consumers (page_views.py, predictions.py) already
-        # understand. This keeps the refactor transparent: no other
-        # caller needs to know the storage shape changed.
-        df = self._merge_sales_transactions(df)
+        return self._merge_sales_transactions(df)
+
+    def van_load_view(self) -> pd.DataFrame:
+        """Unified "what's on the van" frame; single source of truth for VanLoad surfaces.
+
+        Forecast + Test deduped (Forecast wins). Carry-aware filter:
+        (recommended_load + opening_stock) > 0 so rows with leftover but zero forecast survive.
+        Cold-start fallback to ``prediction > 0`` when reconciliation cols absent.
+        """
+        df = self._van_load_unfiltered()
+        if df.empty:
+            return df
         has_recon = "recommended_load" in df.columns and "opening_stock" in df.columns
         if has_recon:
-            # Single source of truth for "this row has truck movement
-            # worth surfacing" -- see ``activity_mask`` in enrich.py.
-            # Every consumer of this view shares the same predicate so
-            # no UI surface can silently narrow the scope below another.
-            from demand_forecasting_pipeline.services.reconciliation.enrich import (
-                activity_mask,
-            )
+            # Shared activity predicate (see enrich.py); every consumer uses the same mask.
             df = df[activity_mask(df)]
         elif "prediction" in df.columns:
             df = df[pd.to_numeric(df["prediction"], errors="coerce").fillna(0) > 0]
         return df
 
     def van_load_view_enriched(self) -> pd.DataFrame:
-        """Same as :meth:`van_load_view` but guarantees the reconciliation
-        columns are populated.
+        """van_load_view with reconciliation cols guaranteed populated.
 
-        Read path:
-          1. Call :meth:`van_load_view` -- already LEFT JOINs sales_transactions.csv
-             so DB-stored reconciled values flow through when the cron has
-             written them.
-          2. If ``recommended_load`` exists AND is not uniformly zero, the
-             DB mirror is authoritative -- return the merged frame as-is.
-          3. Else (cold deploy, brand-new dates, pre-migration rows) run
-             ``enrich_with_load`` ONCE on the full frame and cache the
-             result keyed on the underlying file mtimes. Subsequent calls
-             within the same mtime window are a dict lookup.
+        Returns DB-stored values when cron has written them; else runs enrich_with_load
+        once and caches on the underlying file mtimes (composite key).
 
         Replaces the three inline lazy-fallback blocks the API routes
         used to carry (``van_load_page_view``, ``forecast_drawer_page_view``,
@@ -289,27 +233,33 @@ class ArtifactService:
         on each tick) invalidates the cached enrichment so the next call
         re-derives against the fresh inputs.
         """
-        merged = self.van_load_view()
+        # IMPORTANT: read from the UNFILTERED source. ``van_load_view``
+        # applies ``activity_mask`` which requires
+        # ``recommended_load + opening_stock > 0`` on the row -- but
+        # those columns are NaN for future-date rows that the
+        # past+today-only reconciliation cron doesn't cover. Using the
+        # filtered source would drop every future row BEFORE the engine
+        # could enrich it, breaking VanLoad / ForecastDrawer / route-
+        # summary for any forward date. We do our own enrich-then-filter
+        # so future rows get real engine-computed values BEFORE the mask
+        # decides whether to keep them.
+        merged = self._van_load_unfiltered()
         if merged.empty:
             return merged
 
-        # Detection rule lifted verbatim from the three inline call
-        # sites: the column exists AND its |sum| > 0. A column of all
-        # zeros (migration default for un-pushed rows) doesn't count
-        # as "stored" -- the fallback must still run.
+        # Trigger engine if recommended_load is NaN on ANY row (future rows always NaN
+        # from past+today-only cron); mtime cache absorbs repeat-call cost.
+        recon_col = merged["recommended_load"] if "recommended_load" in merged.columns else None
         have_stored = (
-            "recommended_load" in merged.columns
-            and pd.to_numeric(merged["recommended_load"], errors="coerce")
-            .fillna(0.0)
-            .abs()
-            .sum()
-            > 0
+            recon_col is not None
+            and recon_col.notna().all()
+            and pd.to_numeric(recon_col, errors="coerce").fillna(0.0).abs().sum() > 0
         )
         if have_stored:
-            return merged
+            # activity_mask now matches van_load_view's public contract.
+            return merged[activity_mask(merged)]
 
-        # Compute the composite snapshot key for the enrichment fallback.
-        # Any of these files changing invalidates the cached frame.
+        # Composite snapshot key; any input file change invalidates the cached frame.
         snapshot = self._van_load_enriched_snapshot_key()
         cache_key = "van_load_view_enriched"
         if snapshot is not None:
@@ -318,10 +268,7 @@ class ArtifactService:
                 if cached is not None and cached[0] == snapshot:
                     return cached[1]
 
-        # Cold path: pick the predicted column the same way the API
-        # routes do, then run the canonical engine. Import is lazy so
-        # this module can be imported without the engine being importable
-        # (the cron's reconciliation context handles that path itself).
+        # Cold path: pick prediction column + run canonical engine (lazy import).
         from demand_forecasting_pipeline.services.reconciliation import (
             enrich_with_load,
         )
@@ -332,12 +279,13 @@ class ArtifactService:
                 pred_col = cand
                 break
         if pred_col is None:
-            # No predicted column -- nothing the engine can act on.
-            # Return the merged frame; downstream callers already
-            # handle the "no recon column" degraded path.
+            # No predicted column; downstream handles degraded path.
             return merged
 
         enriched = enrich_with_load(merged, predicted_col=pred_col)
+
+        # Apply activity_mask AFTER enrichment so engine can populate future rows first.
+        enriched = enriched[activity_mask(enriched)]
         if snapshot is not None:
             with self._cache_lock:
                 self._derived_cache[cache_key] = (snapshot, enriched)
@@ -346,20 +294,11 @@ class ArtifactService:
     def _van_load_enriched_snapshot_key(
         self,
     ) -> Optional[Tuple[Optional[_CacheKey], ...]]:
-        """Compose the mtime snapshot tuple for ``van_load_view_enriched``.
-
-        Bundles the snapshot of every on-disk file the enrichment
-        depends on. ``None`` entries are kept positionally so a missing
-        file (later created) still flips the tuple and busts the cache;
-        we only short-circuit to ``None`` when the *forecast mirror*
-        itself is unavailable, because without it there's nothing to
-        enrich and caching an empty fallback would pin staleness across
-        the very first successful write."""
+        """mtime snapshot tuple for van_load_view_enriched; None when forecast mirror absent."""
         forecast_key = self._file_snapshot_key("future_forecast")
         if forecast_key is None:
             return None
-        # The remaining files live in shared imports; stat each directly.
-        # Mirrors the cron's view of "what an enrichment reads".
+        # Shared-imports aux files; stat each (mirrors cron's enrichment inputs).
         aux_filenames = (
             self._s.sales_transactions_file,
             self._s.sales_recent_file,
@@ -380,53 +319,54 @@ class ArtifactService:
             aux_keys.append((str(path), stat.st_mtime_ns, stat.st_size))
         return (forecast_key, *aux_keys)
 
-    def _merge_sales_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
-        """LEFT JOIN sales_transactions.csv onto the forecast frame.
+    def _load_sales_transactions_normalized(self) -> pd.DataFrame:
+        """Cached mtime-keyed read of sales_transactions.csv; PascalCase -> snake_case applied.
 
-        The sales-transactions CSV mirror carries the carry chain +
-        engine math + envelope diagnostics + actual_sold for past +
-        today. Future dates aren't in the mirror (no reconciliation for
-        the future by design) -- those rows stay NaN/False for the
-        reconciliation columns, which is the correct semantic.
-
-        Column aliasing: the new schema renamed a few columns; we map
-        them back to the legacy names downstream code expects:
-           fresh_load              -> recommended_load
-           total_van_load          -> recommended_van_load
-           van_load_lower_bound    -> load_lower_bound
-           van_load_upper_bound    -> load_upper_bound
-           recent_daily_avg        -> recent_avg_per_selling_day
-        All other reconciliation columns kept their names.
+        stat+read+parse run under _cache_lock so concurrent miss-path readers serialise on parse.
         """
-        if df.empty:
-            return df
         from pathlib import Path
         try:
             sales_path = self._s.shared_data_path(self._s.sales_transactions_file)
         except AttributeError:
-            # Settings hasn't been wired with sales_transactions_file yet;
-            # leave df untouched. Downstream falls back to prediction>0.
-            return df
+            return pd.DataFrame()
         if not Path(sales_path).exists():
+            return pd.DataFrame()
+        with self._cache_lock:
+            stat = sales_path.stat()
+            key: _CacheKey = (str(sales_path), stat.st_mtime_ns, stat.st_size)
+            cached = self._sales_tx_cache
+            if cached is not None and cached[0] == key:
+                return cached[1]
+            try:
+                sx = pd.read_csv(sales_path, low_memory=False)
+            except Exception as exc:
+                logger.warning("sales_transactions CSV read failed: %s", exc)
+                return pd.DataFrame()
+            if not sx.empty:
+                # PascalCase -> snake_case via SALES_TRANSACTIONS_RENAME (single source of truth).
+                sx = sx.rename(columns=SALES_TRANSACTIONS_RENAME)
+                if {"trx_date", "route_code", "item_code"}.issubset(sx.columns):
+                    sx["trx_date"]   = pd.to_datetime(sx["trx_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+                    sx["route_code"] = sx["route_code"].astype(str)
+                    sx["item_code"]  = sx["item_code"].astype(str)
+            self._sales_tx_cache = (key, sx)
+            return sx
+
+    def _merge_sales_transactions(self, df: pd.DataFrame) -> pd.DataFrame:
+        """LEFT/OUTER merge sales_transactions.csv onto forecast frame; future rows stay NaN.
+
+        Column aliases mapped to legacy names:
+          fresh_load -> recommended_load, total_van_load -> recommended_van_load,
+          van_load_lower/upper_bound -> load_lower/upper_bound,
+          recent_daily_avg -> recent_avg_per_selling_day.
+        """
+        if df.empty:
             return df
-        try:
-            sx = pd.read_csv(sales_path, low_memory=False)
-        except Exception as exc:
-            logger.warning("sales_transactions CSV read failed: %s", exc)
-            return df
+        sx = self._load_sales_transactions_normalized()
         if sx.empty:
             return df
-
-        # Normalise PascalCase wire columns -> snake_case via the
-        # single source of truth in services.storage.file_storage
-        # (SALES_TRANSACTIONS_RENAME). Keys missing from sx pass
-        # through unchanged.
-        sx = sx.rename(columns=SALES_TRANSACTIONS_RENAME)
         if not {"trx_date", "route_code", "item_code"}.issubset(sx.columns):
             return df
-        sx["trx_date"]   = pd.to_datetime(sx["trx_date"], errors="coerce").dt.strftime("%Y-%m-%d")
-        sx["route_code"] = sx["route_code"].astype(str)
-        sx["item_code"]  = sx["item_code"].astype(str)
 
         # Forecast df side -- build a working copy with normalised
         # join keys. The forecast frame uses PascalCase. Drop any
@@ -485,8 +425,6 @@ class ArtifactService:
         # merge keys) so every row downstream has TrxDate / RouteCode
         # / ItemCode populated. Done before the drop below so no row
         # ever leaves this function without a key triple.
-        if "TrxDate" not in merged.columns:
-            merged["TrxDate"] = pd.NaT
         merged["TrxDate"] = pd.to_datetime(merged["TrxDate"], errors="coerce").fillna(
             pd.to_datetime(merged["_join_date"], errors="coerce")
         )
@@ -520,11 +458,7 @@ class ArtifactService:
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
-        # Use the enriched view so every consumer of paginated forecast
-        # rows sees the reconciliation columns populated -- DB-stored
-        # when the cron filled them, engine-derived (cached) on cold
-        # start. Replaces the per-route inline ``enrich_with_load``
-        # fallback the predictions API used to carry.
+        # Enriched view so all paginated consumers see reconciliation cols populated.
         df = self.van_load_view_enriched()
         df = self._apply_filters(df, route_code=route_code, item_code=item_code)
         total = len(df)
@@ -532,11 +466,7 @@ class ArtifactService:
         return df.iloc[offset : offset + eff_limit], total
 
     def get_future_forecast_meta(self) -> tuple[int, Optional[str]]:
-        """Return ``(total_rows, max_TrxDate_iso)`` from the cached future
-        forecast frame without slicing or copying. Lets summary endpoints
-        derive both the count and the latest forecast date in one pass --
-        replaces a pair of ``get_future_forecast(limit=1)`` +
-        ``get_future_forecast(limit=10_000)`` calls."""
+        """(total_rows, max_TrxDate_iso) from the cached frame; no slice/copy."""
         df = self._read_df("future_forecast")
         if df.empty:
             return 0, None
@@ -565,10 +495,7 @@ class ArtifactService:
         return self._read_json("training_summary")
 
     def get_data_quality(self) -> dict[str, Any]:
-        # data_quality.json is written by the data_processing step (~2 min
-        # in), long before pair_classes.csv (end of training, ~18 min).
-        # Reading it lets the dashboard surface the real pair count
-        # mid-run instead of a misleading zero.
+        # Written by data_processing (~2min), well before pair_classes (~18min) -- surfaces mid-run.
         return self._read_json("data_quality")
 
     # ------------------------------------------------------------------
@@ -629,15 +556,11 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def get_class_summary(self) -> dict[str, Any]:
-        # Authoritative path: the persisted per-pair class assignment from
-        # the most recent run.
+        # Authoritative: pair_classes.csv from the latest run.
         df = self.get_pair_classes()
         if not df.empty and "class" in df.columns:
             return {"total_pairs": len(df), "classes": df["class"].value_counts().to_dict()}
-        # Early-visibility fallback: data_quality.json's split_balance has
-        # the surviving pair count once data_processing finishes, even
-        # before classification persists pair_classes.csv. No class breakdown
-        # available here, but the headline number is honest.
+        # Early-visibility fallback: data_quality.json (post-processing) for headline count.
         dq = self.get_data_quality()
         split = ((dq.get("post_processing") or {}).get("split_balance") or {})
         total = split.get("total_pairs")
@@ -657,13 +580,11 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def write_df(self, key: str, df: pd.DataFrame) -> int:
-        # No explicit invalidation: the next read will see the new
-        # mtime/size and re-parse automatically. The cached entry
-        # (if any) is replaced lazily on that next read.
+        # No explicit invalidation; next read picks up new mtime/size.
         return self._storage.write_dataframe(key, df)
 
     def write_json(self, key: str, data: dict[str, Any]) -> bool:
-        # Same lazy mtime-driven invalidation as ``write_df``.
+        # Same lazy mtime-driven invalidation as write_df.
         return self._storage.write_json(key, data)
 
     # ------------------------------------------------------------------
@@ -671,11 +592,7 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def invalidate_cache(self) -> None:
-        """Drop every cached entry. The mtime-keyed cache already
-        re-parses on file change, so this is purely a memory hygiene
-        hook for callers that know they want a hard reset (e.g. the
-        pipeline-completed hook in ``PipelineService``). Cheap; safe to
-        call from any thread."""
+        """Drop every cached entry; cheap, thread-safe (memory hygiene only -- mtime check would catch it anyway)."""
         with self._cache_lock:
             self._df_cache.clear()
             self._json_cache.clear()
@@ -683,8 +600,7 @@ class ArtifactService:
 
     @property
     def cache_keys(self) -> list[str]:
-        """Currently-cached artifact keys -- exposed so the health
-        endpoint doesn't have to reach into private state."""
+        """Currently-cached artifact keys; exposed for the health endpoint."""
         with self._cache_lock:
             return sorted(
                 set(self._df_cache)
@@ -694,20 +610,15 @@ class ArtifactService:
 
     @property
     def target_col(self) -> str:
-        """Target column name from the pipeline config. Lets API routes
-        (e.g. summary) avoid hardcoding ``TotalQuantity``."""
+        """Target column name from pipeline config; avoids hardcoding TotalQuantity."""
         return self._target_col
 
     @staticmethod
     def to_records(df: pd.DataFrame) -> list[dict[str, Any]]:
-        """JSON-safe DataFrame -> list-of-dicts. Replaces NaN / +/-Inf with
-        ``None`` so the payload survives FastAPI / browser JSON strict mode
-        (which rejects ``nan``). Centralizes the conversion so every API
-        route gets identical serialization behaviour.
-        """
+        """JSON-safe records: NaN/+-Inf -> None for FastAPI strict JSON."""
         if df is None or df.empty:
             return []
-        # ``np.nan`` + ``np.inf`` both fail JSON; one pass replaces both.
+        # One pass replaces NaN + +/-Inf.
         cleaned = df.replace([np.nan, np.inf, -np.inf], None)
         return cleaned.to_dict("records")
 
@@ -716,17 +627,12 @@ class ArtifactService:
     # ------------------------------------------------------------------
 
     def _normalize_types(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Apply the wire-level type contract: every column in ``self._dtypes``
-        is coerced to the declared type; every column in ``self._date_cols``
-        is emitted as a ``YYYY-MM-DD`` string. Both sets come from the
-        pipeline YAML so UI and DB consumers see identical types regardless
-        of how the CSV was re-inferred by pandas at read time."""
+        """Apply YAML wire-type contract; date_cols emit ``YYYY-MM-DD`` strings."""
         if df.empty:
             return df
         for col, dt in self._dtypes.items():
             if col in df.columns:
-                # ``string`` dtype is the pandas-nullable flavour; convert to
-                # Python str so downstream JSON serialisation is predictable.
+                # ``string`` (pandas-nullable) -> Python str for predictable JSON.
                 df[col] = df[col].astype(str).str.strip() if dt == "string" else df[col].astype(dt)
         for col in self._date_cols:
             if col in df.columns:
@@ -734,11 +640,7 @@ class ArtifactService:
         return df
 
     def _file_snapshot_key(self, key: str) -> Optional[_CacheKey]:
-        """Build the ``(path, mtime_ns, size)`` snapshot tuple for the
-        on-disk file backing ``key``. ``None`` when the storage layer
-        has no path for the key OR the file is missing -- both cases
-        skip caching so a transient missing file doesn't pin an empty
-        frame across a later write."""
+        """(path, mtime_ns, size) tuple; None for unknown/missing keys to skip caching."""
         path = self._storage.source_path(key)
         if path is None or not path.exists():
             return None
@@ -746,12 +648,7 @@ class ArtifactService:
         return (str(path), stat.st_mtime_ns, stat.st_size)
 
     def _read_df(self, key: str) -> pd.DataFrame:
-        """Mtime-keyed DataFrame read.
-
-        Hot path: one ``stat()`` + one dict lookup. Cold path (file
-        changed or first read): re-parse via the storage backend and
-        apply the YAML-driven dtype contract. Lock window is tight --
-        only the dict mutation is guarded, the parse runs lock-free."""
+        """Mtime-keyed DataFrame read; hot path is one stat() + dict lookup."""
         snapshot = self._file_snapshot_key(key)
         if snapshot is not None:
             with self._cache_lock:
@@ -766,8 +663,7 @@ class ArtifactService:
         return df
 
     def _read_json(self, key: str) -> dict[str, Any]:
-        """Mtime-keyed JSON read. Same contract as ``_read_df`` -- one
-        stat + dict lookup on the hot path; re-parse on file change."""
+        """Mtime-keyed JSON read; same contract as ``_read_df``."""
         snapshot = self._file_snapshot_key(key)
         if snapshot is not None:
             with self._cache_lock:
@@ -784,7 +680,7 @@ class ArtifactService:
         if df.empty:
             return df
         rk, ik = self._route_key, self._item_key
-        # No `astype(str)` needed -- the loader already normalized these columns.
+        # Loader pre-normalized; no astype(str) needed.
         if route_code and rk in df.columns:
             df = df[df[rk] == str(route_code).strip()]
         if item_code and ik in df.columns:

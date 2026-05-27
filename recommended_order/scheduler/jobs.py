@@ -1,18 +1,8 @@
-"""
-Scheduled jobs -- daily recommendation generation.
+"""Daily recommendation generation cron.
 
-One cron, runs at ``RO_SCHEDULER_GENERATION_HOUR`` (default 04:30 Asia/Dubai):
-    1. Force a CSV re-read (covers any cascade-failed reconciliation refresh)
-    2. For every route on today's journey plan, generate + save + DB-push recs
-    3. Retry up to ``max_retries`` with backoff on transient failures
-
-We deliberately do NOT keep a separate cache-refresh cron: the in-process
-``DataManager.refresh()`` invoked at the start of generation, plus the
-mtime-keyed ``ensure_fresh()`` that every endpoint calls, cover every
-case the old 03:20 refresh job did.
-
-If the cron fails or is missed, the API also auto-generates on first
-``POST /get`` for a date -- so the UI never sees empty data.
+Forces a CSV refresh, generates for every route on today's journey plan,
+retries up to ``max_retries``. Missing/failed cron is covered by the lazy
+``POST /get`` path so the UI never sees empty data.
 """
 
 from __future__ import annotations
@@ -33,8 +23,7 @@ _scheduler: BackgroundScheduler | None = None
 
 
 def _today_in_tz(tz_name: str) -> str:
-    """`today` interpreted in the configured scheduler timezone (e.g. Asia/Dubai),
-    so the daily cron lines up with what the supervisor sees on their clock."""
+    """Today in the scheduler timezone (matches the supervisor's clock)."""
     return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
 
 
@@ -55,12 +44,7 @@ def _run_daily_generation(settings: Settings) -> dict:
 
     today = _today_in_tz(settings.scheduler.timezone)
     dm = get_data_manager()
-    # Force a CSV re-read before generation. The 03:30 reconciliation
-    # cascades a data_import refresh that updates demand_forecast.csv;
-    # if that cascade failed silently, mtime-based ``ensure_fresh``
-    # would no-op and we'd consume yesterday's reconciled values. An
-    # explicit ``refresh()`` is idempotent (~100 ms) and guarantees we
-    # see whatever is on disk right now, regardless of cascade health.
+    # Force refresh: covers cascade failures that leave mtime unchanged.
     dm.refresh()
     routes = _routes_for_today(dm, today) or dm.get_route_codes()
 
@@ -99,8 +83,7 @@ def _generate_daily(settings: Settings | None = None) -> None:
             if attempt < sc.max_retries:
                 time.sleep(sc.retry_delay_seconds)
 
-    # Final failure -- surface with full traceback so the headline log
-    # carries the stack on top of the per-attempt exc_info traces.
+    # Final failure -- log full traceback on top of per-attempt traces.
     logger.error(
         "[cron] Daily generation FAILED after %d attempts: %s",
         sc.max_retries, last_error, exc_info=last_error,
@@ -115,10 +98,7 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
 
     _scheduler = BackgroundScheduler(timezone=sc.timezone)
 
-    # Single cron: daily generation. The forced ``dm.refresh()`` inside
-    # ``_run_daily_generation`` makes a separate "data refresh" cron
-    # redundant -- the same call covers it and runs in the same context
-    # as the generation it serves.
+    # Single cron: daily generation (refresh is folded into the same job).
     _scheduler.add_job(
         _generate_daily,
         CronTrigger(hour=sc.generation_hour, minute=sc.generation_minute, timezone=sc.timezone),
@@ -129,8 +109,7 @@ def start_scheduler(settings: Settings | None = None) -> BackgroundScheduler:
         coalesce=True,
         max_instances=1,
     )
-    # Audit every fire to yf_scheduler_log so "did this cron run on
-    # time?" is answerable from one DB row, independent of stdout.
+    # Audit every fire to yf_scheduler_log (timing-only).
     from common.scheduler_audit import attach_audit
     attach_audit(_scheduler, "recommended_order", settings.db.aiml_connection_string)
 

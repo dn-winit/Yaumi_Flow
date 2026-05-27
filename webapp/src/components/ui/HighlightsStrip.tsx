@@ -1,9 +1,6 @@
 import type { ReactNode } from "react";
 
-/**
- * A single highlight rendered inside {@link HighlightsStrip}.
- * Value is the headline fact, detail is a short qualifier shown dimmer below.
- */
+/** Single highlight inside HighlightsStrip; detail dims below the headline value. */
 export interface Highlight {
   label: string;
   value: ReactNode;
@@ -14,12 +11,7 @@ interface HighlightsStripProps {
   items: Highlight[];
 }
 
-/**
- * Positive-framed strip shown above drill-down charts in performance drawers.
- * Surfaces the "what's working" side of the dashboard so supervisors see
- * their wins alongside the gaps. Styling intentionally subtle -- success tint,
- * no loud badges -- because the numbers themselves carry the weight.
- */
+/** Positive-framed strip above drill-down charts; success tint, deliberately subtle. */
 export default function HighlightsStrip({ items }: HighlightsStripProps) {
   if (items.length === 0) return null;
   return (

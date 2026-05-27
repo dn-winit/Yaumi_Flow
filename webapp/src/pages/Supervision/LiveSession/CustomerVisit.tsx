@@ -18,11 +18,36 @@ interface CustomerItem {
   itemCode: string;
   itemName?: string;
   recommendedQty: number;
-  // Original PascalCase rec from recommended_order. Used both for the
-  // click-to-explain popup (RecommendationModal reads PascalCase) and
-  // as the source for the analytics-API payloads below -- no parallel
-  // camelCase shadow lives on this interface.
+  // PascalCase rec from recommended_order; single source for the click-to-explain
+  // popup AND the analytics payloads (no camelCase shadow).
   rec: Record<string, unknown>;
+}
+
+/**
+ * Canonical builder for LLM-bound per-item payloads.
+ *
+ * Single source of truth used by BOTH the pre-visit briefing path AND the
+ * post-visit customer analysis path. Spreads every field from the rec-engine
+ * record (PascalCase) and overlays the runtime fields (itemCode/itemName/
+ * recommendedQty/actualQty). The llm_analytics analyzer's ``_pick`` helper
+ * accepts PascalCase, camelCase and snake_case keys interchangeably, so the
+ * spread carries trend_factor / why_item / why_quantity / source / tier /
+ * priority_score / purchase_cycle_days / days_since_last_purchase /
+ * frequency_percent etc. into both prompts without any per-field copying.
+ *
+ * Before this helper existed, two divergent payload shapes (briefing carried
+ * all rec fields; customer analysis carried only 4) caused the LLM to render
+ * "0% of visits, 0.0-day cycle, 0 days ago" for every item in the customer
+ * analysis. Using ONE function for both eliminates that drift permanently.
+ */
+function toLlmItemPayload(i: CustomerItem, actualQty: number = 0): Record<string, unknown> {
+  return {
+    ...i.rec,
+    itemCode: i.itemCode,
+    itemName: i.itemName ?? "",
+    recommendedQty: i.recommendedQty,
+    actualQty,
+  };
 }
 
 interface VisitScore {
@@ -41,17 +66,10 @@ interface InitialVisit {
   actualSales: Record<string, number>;
   totalActual: number;
   totalRecommended: number;
-  // Visit-time signals carried alongside actuals so the drill-in view
-  // renders the same context an auto-fired ``process_visit`` produced,
-  // even after a drill-out / drill-in round trip. ``redistributions``
-  // is the structured server view (per-item groups of recipient
-  // entries plus ``keptOnTruck``). Always present -- the server emits
-  // an empty-groups shape when there's nothing to redistribute.
+  // Server-emitted redistribution view; always present (empty groups when nothing to redistribute).
   redistributions: RedistributionView;
   alsoBought?: AlsoBoughtEntry[];
-  // Previously-saved LLM payloads (JSON strings). When present, the
-  // briefing / customer-review modals open them directly instead of
-  // re-calling the analytics service.
+  // Saved LLM payloads (JSON); when present, modals open them instead of re-calling analytics.
   preVisitBriefing?: string | null;
   customerAnalysis?: string | null;
 }
@@ -63,33 +81,23 @@ interface Props {
   customerCode: string;
   customerName: string;
   items: CustomerItem[];
-  /** Server-pre-computed unit total for the customer's plan. Same
-   *  number ``Session.summary().customer_tiles[*].total_units`` emits,
-   *  passed down so the briefing header never re-sums recommendedQty. */
+  /** Server-pre-computed plan total; briefing header never re-sums. */
   totalUnits: number;
-  /** True when YaumiLive shows an invoice today. Drives the green dot.
-   *  The parent auto-fires the visit processing as soon as this flips,
-   *  so this component never needs to drive the work itself. */
+  /** True when YaumiLive shows an invoice today; parent auto-fires the visit. */
   liveVisited?: boolean;
-  /**
-   * Visit data once auto-processing has landed (or been hydrated from
-   * the supervision tables). Presence of this prop is the single
-   * "this customer has been visited" signal the component reads.
-   */
+  /** Presence is the single "visited" signal this component reads. */
   initialVisit?: InitialVisit;
-  /**
-   * Pre-visit briefing JSON saved by the auto-visit cron. Flows in for
-   * EVERY planned customer (visited or not) so the briefing modal
-   * renders without a live LLM call. ``initialVisit.preVisitBriefing``
-   * still wins when present (it's the same value, scoped to the
-   * visited row), so visited-customer behaviour is unchanged.
-   */
+  /** Briefing JSON from the auto-visit cron; flows for every planned customer.
+   *  initialVisit.preVisitBriefing wins when both are set. */
   initialBriefing?: string | null;
   onRequestAnalysis: (payload: {
     sessionId: string;
     customerCode: string;
     customerName: string;
-    items: { itemCode: string; itemName?: string; recommendedQuantity: number; actualQuantity: number }[];
+    // Same canonical shape used by the pre-visit briefing path -- every field
+    // from the rec engine (Pascal/camel/snake all flow through) plus runtime
+    // itemCode/itemName/recommendedQty/actualQty.
+    items: Record<string, unknown>[];
     score: VisitScore;
     initialAnalysis?: string | null;
   }) => void;
@@ -119,19 +127,9 @@ export default function CustomerVisit({
   const actuals: Record<string, number> = initialVisit?.actualSales ?? {};
   const alsoBought = initialVisit?.alsoBought ?? [];
 
-  // Redistribution replay is server-side-heavy (~3s per route for 30
-  // customers), so /session/saved no longer ships it inline -- the
-  // cheap poll response carries ``redistributions: {groups: []}`` as a
-  // schema placeholder, NOT as real data. Fetch on demand the first
-  // time this customer's drill-in mounts; live ``/visit`` responses
-  // still carry the freshly-computed view inline and short-circuit the
-  // fetch.
-  //
-  // Short-circuit predicate gates on ``groups.length > 0`` (not just
-  // truthiness of the object), because the empty placeholder from the
-  // saved-visits poll is truthy and used to wrongly bypass the drill-
-  // in fetch -- supervisor saw "No items redistributed" even when the
-  // server had real groups for that customer.
+  // Redistribution replay is heavy (~3s per route); /session/saved ships an empty
+  // {groups:[]} placeholder. Fetch on drill-in unless live /visit already inlined a non-empty view.
+  // Gate on groups.length>0, not truthiness, or the placeholder would suppress the fetch.
   const [redistributionView, setRedistributionView] = useState(
     initialVisit?.redistributions,
   );
@@ -153,21 +151,12 @@ export default function CustomerVisit({
       .catch(() => {/* drill-in renders without the replay if it fails */});
     return () => { cancelled = true; };
   }, [customerCode, routeCode, date, inlineGroupsCount, initialVisit?.redistributions]);
-  // Green-dot semantic: ``visited`` only when the customer actually
-  // bought something -- either a planned item (totalActual > 0) or an
-  // off-plan extra (alsoBought non-empty). A visit row with all-zero
-  // actuals doesn't qualify.
+  // Green-dot = bought something: totalActual>0 OR alsoBought non-empty.
   const visited =
     !!initialVisit &&
     ((initialVisit.totalActual ?? 0) > 0 || alsoBought.length > 0);
 
-  // Hydrate the briefing from a previously-saved JSON payload when
-  // present so re-opening a customer renders the same briefing without
-  // re-calling the LLM. ``initialVisit.preVisitBriefing`` (visited
-  // path) wins when set; otherwise fall back to the
-  // ``initialBriefingProp`` channel (non-visited planned customers,
-  // populated by the auto-visit cron and shipped via the top-level
-  // ``briefings`` map on /session/saved).
+  // Hydrate from saved briefing JSON; visit path wins, otherwise use the briefings map.
   const initialBriefing = useMemo<Record<string, unknown> | null>(() => {
     const raw = initialVisit?.preVisitBriefing ?? initialBriefingRaw ?? null;
     if (!raw) return null;
@@ -183,11 +172,7 @@ export default function CustomerVisit({
   const [briefingOpen, setBriefingOpen] = useState(false);
   const [briefingLoading, setBriefingLoading] = useState(false);
 
-  // ``initialBriefing`` may arrive AFTER mount -- the parent fills it
-  // from /session/saved which resolves async. Functional setter keeps
-  // a user-initiated fetch (handleBriefing) from being clobbered: we
-  // only fill an empty slot. ``prev ?? initialBriefing`` is the
-  // single race-safe primitive here.
+  // initialBriefing may arrive AFTER mount; `prev ?? initialBriefing` only fills empty.
   useEffect(() => {
     if (!initialBriefing) return;
     setBriefing((prev) => prev ?? initialBriefing);
@@ -204,35 +189,14 @@ export default function CustomerVisit({
         customer_name: customerName,
         route_code: routeCode,
         date,
-        // Briefing analyzer accepts both PascalCase and camelCase for
-        // these fields (see llm_analytics/core/analyzer.py); pass the
-        // PascalCase rec verbatim so we don't have to maintain a second
-        // shape on the frontend.
-        items: items.map((i) => ({
-          itemCode: i.itemCode,
-          itemName: i.itemName,
-          recommendedQty: i.recommendedQty,
-          tier: i.rec.Tier,
-          source: i.rec.Source,
-          whyItem: i.rec.WhyItem,
-          whyQuantity: i.rec.WhyQuantity,
-          purchaseCycleDays: i.rec.PurchaseCycleDays,
-          daysSinceLastPurchase: i.rec.DaysSinceLastPurchase,
-          frequencyPercent: i.rec.FrequencyPercent,
-          trendFactor: i.rec.TrendFactor,
-        })),
+        // Single canonical builder shared with the customer-analysis path.
+        items: items.map((i) => toLlmItemPayload(i, actuals[i.itemCode] ?? 0)),
       });
       const payload = (res.data ?? {}) as Record<string, unknown>;
       setBriefing(payload);
-      // Persist the structured briefing so re-opening the customer
-      // hydrates from the saved row instead of re-calling the LLM.
-      // Gated on res.success so a degraded response (rate limit, empty
-      // input, retries exhausted) never freezes the DB column with a
-      // placeholder -- the next attempt will retry against a clean
-      // ``NULL`` slot.
-      if (res.success) {
-        void supervisionApi.saveBriefing(sessionId, customerCode, JSON.stringify(payload));
-      }
+      // No server-side persistence -- analyses are generated on-demand each
+      // time the supervisor opens this view. The previous saveBriefing call
+      // wrote to a column we no longer maintain.
     } catch {
       setBriefing({ briefing: "Briefing unavailable. Please try again.", key_items: [], heads_up: "" });
     } finally {
@@ -245,12 +209,11 @@ export default function CustomerVisit({
       sessionId,
       customerCode,
       customerName,
-      items: items.map((i) => ({
-        itemCode: i.itemCode,
-        itemName: i.itemName,
-        recommendedQuantity: i.recommendedQty,
-        actualQuantity: actuals[i.itemCode] ?? 0,
-      })),
+      // Use the same canonical builder as the briefing path so the LLM gets
+      // identical per-item context (tier, frequency, cycle, days_since, why_*,
+      // source, trend) for both artifacts. Before this, the customer analysis
+      // dropped 8 fields, causing "0% of visits, 0.0-day cycle" hallucinations.
+      items: items.map((i) => toLlmItemPayload(i, actuals[i.itemCode] ?? 0)),
       score: score ?? { score: 0, coverage: 0, accuracy: 0 },
       initialAnalysis: initialVisit?.customerAnalysis ?? null,
     });
@@ -304,9 +267,7 @@ export default function CustomerVisit({
               {items.map((it) => {
                 const actual = visited ? (actuals[it.itemCode] ?? 0) : null;
                 const delta = actual != null ? actual - it.recommendedQty : null;
-                // The rec already carries CustomerCode / CustomerName /
-                // RouteCode / TrxDate from the engine; the modal reads
-                // them straight off the row, no overlay needed.
+                // Modal reads CustomerCode/Name/RouteCode/TrxDate straight off the rec.
                 return (
                   <tr key={it.itemCode}>
                     <td className="px-2 py-2 font-medium text-text-primary">{it.itemCode}</td>

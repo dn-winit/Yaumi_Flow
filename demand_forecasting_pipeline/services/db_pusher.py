@@ -1,38 +1,20 @@
-"""
-Pushes forecast predictions to yf_demand_forecast in YaumiAIML.
+"""Pushes forecast predictions to yf_demand_forecast (YaumiAIML).
 
-Wire-format columns (the ones in the prediction CSV) are read from the
-pipeline YAML so the contract follows ``data.{date_col, target_col,
-forecast_level}`` automatically - no hardcoded strings drift if the
-config is renamed.
-
-Writes use a #temp staging table + MERGE inside one transaction. Effect:
-
-  * The target table is locked only for the MERGE itself, not during
-    the (potentially slow) bulk INSERT into the staging table.
-  * Same row count, atomic per ``data_split`` - partial failures roll
-    back cleanly.
-  * Existing rows update in place rather than getting deleted-and-reinserted,
-    so primary-key sequences and downstream change-data-capture stay
-    monotonic.
-
-Reconciled values (``recommended_load``, ``forecast_corrected``,
-``bias_pct``, ``opening_stock``) are computed via
-``services.reconciliation.enrich.enrich_with_load`` BEFORE the push so
-the DB always matches what the API serves. If the engine is unavailable
-the columns are zero-filled and a warning is logged.
+Writes raw forecast + bounds + classification stats via #temp staging + MERGE;
+target table locked only for MERGE. Reconciled chain + yaumi_* columns live on
+yf_sales_transactions and are written by the daily reconciliation_refresh cron.
 """
 
 from __future__ import annotations
 
 import logging
 import random
+import re
 import time
 from typing import Any, Optional
 
 import numpy as np
 import pandas as pd
-import pyodbc
 
 from demand_forecasting_pipeline.config.settings import (
     DEFAULT_STR_LIMITS,
@@ -49,7 +31,6 @@ from demand_forecasting_pipeline.src.utils.config_loader import load_config
 logger = logging.getLogger(__name__)
 
 # Exact column order matching yf_demand_forecast (excludes id, created_at).
-# The reconciliation columns at the tail are added by migrations.
 _DB_COLUMNS = [
     "trx_date", "route_code", "item_code", "item_name",
     "data_split", "demand_class", "model_used",
@@ -57,29 +38,20 @@ _DB_COLUMNS = [
     "lower_bound", "upper_bound",
     "adi", "cv2", "nonzero_ratio", "mean_qty", "avg_gap_days",
 ]
-# Reconciliation columns moved to ``yf_sales_transactions``. The
-# carry chain + actual_sold are written by
-# ``reconciliation_refresh.refresh_reconciliation`` (daily cron),
-# not by this pusher.
+# Reconciliation cols live on yf_sales_transactions (written by daily cron).
 
 # Natural-key columns used by MERGE to decide MATCH vs INSERT.
 _MERGE_KEYS = ("trx_date", "route_code", "item_code", "data_split")
 _UPDATE_COLS = tuple(c for c in _DB_COLUMNS if c not in _MERGE_KEYS)
 
-# NVARCHAR character-length limits. Single source of truth lives in
-# ``config.settings.DEFAULT_STR_LIMITS``; this alias keeps the local
-# name stable for any test harness that imports it. Override per
-# deployment via ``DbSettings.str_limits`` (env: ``DF_DB_STR_LIMITS``
-# as JSON dict).
+# NVARCHAR widths from config.settings.DEFAULT_STR_LIMITS; alias kept for test harness imports.
 _DEFAULT_STR_LIMITS: dict[str, int] = DEFAULT_STR_LIMITS
 
 _INSERT_COLS = ", ".join(f"[{c}]" for c in _DB_COLUMNS)
 _INSERT_PLACEHOLDERS = ", ".join("?" for _ in _DB_COLUMNS)
 
 def _qualify_table(table: str) -> tuple[str, str, str]:
-    """Split ``[YaumiAIML].[dbo].[yf_demand_forecast]`` into
-    (db, schema, name). Raw form ``yf_demand_forecast`` is treated as
-    ``(default_db, dbo, yf_demand_forecast)``."""
+    """Split [db].[schema].[name]; bare name -> (default_db, dbo, name)."""
     parts = [p.strip(" []") for p in table.split(".")]
     if len(parts) == 3:
         return parts[0], parts[1], parts[2]
@@ -87,9 +59,51 @@ def _qualify_table(table: str) -> tuple[str, str, str]:
         return "", parts[0], parts[1]
     return "", "dbo", parts[-1]
 
+
+# Defense-in-depth regex guards for the SQL identifiers we interpolate
+# (table name, db name, lock hints, isolation level). Values originate
+# from Settings/env so an attacker would need env-injection control,
+# but a regex check is cheap and prevents a single typo from producing
+# unparseable or hostile SQL. Identifiers are SQL Server's "regular
+# identifier" rules (alpha or underscore start, then alphanum/underscore)
+# plus optional bracket quoting; qualified names join 1-3 parts with dots.
+_IDENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+# Two alternatives -- either FULLY bracketed (every part wrapped in [..])
+# or FULLY unbracketed. Half-bracketed forms ("foo].bar", "[foo.bar")
+# match the user's deployed bracket style by accident only and are
+# almost always a misconfiguration; rejecting them at the regex layer
+# is defense-in-depth even though the DB would itself reject the
+# resulting SQL. Mixing brackets across parts of the same identifier
+# (``[YaumiAIML].dbo.[tbl]``) is also rejected -- pick one style and
+# stick with it.
+_QUALIFIED_TABLE_RE = re.compile(
+    r"^(?:"
+    # Fully unbracketed: 1-3 parts of [A-Za-z_]\w*, joined by dots
+    r"(?:[A-Za-z_][A-Za-z0-9_]*\.){0,2}[A-Za-z_][A-Za-z0-9_]*"
+    r"|"
+    # Fully bracketed: 1-3 parts of [...], joined by dots
+    r"(?:\[[A-Za-z_][A-Za-z0-9_]*\]\.){0,2}\[[A-Za-z_][A-Za-z0-9_]*\]"
+    r")$"
+)
+# Lock hints: SQL Server combines tokens with commas + whitespace
+# (``HOLDLOCK, UPDLOCK``). Empty allowed (no hints).
+_LOCK_HINTS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_,\s]*$|^$")
+# Isolation level: tokens separated by whitespace
+# (``SERIALIZABLE``, ``READ COMMITTED``).
+_ISOLATION_RE = re.compile(r"^[A-Za-z][A-Za-z\s]*$")
+
+
+def _assert_ident(value: str, *, kind: str, pattern: re.Pattern) -> str:
+    """Raise ValueError if value doesn't match pattern; returns value for inline use."""
+    if not isinstance(value, str) or not pattern.match(value):
+        raise ValueError(
+            f"refusing to interpolate {kind}={value!r} into SQL: must "
+            f"match {pattern.pattern}"
+        )
+    return value
+
 def _dataframe_to_records(df: pd.DataFrame, cols: list[str]) -> list[tuple]:
-    """Project ``df`` to the ordered ``cols`` and emit a list of plain
-    Python tuples suitable for ``cursor.executemany``."""
+    """df -> list of Python tuples in ordered ``cols`` for cursor.executemany."""
     return [
         tuple(None if pd.isna(v) else (v.item() if hasattr(v, "item") else v) for v in row)
         for row in df[cols].values.tolist()
@@ -112,9 +126,7 @@ class DbPusher:
             if self._db.configured
             else None
         )
-        # Schema guard runs lazily on the first push so an unhealthy DB
-        # at boot doesn't crash the whole service. ``None`` means "not
-        # yet checked"; True/False is the cached verdict.
+        # Schema guard runs lazily on first push; None = unchecked.
         self._schema_ok: Optional[bool] = None
         self._schema_error: Optional[str] = None
 
@@ -143,14 +155,7 @@ class DbPusher:
     # ------------------------------------------------------------------
 
     def check_schema(self) -> dict[str, Any]:
-        """Verify the configured table has every column the pusher writes.
-
-        Returns ``{"ok": True}`` on success, ``{"ok": False, "missing":
-        [...], "remediation": "run scripts/migrations/...sql"}`` otherwise.
-        Cached after the first successful check; cached failure is also
-        sticky -- callers must restart the service after applying the
-        migration so we don't repeatedly probe a known-bad schema.
-        """
+        """Verify all push-target columns exist; cached (success and failure both sticky)."""
         if self._schema_ok is True:
             return {"ok": True}
         if self._schema_ok is False:
@@ -166,8 +171,7 @@ class DbPusher:
         )
         params: list = [schema, table]
         if db_name:
-            # Cross-DB INFORMATION_SCHEMA query: prepend with USE-style
-            # 3-part name. SQL Server supports filtering by table catalog.
+            # Cross-DB INFORMATION_SCHEMA via TABLE_CATALOG filter.
             sql = (
                 "SELECT COLUMN_NAME FROM INFORMATION_SCHEMA.COLUMNS "
                 "WHERE TABLE_CATALOG = ? AND TABLE_SCHEMA = ? AND TABLE_NAME = ?"
@@ -229,11 +233,7 @@ class DbPusher:
         if raw.empty:
             return {"success": False, "error": "File is empty"}
 
-        # Required-column validation. Without these the push would
-        # silently fall back to defaults (zero predictions, NULL
-        # explainability) and the DB would carry data that doesn't
-        # match what the API serves -- exactly the kind of silent
-        # corruption this guard exists to prevent.
+        # Required-column validation; missing -> hard fail (no silent default-filled rows).
         required_cols = {
             self._src_date_col, self._src_route_col, self._src_item_col,
             "prediction",
@@ -248,11 +248,7 @@ class DbPusher:
             logger.error(msg)
             return {"success": False, "error": msg, "missing": sorted(missing_required)}
 
-        # Reconciliation moved to yf_sales_transactions (written by the
-        # 03:30 cron). db_pusher's job is to push the raw model output
-        # only -- predicted, bounds, demand_class, etc. The recon
-        # enrichment is not run here; that's the reconciliation_refresh
-        # cron's responsibility on the production CSV mirror.
+        # Recon enrichment NOT run here; that's reconciliation_refresh cron's job.
         df = self._map_columns(raw, datasplit)
         return self._upsert(df, datasplit)
 
@@ -263,11 +259,8 @@ class DbPusher:
     def _map_columns(self, raw: pd.DataFrame, datasplit: str) -> pd.DataFrame:
         out = pd.DataFrame()
 
-        # ----- Date column: parse to canonical YYYY-MM-DD string -----
-        # SQL Server CAST(? AS DATE) is locale-sensitive at bind time; if
-        # the CSV ships ISO/US/UK formats interchangeably the bind can
-        # mis-parse on non-en-US servers. Normalising here matches the
-        # read side (``accuracy_service._normalize``) so train/serve
+        # Date -> canonical YYYY-MM-DD. SQL Server CAST(? AS DATE) is locale-sensitive at bind;
+        # normalising here matches the read side (accuracy_service._normalize).
         # round-trip is byte-aligned.
         date_series = pd.to_datetime(
             raw.get(self._src_date_col, pd.NaT), errors="coerce",
@@ -290,16 +283,17 @@ class DbPusher:
         # matches the WHEN NOT MATCHED BY SOURCE filter in the MERGE SQL.
         out["data_split"] = datasplit.capitalize()
 
-        # ----- Numeric columns: explicit float coercion -----
-        # NaN/Inf -> None below in the records projection; numpy scalars
-        # are unboxed there too so pyodbc sees plain Python types.
+        # ----- Bounded-numeric columns: missing -> 0.0 -----
+        # Semantics: "no recorded value means zero". Correct for
+        # ``predicted`` (a never-predicted row has no demand to push),
+        # ``p_demand`` / ``qty_if_demand`` (same), and ``actual_qty``
+        # (the forecast split has no observed actuals yet -- 0.0 is the
+        # only meaningful default given the column is NOT NULL).
         for col, src in [
             ("predicted", "prediction"),
             ("p_demand", "p_demand"),
             ("qty_if_demand", "qty_if_demand"),
             ("actual_qty", self._src_target_col),
-            ("lower_bound", "q_10"),
-            ("upper_bound", "q_90"),
         ]:
             # When ``src`` isn't a column on ``raw`` (e.g. ``actual_qty``
             # for the forecast split, which has no actuals yet), ``.get``
@@ -313,9 +307,31 @@ class DbPusher:
 
         # ----- Nullable float columns (FLOAT NULL allowed) -----
         # Preserve NaN -> None semantics so the DB stores NULL rather
-        # than 0.0 when an explainability stat is genuinely unknown.
-        for col in ("adi", "cv2", "nonzero_ratio", "mean_qty", "avg_gap_days"):
-            out[col] = pd.to_numeric(raw.get(col, np.nan), errors="coerce")
+        # than 0.0 when the value is genuinely UNKNOWN as opposed to
+        # ZERO. Two distinct groups land here:
+        #
+        # 1. Explainability stats (adi, cv2, ...): missing when the
+        #    pair wasn't in the classifier output for this run.
+        #
+        # 2. Quantile bounds (lower_bound, upper_bound): missing for
+        #    every non-quantile model (Croston, ETS, Naive, etc.) --
+        #    those models produce a point forecast only, with no
+        #    confidence band. Previously these were 0.0-filled, which
+        #    made every Croston row look like "predicted X with a
+        #    point band at zero" -- indistinguishable from a quantile
+        #    model that genuinely said "10% likelihood of demand below
+        #    zero". NULL is the only honest representation of "this
+        #    model doesn't compute bounds".
+        for col, src in [
+            ("adi",            "adi"),
+            ("cv2",            "cv2"),
+            ("nonzero_ratio",  "nonzero_ratio"),
+            ("mean_qty",       "mean_qty"),
+            ("avg_gap_days",   "avg_gap_days"),
+            ("lower_bound",    "q_10"),
+            ("upper_bound",    "q_90"),
+        ]:
+            out[col] = pd.to_numeric(raw.get(src, np.nan), errors="coerce")
 
         # ----- NVARCHAR truncation (settings-driven) -----
         # Only applied to non-null values; ``.astype(str)`` on None/NaN
@@ -343,15 +359,37 @@ class DbPusher:
         records = _dataframe_to_records(df, _DB_COLUMNS)
         chunk = self._db.executemany_chunk_size
 
-        merge_sql = self._build_merge_sql(table, lock_hints=self._db.merge_target_lock_hints)
+        # Compute the staging frame's trx_date window. The MERGE's DELETE
+        # branch (WHEN NOT MATCHED BY SOURCE) is scoped to this range so a
+        # short-horizon push (e.g. 7 days after a retrain) cannot wipe
+        # historical rows outside the window. Without this, a retrain
+        # emitting a smaller horizon than the prior run silently truncated
+        # the prior horizon's audit rows.
+        # ``_map_columns`` writes the canonical column as ``trx_date`` (lower-snake);
+        # an earlier check against ``"TrxDate"`` silently never matched, leaving
+        # min_date/max_date None and the WHEN NOT MATCHED BY SOURCE DELETE branch
+        # unreachable (``ISNULL(?, '9999-12-31')`` vs ``ISNULL(?, '0001-01-01')``
+        # collapses to a vacuous predicate).
+        if "trx_date" in df.columns and not df.empty:
+            dates = pd.to_datetime(df["trx_date"], errors="coerce").dropna()
+            min_date = dates.min().strftime("%Y-%m-%d") if not dates.empty else None
+            max_date = dates.max().strftime("%Y-%m-%d") if not dates.empty else None
+        else:
+            min_date = max_date = None
+
+        # Validate every SQL identifier we interpolate BEFORE building
+        # any SQL string. Defense-in-depth: these come from Settings
+        # (env) so a regex guard catches typos and stops env-injection
+        # from producing hostile SQL.
+        _assert_ident(table, kind="demand_table", pattern=_QUALIFIED_TABLE_RE)
+        lock_hints = self._db.merge_target_lock_hints or ""
+        _assert_ident(lock_hints, kind="merge_target_lock_hints",
+                      pattern=_LOCK_HINTS_RE)
         isolation = self._db.merge_isolation_level
-        # Catalog from the qualified table name so the staging-table
-        # ``SELECT TOP 0 ... INTO #stage`` always lands in the same
-        # database as the target, regardless of the connection's
-        # current database context. Empty ``db_name`` -> table is
-        # unqualified; the caller is responsible for ensuring the
-        # connection's current DB is the right one.
-        db_name, _, _ = _qualify_table(table)
+        _assert_ident(isolation, kind="merge_isolation_level",
+                      pattern=_ISOLATION_RE)
+
+        merge_sql = self._build_merge_sql(table, lock_hints=lock_hints)
         split_label = datasplit.capitalize()
 
         last_error: Optional[str] = None
@@ -363,12 +401,15 @@ class DbPusher:
                     cursor = conn.cursor()
                     cursor.fast_executemany = True
 
-                    # Pin the connection to the target catalog before we
-                    # create #stage_yf; otherwise SELECT TOP 0 against a
-                    # 3-part name can land the staging table in the wrong
-                    # database (or fail with "Invalid object name").
-                    if db_name:
-                        cursor.execute(f"USE [{db_name}];")
+                    # NOTE: previously this issued ``USE [{db_name}]`` to pin
+                    # the connection to the target catalog. That leaks across
+                    # the pool: the next caller for a different database
+                    # silently writes to the wrong DB. ``#stage_yf`` lives in
+                    # tempdb regardless of current DB context, and ``{table}``
+                    # is a fully-qualified 3-part name, so ``SELECT TOP 0
+                    # ... INTO #stage_yf FROM <3-part-name>`` resolves the
+                    # source schema from the qualified reference -- no USE
+                    # needed.
 
                     # MERGE on SQL Server has documented phantom-row races
                     # at READ COMMITTED when two writers target the same key
@@ -406,7 +447,12 @@ class DbPusher:
                     # variable was out of scope by the time the MERGE
                     # ran. Lock hints applied via the SQL template
                     # (see _build_merge_sql).
-                    cursor.execute(merge_sql, (split_label,))
+                    # MERGE params: split_label for WHEN MATCHED filter,
+                    # min/max trx_date for the WHEN NOT MATCHED BY SOURCE
+                    # date-scoped DELETE. If the staging frame had no dates,
+                    # pass NULL bounds -- the SQL CASE then never deletes
+                    # outside the (empty) range.
+                    cursor.execute(merge_sql, (split_label, min_date, max_date))
 
                     conn.commit()
                 duration = round(time.time() - t0, 2)
@@ -475,6 +521,14 @@ class DbPusher:
             f"ON ({keys_on}) "
             f"WHEN MATCHED THEN UPDATE SET {update_set} "
             f"WHEN NOT MATCHED BY TARGET THEN INSERT ({cols_csv}) VALUES ({src_csv}) "
-            f"WHEN NOT MATCHED BY SOURCE AND tgt.[data_split] = ? THEN DELETE"
+            # Date-scoped DELETE: only rows in the same data_split AND within
+            # the staging frame's [min_date, max_date] window are eligible.
+            # ISNULL bounds (9999-12-31 / 0001-01-01) make an empty/NULL window
+            # never match -- a degenerate empty push deletes nothing.
+            f"WHEN NOT MATCHED BY SOURCE "
+            f"  AND tgt.[data_split] = ? "
+            f"  AND tgt.[TrxDate] >= ISNULL(?, '9999-12-31') "
+            f"  AND tgt.[TrxDate] <= ISNULL(?, '0001-01-01') "
+            f"THEN DELETE"
             f";"
         )

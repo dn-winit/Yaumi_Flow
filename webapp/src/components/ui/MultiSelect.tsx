@@ -18,12 +18,7 @@ interface Props {
   triggerWidth?: string;
 }
 
-/**
- * Popover-style multi-select. Trigger shows a compact chip-count summary;
- * the popover opens below the trigger with a search box, "Select all" /
- * "Clear" actions, and code-name rows. Empty selection is rendered as
- * "All" — semantically, no filter applied.
- */
+/** Popover multi-select with search; empty selection renders as "All". */
 export default function MultiSelect({
   label,
   options,

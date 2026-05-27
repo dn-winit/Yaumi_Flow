@@ -1,14 +1,6 @@
-"""
-Upcoming-week planning view -- who will be visited, how much to carry, how
-much revenue is on the table. Pure local read: journey plan + demand forecast
-+ price lookup, all already sitting in :class:`DataManager`'s cached frames.
-
-Does NOT regenerate recommendations. The question this service answers is
-"what does my week look like based on the plan and the forecast?" -- not
-"what exact recommendations do I have?". If the supervisor wants per-customer
-recommendations for a specific future date, the normal ``/get`` endpoint
-handles that lazily.
-"""
+"""Upcoming-week planning view: journey plan x demand forecast x prices,
+read from DataManager's cached frames. Does NOT regenerate recommendations
+(use the /get endpoint for per-customer specifics)."""
 
 from __future__ import annotations
 
@@ -65,7 +57,7 @@ class PlanningService:
     # ------------------------------------------------------------------
 
     def _today(self) -> str:
-        """Local Dubai date so we're consistent with the scheduler and webapp."""
+        """Local Dubai date (matches scheduler + webapp)."""
         tz = getattr(self._s, "scheduler", None)
         tz_name = tz.timezone if tz is not None else "Asia/Dubai"
         try:
@@ -80,10 +72,8 @@ class PlanningService:
         ]
 
         journey = self._dm.get_journey_plan(route_code=route_code)
-        # Reconciled van load -- the planning roll-up reports what the
-        # rep should *load*, not the raw model "what will sell". Single
-        # canonical engine via ``reconcile_demand_frame``; falls back to
-        # raw Predicted if the engine cannot load.
+        # Reconciled van load (what the rep should LOAD) via the canonical
+        # engine; falls back to raw Predicted if the engine can't load.
         demand = self._dm.reconcile_demand_frame(
             self._dm.get_demand_data(route_code=route_code)
         )
