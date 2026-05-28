@@ -10,6 +10,40 @@ from __future__ import annotations
 import os
 from typing import Iterable
 
+# Tokens that mean "operator hasn't actually filled this in" -- the literal
+# strings shipped in ``.env.example`` plus the common variants developers
+# use as scratch placeholders. ``configured()`` checks below treat any DB
+# host / username matching these as "not configured" so cron jobs cleanly
+# skip the write step instead of crashing on ``pyodbc.connect``.
+_PLACEHOLDER_TOKENS: frozenset[str] = frozenset({
+    "your_username", "your-username",
+    "your_password", "your-password",
+    "your-db-server", "your_db_server",
+    "your_api_key", "your-api-key",
+    "your_database", "your-database",
+    "change_me", "changeme",
+    "placeholder", "set_me", "__set_me__",
+    "todo", "tbd",
+})
+
+
+def is_placeholder_value(value: str | None) -> bool:
+    """True iff ``value`` is one of the recognised placeholder tokens.
+
+    Lowercase + stripped before compare so ``Your-DB-Server`` and
+    ``  your_username  `` both register as placeholders. Empty / None
+    is reported as ``True`` (treat unset as placeholder).
+    """
+    if value is None:
+        return True
+    s = value.strip().lower()
+    if not s:
+        return True
+    # Anything starting with ``your_`` or ``your-`` is shorthand-placeholder.
+    if s.startswith("your_") or s.startswith("your-"):
+        return True
+    return s in _PLACEHOLDER_TOKENS
+
 
 def is_production() -> bool:
     """True only when ``YF_ENV=production``. Used by the boot-time env

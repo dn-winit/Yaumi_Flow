@@ -185,6 +185,7 @@ def initialize_session(
 @router.post("/internal/invalidate-day")
 def internal_invalidate_day(
     date: str,
+    background_tasks: BackgroundTasks,
     auto_visit_svc=Depends(get_auto_visit_service),
     db_saver: DbSaver = Depends(get_db_saver),
 ) -> Dict[str, Any]:
@@ -193,42 +194,43 @@ def internal_invalidate_day(
     Called by the demand_forecasting retrain cascade after fresh recs land in
     yf_recommended_orders. Two effects:
 
-      1. **Cache drop** -- AutoVisitService's _sessions cache for that date is
-         dropped so the next reconcile tick re-hydrates from the canonical
-         DB state. Deliberately does NOT touch the route-handler _sessions
-         LRU: that holds the in-flight session object backing an open
-         supervisor's /visit calls, and dropping it mid-route would 404 the
-         next tap.
+      1. **Cache drop (sync)** -- AutoVisitService's _sessions cache for that
+         date is dropped so the next reconcile tick re-hydrates from the
+         canonical DB state. Sub-millisecond; runs inline. Deliberately does
+         NOT touch the route-handler _sessions LRU: that holds the in-flight
+         session object backing an open supervisor's /visit calls, and
+         dropping it mid-route would 404 the next tap.
 
-      2. **DB repair** -- runs the supervision-side backfill SQL that closes
-         the rec-timing race. Items written with original_recommended_qty=0
-         while recs were unavailable get their rec_qty filled from
-         yf_recommended_orders; customer-level qty_recommended is recomputed
-         from the now-correct item rows; route-level
-         planned_qty_recommended / visited_qty_recommended /
-         route_performance_score / qty_fulfillment_rate are recomputed from
-         the now-correct customer rows.
+      2. **DB repair (async)** -- the supervision-side backfill SQL is
+         scheduled as a BackgroundTask so the DF cascade isn't blocked by
+         a 30-60s 5-stage MERGE. ``repair_supervision_day`` is idempotent
+         and decorated with ``@with_db_retry`` (deadlock-victim 1205 retries
+         transparently), so a transient failure during the background run
+         heals on its own.
 
     Repair is idempotent: running it twice has no effect on rows that are
-    already correct. Failure of the repair branch does NOT poison the cache
-    drop (best-effort) -- the next /initialize will still see the fresh DB
-    state if the repair landed.
+    already correct. Putting the repair in a BackgroundTask means the
+    response returns in ~milliseconds rather than blocking the DF cron
+    cascade timeout.
     """
     if auto_visit_svc is None:
         return {"success": False, "reason": "auto_visit_service_disabled"}
     dropped = auto_visit_svc.invalidate_all_for_date(date)
-    repair = {"success": False, "skipped": True, "reason": "db_saver_unavailable"}
+
+    repair_scheduled = False
     if db_saver is not None and getattr(db_saver, "available", False):
-        try:
-            repair = db_saver.repair_supervision_day(date)
-        except Exception as exc:
-            logger.warning("repair_supervision_day failed for date=%s: %s", date, exc)
-            repair = {"success": False, "error": str(exc)}
+        def _run_repair(d: str) -> None:
+            try:
+                db_saver.repair_supervision_day(d)
+            except Exception as exc:
+                logger.warning("repair_supervision_day failed for date=%s: %s", d, exc)
+        background_tasks.add_task(_run_repair, date)
+        repair_scheduled = True
     return {
         "success": True,
         "date": date,
         "auto_visit_dropped": dropped,
-        "repair": repair,
+        "repair_scheduled": repair_scheduled,
     }
 
 

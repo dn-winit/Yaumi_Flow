@@ -39,6 +39,12 @@ class DbSettings(BaseSettings):
 
     @property
     def configured(self) -> bool:
+        # Treat the .env.example placeholder strings as "not configured" so a
+        # dev who forgot to swap them in gets a clean skip instead of a
+        # ``pyodbc.connect`` stack trace at cron time.
+        from common.runtime import is_placeholder_value
+        if is_placeholder_value(self.host) or is_placeholder_value(self.username):
+            return False
         return bool(self.host and self.username)
 
     def connection_string(self) -> str:

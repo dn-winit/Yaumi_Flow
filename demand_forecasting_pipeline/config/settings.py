@@ -79,6 +79,12 @@ class DbSettings(BaseSettings):
 
     @property
     def configured(self) -> bool:
+        # Treat placeholder values (``your-db-server`` / ``your_username``
+        # shipped in .env.example) as "not configured" so cron writes skip
+        # cleanly instead of crashing on pyodbc.connect.
+        from common.runtime import is_placeholder_value
+        if is_placeholder_value(self.host) or is_placeholder_value(self.username):
+            return False
         return bool(self.host and self.username)
 
     def connection_string(self) -> str:
@@ -514,6 +520,9 @@ class Settings(BaseSettings):
 
     @property
     def live_db_configured(self) -> bool:
+        from common.runtime import is_placeholder_value
+        if is_placeholder_value(self.live_db_host) or is_placeholder_value(self.live_db_username):
+            return False
         return bool(self.live_db_host and self.live_db_username)
 
     def live_connection_string(self) -> str:

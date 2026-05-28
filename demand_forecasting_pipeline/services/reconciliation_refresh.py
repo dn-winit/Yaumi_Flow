@@ -12,7 +12,6 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
-import numpy as np
 import pandas as pd
 import pyodbc
 
@@ -1001,38 +1000,52 @@ def _upsert_sales_transactions(
         if c not in write_df.columns:
             write_df[c] = None
 
-    # SQL Server doesn't accept Python None alongside floats via pyodbc
-    # fast_executemany consistently; we ship NaN for missing numerics
-    # and None only for the BIT cols. Build the records tuple in the
-    # exact order of staging columns.
+    # Build the records tuple in the exact order of staging columns.
     #
     # Vectorised build: ``iterrows()`` over a tens-of-thousands-of-rows
     # frame INSIDE a HOLDLOCK+UPDLOCK transaction held the SERIALIZABLE
     # range lock open for minutes; the column-wise pass below builds the
     # same row tuples in NumPy and is typically 50-100x faster.
+    #
+    # CRITICAL: pyodbc's ``fast_executemany`` rejects numpy scalar dtypes
+    # (``numpy.int64`` / ``numpy.float64`` / ``numpy.str_``) with
+    # ``ProgrammingError: Unknown object type ... during describe``. Every
+    # column is materialised as a Python list via ``.tolist()`` (numpy
+    # downcasts to native ints/floats) or an explicit list comprehension
+    # (for the str + nan-aware float cases) so the driver only sees
+    # ``str | int | float | None``.
     all_cols = list(_KEY_COLS) + target_cols
     if write_df.empty:
         records: list[tuple] = []
     else:
-        col_arrays: list[object] = []
+        col_lists: list[list] = []
         for c in all_cols:
-            series = write_df[c] if c in write_df.columns else pd.Series(
-                [None] * len(write_df), index=write_df.index,
-            )
-            if c in _BOOL_COLS:
-                # BIT NULL: ship int 0/1; missing -> 0 (matches the
-                # row-level branch above).
-                vals = pd.to_numeric(series, errors="coerce").fillna(0).astype(int).to_numpy()
-            elif c in _KEY_COLS:
-                vals = series.astype(str).to_numpy()
+            if c in write_df.columns:
+                series = write_df[c]
             else:
-                # FLOAT NULL: pandas->numpy with object dtype so we can
-                # mix float + None per pyodbc's fast_executemany contract.
+                series = pd.Series([None] * len(write_df), index=write_df.index)
+
+            if c in _BOOL_COLS:
+                # BIT NULL: 0/1 ints, missing -> 0.
+                col_lists.append(
+                    pd.to_numeric(series, errors="coerce")
+                      .fillna(0)
+                      .astype(int)
+                      .tolist()
+                )
+            elif c in _KEY_COLS:
+                # NVARCHAR NOT NULL: native Python str.
+                col_lists.append([str(v) for v in series])
+            else:
+                # FLOAT NULL: native float for present values, ``None``
+                # for missing. pyodbc's NULL handling for mixed-type
+                # columns requires Python ``None``, not ``numpy.nan``.
                 numeric = pd.to_numeric(series, errors="coerce")
-                vals = np.where(numeric.notna(), numeric, None).astype(object)
-            col_arrays.append(vals)
-        # zip(*cols) emits one tuple per row, matching the previous shape.
-        records = list(zip(*col_arrays))
+                col_lists.append([
+                    None if pd.isna(v) else float(v) for v in numeric
+                ])
+        # zip(*lists) emits one tuple per row, matching the previous shape.
+        records = list(zip(*col_lists))
 
     pool = get_pool(
         s.db.connection_string(),
