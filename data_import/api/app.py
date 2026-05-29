@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 
-import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -28,19 +28,22 @@ def _logs_dir() -> Path:
     return root / "imports" / "logs"
 
 
-def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> None:
+def _cascade_reconciliation_refresh(settings: Settings, log: Any) -> None:
     """POST demand_forecasting's ``/reconciliation/refresh`` after a fresh
     CSV import lands so CSV-only diagnostic columns (recent_avg,
     expected_demand, pattern_*_applied, forecast_below_recent) are patched
     in the same tick. Best-effort: an unreachable forecast service logs
     and returns; the scheduled cron picks it up later.
+
+    ``log`` is a structlog ``BoundLogger`` -- keyword args render as JSON
+    fields, not the printf ``%s`` substitution stdlib expects.
     """
     base = (settings.forecast_url or "").rstrip("/")
     if not base:
         log.info(
-            "Reverse cascade skipped -- DI_FORECAST_URL unset, "
-            "diagnostic columns will be patched on the next scheduled "
-            "reconciliation cron",
+            "reverse_cascade_skipped",
+            reason="DI_FORECAST_URL unset; diagnostic columns will be "
+            "patched on the next scheduled reconciliation cron",
         )
         return
     url = f"{base}/api/v1/forecast/reconciliation/refresh"
@@ -55,16 +58,16 @@ def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> 
         payload = resp.json() if resp.content else {}
         cascade = payload.get("cascade") or {}
         log.info(
-            "Reverse cascade ok: yf_sales_transactions refreshed %s rows, mirror cascade %s new rows",
-            payload.get("rows_updated", "?"),
-            cascade.get("new_rows", "?"),
+            "reverse_cascade_ok",
+            rows_updated=payload.get("rows_updated"),
+            mirror_new_rows=cascade.get("new_rows"),
         )
     except Exception as exc:
         log.warning(
-            "Reverse cascade skipped -- /reconciliation/refresh "
-            "unreachable at %s: %s. Diagnostic columns will be patched "
-            "on the next scheduled cron.",
-            url, exc,
+            "reverse_cascade_skipped",
+            url=url,
+            error=str(exc),
+            reason="diagnostic columns will be patched on the next scheduled cron",
         )
 
 
@@ -83,7 +86,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        _logger.info("Data Import Service starting -- data_dir=%s", settings.data_dir)
+        _logger.info("Data Import Service starting", data_dir=settings.data_dir)
 
         # Pre-warm EDA aggregations so first dashboard request is instant.
         # Leader election: only the worker that owns the scheduler lock runs
@@ -126,22 +129,25 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                                 pd.read_csv(sales_csv, usecols=["TrxDate"])["TrxDate"].max()
                             ).strip()[:10]
                             stale = max_date < today
-                            _logger.info("Sales CSV max date: %s, today: %s, stale: %s", max_date, today, stale)
+                            _logger.info(
+                                "sales_csv_freshness_probe",
+                                max_date=max_date, today=today, stale=stale,
+                            )
                         except Exception as exc:
-                            _logger.warning("CSV freshness check failed, assuming stale: %s", exc)
+                            _logger.warning("csv_freshness_check_failed", error=str(exc))
 
                     if stale:
-                        _logger.info("Data is stale — running full import on startup")
+                        _logger.info("startup_import_running", reason="data_stale")
                         results = importer.import_all("full")
                         new_rows = sum(r.get("new_rows", 0) for r in results.values())
-                        _logger.info("Startup import complete: %d new rows across all datasets", new_rows)
+                        _logger.info("startup_import_complete", new_rows=new_rows)
                         # Reverse cascade so diagnostic columns are re-patched in this tick.
                         _cascade_reconciliation_refresh(settings, _logger)
                     else:
-                        _logger.info("Data is fresh — skipping startup import")
+                        _logger.info("startup_import_skipped", reason="data_fresh")
 
                 except Exception as exc:
-                    _logger.warning("Startup data refresh failed: %s", exc)
+                    _logger.warning("startup_data_refresh_failed", error=str(exc))
 
                 # Warm EDA cache (always) using the same trailing-30-day
                 # window the dashboard defaults to, so first request is a hit.
@@ -165,10 +171,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         try:
                             runner()
                         except Exception as exc:
-                            _logger.warning("EDA warm-up skipped %s: %s", label, exc)
-                    _logger.info("EDA cache warmed")
+                            _logger.warning("eda_warmup_step_skipped", step=label, error=str(exc))
+                    _logger.info("eda_cache_warmed")
                 except Exception as exc:
-                    _logger.warning("EDA warm-up skipped: %s", exc)
+                    _logger.warning("eda_warmup_skipped", error=str(exc))
 
             # Skip the import + cascade on followers; EDA cache warm-up still
             # runs because it only reads the local CSV mirror that the leader
@@ -193,12 +199,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                             try:
                                 runner()
                             except Exception as exc:
-                                _logger.warning("EDA warm-up skipped %s: %s", label, exc)
+                                _logger.warning("eda_warmup_step_skipped", step=label, error=str(exc))
                     except Exception as exc:
-                        _logger.warning("EDA warm-up skipped: %s", exc)
+                        _logger.warning("eda_warmup_skipped", error=str(exc))
                 threading.Thread(target=_warm_eda_only, daemon=True, name="startup-warm-eda").start()
         except Exception as exc:
-            _logger.warning("Startup refresh scheduling failed: %s", exc)
+            _logger.warning("startup_refresh_scheduling_failed", error=str(exc))
 
         sched = None
         # Only the leader (that already booted the import thread above) fires

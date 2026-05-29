@@ -72,33 +72,39 @@ export default function Modal({ open, onClose, title, children, size = "md" }: M
     [onClose],
   );
 
-  // Focus management: remember what had focus before open, focus the
-  // dialog panel on open, restore on close. Locks scroll on the body so
-  // mobile users don't see the background scroll under the scrim.
+  // Scroll lock + previously-focused tracking + restore. ``open`` is the
+  // only dep so the body-style toggle never fires on unrelated effect
+  // re-runs (e.g. ``handleKeyDown`` identity change when ``onClose`` is
+  // re-bound). Restoration runs in the cleanup so it only fires on the
+  // transition out of ``open=true``.
   useEffect(() => {
-    if (open) {
-      previouslyFocused.current = document.activeElement as HTMLElement | null;
-      document.addEventListener("keydown", handleKeyDown);
-      document.body.style.overflow = "hidden";
-      // Defer one frame so the panel is mounted/measurable before focus.
-      requestAnimationFrame(() => {
-        const panel = panelRef.current;
-        if (!panel) return;
-        const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
-        (first ?? panel).focus();
-      });
-    }
+    if (!open) return;
+    previouslyFocused.current = document.activeElement as HTMLElement | null;
+    document.body.style.overflow = "hidden";
+    // Defer one frame so the panel is mounted/measurable before focus.
+    requestAnimationFrame(() => {
+      const panel = panelRef.current;
+      if (!panel) return;
+      const first = panel.querySelector<HTMLElement>(FOCUSABLE_SELECTOR);
+      (first ?? panel).focus();
+    });
     return () => {
-      document.removeEventListener("keydown", handleKeyDown);
       document.body.style.overflow = "";
-      if (!open && previouslyFocused.current) {
-        // Defer restoring focus until after React tears the modal down so
-        // the previously-focused element is still in the DOM.
+      if (previouslyFocused.current) {
         const target = previouslyFocused.current;
         previouslyFocused.current = null;
         requestAnimationFrame(() => target.focus());
       }
     };
+  }, [open]);
+
+  // Keydown listener is its own effect so re-binding ``handleKeyDown``
+  // (when ``onClose`` identity changes) doesn't churn the scroll-lock
+  // or focus-management effect above.
+  useEffect(() => {
+    if (!open) return;
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
   }, [open, handleKeyDown]);
 
   if (!visible && !open) return null;

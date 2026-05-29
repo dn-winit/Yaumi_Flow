@@ -41,13 +41,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         # --- Startup ---
-        _logger.info("Initializing data manager...")
+        _logger.info("initializing_data_manager")
         dm = get_data_manager()
         result = dm.initialize()
         if result["success"]:
-            _logger.info("Data loaded: %s", result["data"])
+            _logger.info("data_loaded", data=result["data"])
         else:
-            _logger.error("Data load errors: %s", result["errors"])
+            _logger.error("data_load_errors", errors=result["errors"])
 
         if settings.scheduler.enabled:
             # Leader election: under ``workers>1`` only one worker per host
@@ -74,13 +74,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 planning = get_planning_service()
                 planning.get_upcoming(days=7, route_code=None)
                 _logger.info(
-                    "planning_warmup_complete duration_ms=%.1f",
-                    (time.perf_counter() - t0) * 1000.0,
+                    "planning_warmup_complete",
+                    duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
                 )
             except Exception as exc:  # pragma: no cover -- defensive
                 _logger.warning(
-                    "planning_warmup_skipped error=%s type=%s",
-                    str(exc), type(exc).__name__,
+                    "planning_warmup_skipped",
+                    error=str(exc),
+                    error_type=type(exc).__name__,
                 )
 
         threading.Thread(

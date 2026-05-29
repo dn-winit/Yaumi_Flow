@@ -40,18 +40,19 @@ def _probe_data_import(settings: Settings, log: Any) -> None:
     """Non-fatal startup probe of data_import; warns loudly so silent zero-actuals don't sneak in."""
     url = (settings.data_import_url or "").rstrip("/")
     if not url:
-        log.warning("data_import_url unset; live actuals will be empty")
+        log.warning("data_import_probe_skipped", reason="data_import_url unset")
         return
     try:
         import httpx
         resp = httpx.get(f"{url}/api/v1/data/health", timeout=settings.data_import_timeout)
         resp.raise_for_status()
-        log.info("data_import probe OK at %s", url)
+        log.info("data_import_probe_ok", url=url)
     except Exception as exc:
         log.warning(
-            "data_import probe FAILED at %s (%s) -- live actuals will be "
-            "empty until reachable; rep scoring will read zero invoiced qty",
-            url, exc,
+            "data_import_probe_failed",
+            url=url,
+            error=str(exc),
+            reason="live actuals will be empty until reachable",
         )
 
 
@@ -68,17 +69,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         _logger.info(
-            "Sales Supervision Service starting -- "
-            "registry_max=%d ttl_seconds=%d "
-            "route_table=%s customer_table=%s item_table=%s "
-            "auto_visit_enabled=%s auto_visit_poll=%ds",
-            settings.session_registry_max,
-            settings.session_ttl_seconds,
-            settings.route_summary_table or "(unset)",
-            settings.customer_summary_table or "(unset)",
-            settings.item_details_table or "(unset)",
-            settings.auto_visit_enabled,
-            settings.auto_visit_poll_seconds,
+            "sales_supervision_starting",
+            registry_max=settings.session_registry_max,
+            ttl_seconds=settings.session_ttl_seconds,
+            route_table=settings.route_summary_table or "(unset)",
+            customer_table=settings.customer_summary_table or "(unset)",
+            item_table=settings.item_details_table or "(unset)",
+            auto_visit_enabled=settings.auto_visit_enabled,
+            auto_visit_poll_seconds=settings.auto_visit_poll_seconds,
         )
 
         # Loud-warn on unreachable data_import so supervisors don't see ghost-perfect tiles.
@@ -133,16 +131,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                         except Exception:
                             continue
                     _logger.info(
-                        "saved_visits_warmup_complete routes=%d/%d "
-                        "duration_ms=%.1f ttl_seconds=%.1f",
-                        warmed, len(routes),
-                        (time.perf_counter() - t0) * 1000.0,
-                        settings.effective_saved_visits_cache_ttl,
+                        "saved_visits_warmup_complete",
+                        routes_warmed=warmed,
+                        routes_total=len(routes),
+                        duration_ms=round((time.perf_counter() - t0) * 1000.0, 1),
+                        ttl_seconds=settings.effective_saved_visits_cache_ttl,
                     )
                 except Exception as exc:  # pragma: no cover -- defensive
                     _logger.warning(
-                        "saved_visits_warmup_skipped error=%s type=%s",
-                        exc, type(exc).__name__,
+                        "saved_visits_warmup_skipped",
+                        error=str(exc),
+                        error_type=type(exc).__name__,
                     )
 
             threading.Thread(
