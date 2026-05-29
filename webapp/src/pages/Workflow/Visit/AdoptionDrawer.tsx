@@ -51,7 +51,6 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
       start_date: addDays(anchor, -29),
       end_date: anchor,
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode, lastActiveDate, lastActiveLoading]);
 
   // Picker emits ISO (start_date, end_date) directly; empty windows surface as empty-state below.

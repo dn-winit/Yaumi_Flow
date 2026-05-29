@@ -67,7 +67,6 @@ export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endD
     const dayBeforeSelected = endDateProp ? addDays(endDateProp, -1) : null;
     const end = dayBeforeSelected && dayBeforeSelected < anchor ? dayBeforeSelected : anchor;
     setPeriod({ start_date: addDays(end, -29), end_date: end });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode, endDateProp, lastActiveDate, lastActiveLoading]);
 
   const apiFilters = useMemo(

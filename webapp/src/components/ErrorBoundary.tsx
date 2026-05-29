@@ -35,7 +35,6 @@ export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBo
   componentDidCatch(error: Error, info: ErrorInfo) {
     // Console is the only sink we can rely on in the browser; if a remote
     // logger is added later, wire it here.
-    // eslint-disable-next-line no-console
     console.error(`[ErrorBoundary:${this.props.scope}]`, error, info);
   }
 

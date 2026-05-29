@@ -61,27 +61,29 @@ function WindowStat({ label, w }: { label: string; w: ItemStatsWindow | null | u
 }
 
 export default function ExplainabilityModal({ open, onClose, row }: Props) {
-  if (!row) return null;
-
-  const itemCode = str(row.ItemCode ?? row.item_code);
-  const itemName = str(row.ItemName ?? row.item_name);
-  const routeCode = str(row.RouteCode ?? row.route_code);
-  const date = pickDate(row);
+  // ``row`` may be null while the trigger is unmounting; read all fields
+  // through a nullable coalesce so every hook below runs unconditionally.
+  // The rendered tree short-circuits at the end -- we never want to
+  // violate rules-of-hooks by ordering ``return null`` before a hook.
+  const itemCode = row ? str(row.ItemCode ?? row.item_code) : "";
+  const itemName = row ? str(row.ItemName ?? row.item_name) : "";
+  const routeCode = row ? str(row.RouteCode ?? row.route_code) : "";
+  const date = row ? pickDate(row) : "";
 
   // Headline = total truck weight (carry + fresh). VanLoadTable adapter populates `prediction`.
-  const recommendedLoad = num(row.prediction);
-  const freshLoad = num(row.units_to_load) ?? recommendedLoad;
-  const pDemand = num(row.p_demand);
-  const q10 = num(row.lower_bound);
-  const q90 = num(row.upper_bound);
-  const cls = str(row.demand_class);
+  const recommendedLoad = row ? num(row.prediction) : null;
+  const freshLoad = row ? (num(row.units_to_load) ?? recommendedLoad) : null;
+  const pDemand = row ? num(row.p_demand) : null;
+  const q10 = row ? num(row.lower_bound) : null;
+  const q90 = row ? num(row.upper_bound) : null;
+  const cls = row ? str(row.demand_class) : "";
   // expectedDemand = engine's per-day target; recentAvg = per-selling-day baseline.
-  const openingStock = num(row.opening_stock);
-  const expectedDemand = num(row.expected_demand);
-  const recentAvg = num(row.recent_avg_per_selling_day);
-  const guardSkipped = row.guard_skipped === true;
+  const openingStock = row ? num(row.opening_stock) : null;
+  const expectedDemand = row ? num(row.expected_demand) : null;
+  const recentAvg = row ? num(row.recent_avg_per_selling_day) : null;
+  const guardSkipped = row?.guard_skipped === true;
   // Wire-driven flag; frontend never recomputes/thresholds.
-  const forecastLow = bool(row.forecast_below_recent);
+  const forecastLow = row ? bool(row.forecast_below_recent) : false;
   // True only for two-stage classes (intermittent/lumpy); smooth/erratic render a static label.
   const hasRealProbability = hasRealConfidence(cls);
   // recentAvg populated -> cron has the recent pattern; absent -> brand-new item, drop the panel.
@@ -89,6 +91,10 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
 
   const stats = useItemStats(open && itemCode ? itemCode : undefined, routeCode || undefined);
   const windows = stats.data?.windows;
+
+  // Render nothing when no row is bound -- AFTER all hooks so React's
+  // rules-of-hooks order is stable across renders.
+  if (!row) return null;
 
   return (
     <Modal open={open} onClose={onClose} title="Why this recommendation" size="xl">

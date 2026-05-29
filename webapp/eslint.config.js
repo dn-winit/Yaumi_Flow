@@ -39,9 +39,10 @@ export default [
       // React Hooks: catch the most common runtime bugs.
       ...reactHooks.configs.recommended.rules,
 
-      // Fast-refresh hygiene -- warn (not error) so a one-off export
-      // doesn't block CI.
-      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
+      // Fast-refresh hygiene is dev-tooling only -- a mixed-export module
+      // (component + helper hooks/atoms) doesn't break production builds,
+      // so we keep this off rather than litter source with module splits.
+      "react-refresh/only-export-components": "off",
 
       // TS variant of no-unused-vars -- argument prefix _ is allowed.
       "@typescript-eslint/no-unused-vars": [

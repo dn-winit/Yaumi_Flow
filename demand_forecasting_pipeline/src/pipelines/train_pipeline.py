@@ -314,7 +314,7 @@ def run_training(config_path, on_step=None):
             t0 = _step_starts.pop(step, None)
             if t0 is not None:
                 PIPELINE_STEP_DURATION.labels(
-                    step=step, status=status,
+                    service="demand_forecasting", step=step, status=status,
                 ).observe(_time.perf_counter() - t0)
             logger.info(
                 "step_%s pipeline=train step=%s run_id=%s",
