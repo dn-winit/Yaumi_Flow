@@ -82,10 +82,16 @@ def _build_training_overview(svc: ArtifactService, test_df: pd.DataFrame) -> dic
         total_models += len(models)
         if metrics:
             best_name, best_wape = min(metrics.items(), key=lambda x: x[1])
+            # accuracy_pct mirrors ``composite_summary`` so the per-class
+            # subtitle in the webapp can render directly without recomputing
+            # ``100 - wape`` client-side. Floor at 0 in case of a degenerate
+            # >100% WAPE (shouldn't happen post-clamp, but keeps the contract
+            # honest).
             class_winners.append({
                 "demand_class": cls,
                 "best_model": best_name,
                 "wape": round(best_wape, 1),
+                "accuracy_pct": round(max(0.0, 100.0 - best_wape), 1),
                 "models_competed": len(models),
             })
     overview["class_winners"] = class_winners

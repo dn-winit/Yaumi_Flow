@@ -17,8 +17,12 @@ export interface TrainingClassWinner {
   /** Best model's name for this class (e.g. ``"xgboost"``). */
   best_model: string;
   /** Best model's tolerance-adjusted WAPE for this class, rounded to 1dp.
-   *  Accuracy is rendered as ``100 - wape`` in the per-class subtitle. */
+   *  Accuracy below comes from ``composite_summary`` server-side; render
+   *  it directly instead of recomputing ``100 - wape``. */
   wape: number;
+  /** Server-computed accuracy_pct = ``max(0, 100 - wape)``. Pure render
+   *  contract: the webapp must NOT recompute this client-side. */
+  accuracy_pct: number;
   /** How many candidate models competed in this class's tournament. */
   models_competed: number;
 }

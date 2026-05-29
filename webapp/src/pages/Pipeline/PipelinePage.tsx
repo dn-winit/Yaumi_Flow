@@ -49,17 +49,19 @@ const fmtTimestamp = (ts: string | null): string => (ts ? fmtDateTime(ts) : "");
 
 const SEPARATOR = "·"; // middle dot, matches the per-class spec.
 
-/** Per-class accuracy line under the Baseline tile; null when no winners (caller fallback). */
+/** Per-class accuracy line under the Baseline tile; null when no winners (caller fallback).
+ *  Pure render: reads ``accuracy_pct`` directly from the server-side
+ *  ``composite_summary`` rather than recomputing ``100 - wape`` here.
+ *  Keeps the frontend free of business math. */
 function PerClassAccuracyLine({
   winners,
 }: {
-  winners: { demand_class: string; wape: number }[];
+  winners: { demand_class: string; accuracy_pct: number }[];
 }) {
   if (!winners.length) return null;
   const parts = winners.map((w) => {
     const cls = w.demand_class.charAt(0).toUpperCase() + w.demand_class.slice(1).toLowerCase();
-    const accuracy = Math.round(100 - w.wape);
-    return `${cls} ${accuracy}%`;
+    return `${cls} ${Math.round(w.accuracy_pct)}%`;
   });
   return (
     <div className="text-caption text-text-tertiary mt-0.5">
