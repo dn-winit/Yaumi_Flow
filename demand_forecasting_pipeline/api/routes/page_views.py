@@ -202,11 +202,10 @@ def _log_sales_transactions_staleness(route_code: str, date: str) -> None:
             )
             # CSV mirror restricted to live_route_codes; filter DB count likewise to avoid false positives.
             routes = list(getattr(s, "live_route_codes", []) or [])
-            # Single source of truth -- the FQN constant lives in reconciliation_refresh
-            # so a future rename touches one place.
-            from demand_forecasting_pipeline.services.reconciliation_refresh import _SALES_TARGET_TABLE
+            # Single source of truth: the table FQN flows from Settings so a
+            # rename or env override propagates to every consumer in one place.
             db_sql = (
-                f"SELECT COUNT(*) FROM {_SALES_TARGET_TABLE} "
+                f"SELECT COUNT(*) FROM {s.sales_transactions_table} "
                 "WITH (NOLOCK) WHERE trx_date = ?"
             )
             db_params: list = [str(date)]

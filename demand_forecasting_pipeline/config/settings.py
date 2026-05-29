@@ -225,9 +225,15 @@ class Settings(BaseSettings):
         ),
     )
 
-    # Drift-detection window: scheduler scores last N days of live vs actuals against baseline.
+    # Drift-detection window: scheduler scores trailing N days vs baseline.
+    # Default 14 is paired with ``accuracy_settlement_window_days=7`` so the
+    # effective scoring window is days 7-14 ago -- past the typical FMCG
+    # return cycle, so ``actual_sold`` for those days has settled and the
+    # drift signal isn't biased by gross-vs-net scale (returns landing late
+    # would otherwise drag ``recent_accuracy`` down relative to the
+    # fully-settled test-set baseline).
     drift_cache_ttl_seconds: int = Field(default=300, ge=0)
-    drift_lookback_days: int = Field(default=7, ge=1, le=365)
+    drift_lookback_days: int = Field(default=14, ge=1, le=365)
 
     # Van-load service caches.
     van_load_max_cache_entries: int = Field(default=500, ge=1)
@@ -481,10 +487,16 @@ class Settings(BaseSettings):
         description="Filesystem path for scheduler leader-election lock.",
     )
 
-    # Drop predictions whose trx_date is within N days of today; same-day invoices still in flight.
-    # Default 2 covers typical invoice-upload SLA; set to 0 for dev fixtures.
-    accuracy_settlement_window_days: int = Field(default=2, ge=0, le=14,
-        description="Drop in-flight predictions within this many days of today from accuracy scoring.")
+    # Drop predictions whose trx_date is within N days of today: covers both
+    # in-flight invoices (T-0/T-1) AND the typical FMCG return-tail
+    # (T-2 .. T-7). With ``actual_sold`` written by the daily reconciliation
+    # cron and overwritten each tick as late returns flow in, a 7-day cutoff
+    # ensures the scored window has converged. Ceiling 30 matches
+    # ``reconciliation_refresh_horizon_days`` -- beyond that the cron stops
+    # re-evaluating actuals so a longer settlement gives nothing extra.
+    # Set to 0 for dev fixtures.
+    accuracy_settlement_window_days: int = Field(default=7, ge=0, le=30,
+        description="Drop predictions within this many days of today from accuracy scoring (covers in-flight invoices + return tail).")
 
     # Champion-challenger promotion gate: reject auto-retrains that regress beyond threshold;
     # snapshot still recorded, but current.json pointer held back. 1.0pp absorbs natural variance.
@@ -496,6 +508,15 @@ class Settings(BaseSettings):
     # DB push (target table for demand predictions)
     db: DbSettings = Field(default_factory=DbSettings)
     demand_table: str = Field(default="", description="e.g. [YaumiAIML].[dbo].[yf_demand_forecast]")
+    # Pre-netted actuals table, written by reconciliation_refresh's daily cron.
+    # AccuracyService reads ``actual_sold`` from here instead of re-scanning
+    # YaumiLive on every drift query -- same DB as predictions (no cross-DB
+    # hop), indexed on (trx_date, route_code, item_code), already net of
+    # returns (the cron applies NET_SOLD_CASE_SQL at write time).
+    sales_transactions_table: str = Field(
+        default="[YaumiAIML].[dbo].[yf_sales_transactions]",
+        description="e.g. [YaumiAIML].[dbo].[yf_sales_transactions]",
+    )
 
     # Post-push cascade to data_import to refresh demand_forecast.csv. Empty disables.
     data_import_url: str = Field(default="", description="Base URL of the data_import service.")

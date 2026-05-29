@@ -71,8 +71,6 @@ _BOOL_COLS = {
     "forecast_dormant",
 }
 
-_SALES_TARGET_TABLE = "[YaumiAIML].[dbo].[yf_sales_transactions]"
-
 # Columns that reflect REAL-WORLD truth catching up (late returns, end-of-day stock
 # adjustments). These ALWAYS update on re-merge -- including for past dates -- so
 # a stale actual_sold from morning gets corrected by evening's late returns.
@@ -768,7 +766,7 @@ def _fetch_actual_sold(
     # netting semantics. Any future change to the formula propagates
     # to both call sites in lockstep.
     returns_subquery = RETURNS_SUBQUERY_BODY_SQL.format(
-        view="[YaumiLive].[dbo].[VW_GET_SALES_DETAILS]",
+        view=s.live_sales_view,
         route_clause=route_clause_inner,
         date_clause="AND CAST(r.TrxDate AS DATE) BETWEEN ? AND ?",
     )
@@ -778,7 +776,7 @@ def _fetch_actual_sold(
         s.RouteCode             AS route_code,
         s.ItemCode              AS item_code,
         SUM({NET_SOLD_CASE_SQL}) AS actual_sold
-    FROM [YaumiLive].[dbo].[VW_GET_SALES_DETAILS] s WITH (NOLOCK)
+    FROM {s.live_sales_view} s WITH (NOLOCK)
     LEFT JOIN ({returns_subquery}) rj
         ON s.TrxCode  = rj.InvoiceRef
        AND s.ItemCode = rj.ItemCode
@@ -1162,7 +1160,7 @@ def _upsert_sales_transactions(
                 records,
             )
             cur.execute(f"""
-                MERGE {_SALES_TARGET_TABLE} WITH (HOLDLOCK, UPDLOCK) AS T
+                MERGE {s.sales_transactions_table} WITH (HOLDLOCK, UPDLOCK) AS T
                 USING (
                     SELECT *, GETDATE() AS updated_at FROM #sales_stage
                 ) AS S

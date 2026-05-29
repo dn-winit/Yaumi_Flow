@@ -1,6 +1,9 @@
-"""Accuracy service: joins predicted (YaumiAIML) with live actuals (YaumiLive).
+"""Accuracy service: joins predicted with pre-netted actuals -- both in YaumiAIML.
 
-Aggregation: GROUP BY (TrxDate, RouteCode, ItemCode), SUM positive QuantityInPCs.
+Predicted reads ``yf_demand_forecast``; actuals read ``yf_sales_transactions.actual_sold``
+which the reconciliation cron writes via ``NET_SOLD_CASE_SQL`` (same return-netting
+fragment training uses for ``sales_recent.csv``). No cross-DB hop, no per-call
+YaumiLive scan -- the netting is done once at cron time and read on demand.
 """
 
 from __future__ import annotations
@@ -43,14 +46,24 @@ _EMPTY_SUMMARY: dict[str, Any] = {
 }
 
 class AccuracyService:
-    """Cross-DB query: predicted from YaumiAIML + actual from YaumiLive."""
+    """Joins ``yf_demand_forecast`` predictions with ``yf_sales_transactions.actual_sold``.
+
+    Both tables live in YaumiAIML. ``actual_sold`` is already return-adjusted
+    (reconciliation cron writes it with the same NET_SOLD_CASE_SQL fragment
+    training uses), so recent_accuracy is on the same scale as the test-set
+    baseline.
+    """
 
     def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
 
     @property
     def available(self) -> bool:
-        return self._s.db.configured and self._s.live_db_configured and bool(self._s.demand_table)
+        return (
+            self._s.db.configured
+            and bool(self._s.demand_table)
+            and bool(self._s.sales_transactions_table)
+        )
 
     # ------------------------------------------------------------------
     # Internal helpers
@@ -116,7 +129,7 @@ class AccuracyService:
         if not self.available:
             return {
                 "success": False,
-                "error": "Configure DF_DB_* (YaumiAIML) and DF_LIVE_DB_* (YaumiLive)",
+                "error": "Configure DF_DB_* + DF_DEMAND_TABLE + DF_SALES_TRANSACTIONS_TABLE",
                 "rows": [],
                 "summary": _EMPTY_SUMMARY,
             }
@@ -247,8 +260,16 @@ class AccuracyService:
         route_code: str | None,
         item_code: str | None,
     ) -> pd.DataFrame:
-        """Pull actuals from YaumiLive with EXACT pipeline aggregation."""
-        # Use the date range from predicted to scope the actuals query
+        """Read pre-netted ``actual_sold`` from ``yf_sales_transactions``.
+
+        The reconciliation cron writes this table daily via
+        ``NET_SOLD_CASE_SQL`` (gross minus returns linked by invoice ref).
+        Re-running that scan on every drift query would duplicate hours
+        of cron work for a value that's already sitting in the same
+        database as the predictions -- indexed on ``(trx_date,
+        route_code, item_code)`` and updated as late returns flow in.
+        So we just SELECT it.
+        """
         min_date = pred_df["trx_date"].min()
         max_date = pred_df["trx_date"].max()
 
@@ -263,26 +284,21 @@ class AccuracyService:
         ph = ",".join("?" for _ in routes)
         sql = f"""
             SELECT
-                CAST(TrxDate AS DATE) AS trx_date,
-                RouteCode AS route_code,
-                ItemCode AS item_code,
-                SUM(CASE WHEN QuantityInPCs > 0 THEN QuantityInPCs ELSE 0 END) AS actual_qty
-            FROM {self._s.live_sales_view} WITH (NOLOCK)
-            WHERE ItemType = 'OrderItem'
-              AND TrxType  = 'SalesInvoice'
-              AND RouteCode IN ({ph})
-              AND TrxDate >= ?
-              AND TrxDate <= ?
+                CAST(trx_date AS DATE) AS trx_date,
+                route_code,
+                item_code,
+                COALESCE(actual_sold, 0) AS actual_qty
+            FROM {self._s.sales_transactions_table} WITH (NOLOCK)
+            WHERE trx_date BETWEEN ? AND ?
+              AND route_code IN ({ph})
         """
-        params: list = list(routes) + [min_date, max_date]
+        params: list = [min_date, max_date, *routes]
 
         if item_code:
-            sql += " AND ItemCode = ?"
+            sql += " AND item_code = ?"
             params.append(item_code)
 
-        sql += " GROUP BY CAST(TrxDate AS DATE), RouteCode, ItemCode"
-
-        df = self._normalize(self._query(self._s.live_connection_string(), sql, params))
+        df = self._normalize(self._query(self._s.db.connection_string(), sql, params))
         if not df.empty:
             df["actual_qty"] = df["actual_qty"].astype(float)
         return df
