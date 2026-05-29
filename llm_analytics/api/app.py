@@ -4,33 +4,47 @@ FastAPI application factory.
 
 from __future__ import annotations
 
-import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from common.api_middleware import install_all as _install_observability_middleware
+from common.observability import configure_logging, get_logger
 from llm_analytics.api.routes import router
 from llm_analytics.config.settings import Settings, get_settings
+
+SERVICE_NAME = "llm_analytics"
+
+
+def _logs_dir() -> Path:
+    env = os.getenv("LLM_LOGS_DIR")
+    if env:
+        return Path(env)
+    root_env = os.getenv("YF_DATA_ROOT", "").strip()
+    root = Path(root_env).resolve() if root_env else Path(__file__).resolve().parent.parent.parent / "data"
+    return root / "analytics" / "logs"
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    configure_logging(
+        service_name=SERVICE_NAME,
+        level=settings.log_level,
+        logs_dir=_logs_dir(),
     )
-    _logger = logging.getLogger("llm_analytics.startup")
+    _logger = get_logger("llm_analytics.startup")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
-        _logger.info("LLM Analytics starting -- provider=%s, model=%s", settings.provider, settings.model)
+        _logger.info("LLM Analytics starting", provider=settings.provider, model=settings.model)
         from llm_analytics.api.dependencies import get_analyzer
         analyzer = get_analyzer()
         health = analyzer.health()
-        _logger.info("LLM available: %s, prompts: %s", health["available"], health["prompts"])
+        _logger.info("LLM available", available=health["available"], prompts=health["prompts"])
         yield
         _logger.info("Shutting down")
 
@@ -50,6 +64,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(router, prefix=f"{settings.api_prefix}/analytics")
+    prefix = f"{settings.api_prefix}/analytics"
+    _install_observability_middleware(
+        app,
+        service_name=SERVICE_NAME,
+        metrics_path=f"{prefix}/metrics/prometheus",
+        logger=_logger,
+    )
+
+    app.include_router(router, prefix=prefix)
 
     return app

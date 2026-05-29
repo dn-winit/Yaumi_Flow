@@ -1,13 +1,17 @@
-# CI: lightweight gate that catches the bulk of staged-branch regressions
-# without needing a real DB. Two parallel jobs:
-#   1. python    -- byte-compile every module so import-time errors,
-#                   syntax issues, and broken relative imports are caught.
-#   2. webapp    -- run `tsc -b --noEmit` so a TS regression cannot slip
-#                   into `staged` or `main`.
+# CI: hermetic gates that catch the bulk of staged-branch regressions
+# without needing a real warehouse. Four parallel jobs:
+#   1. python_compile -- byte-compile every module (import-time errors,
+#                        syntax issues, broken relative imports).
+#   2. python_lint    -- ruff check (unused imports, undefined names, BLE,
+#                        UP, isort -- the conservative set from pyproject.toml).
+#   3. python_test    -- pytest -m "not slow and not requires_db" so the
+#                        ~100 hermetic tests guard against regressions in
+#                        common/, services that don't need a live DB, etc.
+#   4. webapp         -- lint + tsc -b --noEmit so TS or rule regressions
+#                        cannot slip into staged or main.
 #
-# Anything heavier (pytest, db integration, e2e) requires the live
-# warehouse and runs locally before each push. This file is intentionally
-# scoped to what GitHub-hosted runners can validate hermetically.
+# Anything heavier (db integration, e2e, slow LLM calls) requires the live
+# warehouse and runs locally before each push.
 
 name: CI
 
@@ -24,7 +28,7 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  python:
+  python_compile:
     name: Python compile check
     runs-on: ubuntu-latest
     steps:
@@ -49,8 +53,65 @@ jobs:
             sales_supervision \
             scripts
 
+  python_lint:
+    name: Python lint (ruff)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install ruff
+        # Pin to a major version so a future ruff release with new lints
+        # cannot break CI without a deliberate dep-bump.
+        run: pip install "ruff>=0.6,<1.0"
+
+      - name: Ruff check
+        # Rules + per-file ignores come from pyproject.toml (E, F, W, I, B, UP);
+        # ``--no-fix`` so CI doesn't quietly mutate the tree.
+        run: ruff check --no-fix .
+
+  python_test:
+    name: Python tests (hermetic only)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            data_import/requirements.txt
+            demand_forecasting_pipeline/requirements.txt
+            recommended_order/requirements.txt
+            sales_supervision/requirements.txt
+            llm_analytics/requirements.txt
+
+      - name: Install service deps
+        # Install all five service requirement sets so any cross-package
+        # import path resolves; pytest hits the ones flagged hermetic.
+        run: |
+          pip install -r data_import/requirements.txt
+          pip install -r demand_forecasting_pipeline/requirements.txt
+          pip install -r recommended_order/requirements.txt
+          pip install -r sales_supervision/requirements.txt
+          pip install -r llm_analytics/requirements.txt
+          pip install pytest httpx python-dotenv
+
+      - name: Run hermetic pytest
+        # Skips ``slow`` (LLM calls / multi-minute recon) and
+        # ``requires_db`` (needs a live warehouse) so this stays runnable
+        # on GitHub-hosted runners. Coverage of common/, numeric, schema
+        # validators, redistribution, scoring helpers, etc.
+        run: pytest -m "not slow and not requires_db" --maxfail=5 -q
+
   webapp:
-    name: Webapp typecheck
+    name: Webapp lint + typecheck
     runs-on: ubuntu-latest
     defaults:
       run:
@@ -67,6 +128,17 @@ jobs:
 
       - name: Install
         run: npm ci
+
+      - name: Lint
+        # Flat ESLint config lives at webapp/eslint.config.js; rule set
+        # is conservative (hooks, undefined names, unused imports) so the
+        # gate catches real bugs without style churn.
+        run: npm run lint
+
+      - name: Format check
+        # Prettier owns formatting -- the gate fails on drift so PRs land
+        # on a uniform tree without per-author tab/space arguments.
+        run: npm run format:check
 
       - name: Typecheck
         run: npm run typecheck

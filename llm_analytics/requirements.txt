@@ -17,3 +17,7 @@ groq>=0.4.0,<1.0
 
 # Prompt templates (loaded once at startup; refusal patterns validated via Pydantic)
 pyyaml>=6.0,<7.0
+
+# Observability (structured logging + Prometheus metrics) via common.observability
+structlog>=24.1,<26.0
+prometheus-client>=0.20,<1.0

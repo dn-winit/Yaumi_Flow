@@ -14,3 +14,7 @@ pyodbc>=5.0,<6.0
 
 # Scheduler (post-cron calibration runs via APScheduler + scheduler_audit)
 APScheduler>=3.10,<4.0
+
+# Observability (structured logging + Prometheus metrics) via common.observability
+structlog>=24.1,<26.0
+prometheus-client>=0.20,<1.0

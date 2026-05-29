@@ -18,3 +18,7 @@ pandas>=2.0,<3.0
 
 # Scheduler (auto-visit reconciler ticks + scheduler_audit hook)
 APScheduler>=3.10,<4.0
+
+# Observability (structured logging + Prometheus metrics) via common.observability
+structlog>=24.1,<26.0
+prometheus-client>=0.20,<1.0

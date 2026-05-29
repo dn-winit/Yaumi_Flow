@@ -3,13 +3,29 @@
 from __future__ import annotations
 
 import logging
+import os
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from common.api_middleware import install_all as _install_observability_middleware
+from common.observability import configure_logging, get_logger
 from data_import.api.routes import router
 from data_import.config.settings import Settings, get_settings
+
+SERVICE_NAME = "data_import"
+
+
+def _logs_dir() -> Path:
+    """``DI_LOGS_DIR`` -> ``YF_DATA_ROOT/imports/logs`` -> ``<repo>/data/imports/logs``."""
+    env = os.getenv("DI_LOGS_DIR")
+    if env:
+        return Path(env)
+    root_env = os.getenv("YF_DATA_ROOT", "").strip()
+    root = Path(root_env).resolve() if root_env else Path(__file__).resolve().parent.parent.parent / "data"
+    return root / "imports" / "logs"
 
 
 def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> None:
@@ -55,12 +71,15 @@ def _cascade_reconciliation_refresh(settings: Settings, log: logging.Logger) -> 
 def create_app(settings: Settings | None = None) -> FastAPI:
     settings = settings or get_settings()
 
-    logging.basicConfig(
-        level=getattr(logging, settings.log_level, logging.INFO),
-        format="%(asctime)s - %(name)s - %(levelname)s - [%(filename)s:%(lineno)d] - %(message)s",
-        datefmt="%Y-%m-%d %H:%M:%S",
+    # Shared observability stack: structlog + rotating file + Prometheus.
+    # Replaces the prior ``logging.basicConfig`` so DI's logs are JSON,
+    # cross-service searchable, and request-id correlated identical to DF.
+    configure_logging(
+        service_name=SERVICE_NAME,
+        level=settings.log_level,
+        logs_dir=_logs_dir(),
     )
-    _logger = logging.getLogger("data_import.startup")
+    _logger = get_logger("data_import.startup")
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -210,6 +229,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    app.include_router(router, prefix=f"{settings.api_prefix}/data")
+    # Cross-service observability: request-id propagation, structured access
+    # log, latency histogram, stable error envelope, Prometheus scrape -- all
+    # from ``common/`` so the contract cannot diverge from DF/RO/SS/LLM.
+    prefix = f"{settings.api_prefix}/data"
+    _install_observability_middleware(
+        app,
+        service_name=SERVICE_NAME,
+        metrics_path=f"{prefix}/metrics/prometheus",
+        logger=_logger,
+    )
+
+    app.include_router(router, prefix=prefix)
 
     return app

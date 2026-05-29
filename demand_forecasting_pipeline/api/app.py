@@ -5,17 +5,12 @@ FastAPI application factory.
 from __future__ import annotations
 
 import time
-import uuid
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
 
-import structlog
-from fastapi import FastAPI, Request
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
-from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
-from starlette.responses import Response
 
+from common.api_middleware import install_all as _install_observability_middleware
 from demand_forecasting_pipeline.api.routes import (
     explainability_router,
     health_router,
@@ -29,9 +24,7 @@ from demand_forecasting_pipeline.api.routes import (
 )
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.observability import (
-    ERRORS,
-    HTTP_REQUEST_DURATION,
-    HTTP_REQUESTS,
+    SERVICE_NAME,
     configure_logging,
     get_logger,
 )
@@ -158,80 +151,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_headers=["*"],
     )
 
-    # Request middleware: trace IDs, structured access logs, latency histogram.
-
-    @app.middleware("http")
-    async def _request_context(request: Request, call_next):
-        # Honour upstream-provided trace id so the full call chain shares one id.
-        request_id = (
-            request.headers.get("x-request-id")
-            or request.headers.get("x-correlation-id")
-            or uuid.uuid4().hex
-        )
-        path = request.url.path
-        method = request.method
-
-        structlog.contextvars.bind_contextvars(
-            request_id=request_id,
-            path=path,
-            method=method,
-        )
-        start = time.perf_counter()
-        status_code = 500
-        try:
-            response = await call_next(request)
-            status_code = response.status_code
-            response.headers["X-Request-ID"] = request_id
-            return response
-        finally:
-            duration = time.perf_counter() - start
-            HTTP_REQUEST_DURATION.labels(path=path).observe(duration)
-            HTTP_REQUESTS.labels(
-                method=method, path=path, status=str(status_code),
-            ).inc()
-            log.info(
-                "http_request",
-                method=method,
-                path=path,
-                status=status_code,
-                duration_ms=round(duration * 1000.0, 2),
-                request_id=request_id,
-            )
-            structlog.contextvars.clear_contextvars()
-
-    # Global exception handler: stable JSON envelope + Prometheus counter + traceback log.
-
-    @app.exception_handler(Exception)
-    async def _unhandled_error(request: Request, exc: Exception):
-        request_id = request.headers.get("x-request-id") or uuid.uuid4().hex
-        err_type = type(exc).__name__
-        ERRORS.labels(type=err_type).inc()
-        log.exception(
-            "unhandled_error",
-            error_type=err_type,
-            error=str(exc),
-            request_id=request_id,
-            path=request.url.path,
-            method=request.method,
-        )
-        return JSONResponse(
-            status_code=500,
-            content={
-                "error": str(exc) or err_type,
-                "type": err_type,
-                "request_id": request_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
-            },
-            headers={"X-Request-ID": request_id},
-        )
-
-    # /metrics/prometheus on the service prefix so the existing proxy rule covers it.
-
+    # Single source of truth for request-id propagation, access logs,
+    # latency histograms, structured error envelope, and Prometheus scrape.
+    # All five services mount the same primitives from common/ so the
+    # observability contract cannot diverge.
     prefix = f"{settings.api_prefix}/forecast"
-
-    @app.get(f"{prefix}/metrics/prometheus", include_in_schema=False)
-    def _prometheus_metrics() -> Response:
-        return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
+    _install_observability_middleware(
+        app,
+        service_name=SERVICE_NAME,
+        metrics_path=f"{prefix}/metrics/prometheus",
+        logger=log,
+    )
 
     app.include_router(health_router, prefix=prefix)
     app.include_router(predictions_router, prefix=prefix)

@@ -1,0 +1,9 @@
+#!/usr/bin/env sh
+
+# Pre-commit hook -- runs lint-staged so only staged files are linted,
+# keeping the gate fast even on a busy tree. Type-check runs against the
+# whole project in CI; doing it here would block every commit on unrelated
+# changes.
+
+cd webapp
+npx lint-staged
