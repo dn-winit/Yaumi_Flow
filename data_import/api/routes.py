@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from fastapi import APIRouter, Depends, Query
 
 from data_import.api.dependencies import get_eda_service, get_importer
 from data_import.api.schemas import (
     BusinessKpisResponse,
-    DataSummaryResponse,
     DatasetInfo,
+    DataSummaryResponse,
     FilterDimensionsResponse,
     HealthResponse,
     ImportAllRequest,
@@ -19,9 +17,9 @@ from data_import.api.schemas import (
     ImportResponse,
     ItemCatalogResponse,
     ItemStatsResponse,
+    LastActiveDateResponse,
     LiveCustomerSalesResponse,
     LiveRouteSalesResponse,
-    LastActiveDateResponse,
     LiveVanCompositionResponse,
     SalesOverviewResponse,
     StatusResponse,
@@ -120,10 +118,10 @@ _DATE_RE = r"^\d{4}-\d{2}-\d{2}$"
 def eda_sales(
     start_date: str = Query(..., pattern=_DATE_RE, description="Inclusive lower bound (YYYY-MM-DD)"),
     end_date:   str = Query(..., pattern=_DATE_RE, description="Inclusive upper bound (YYYY-MM-DD), >= start_date"),
-    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
-    route_codes: List[str] = Query(default=[], alias="route_codes"),
-    category_codes: List[str] = Query(default=[], alias="category_codes"),
-    item_codes: List[str] = Query(default=[], alias="item_codes"),
+    warehouse_codes: list[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: list[str] = Query(default=[], alias="route_codes"),
+    category_codes: list[str] = Query(default=[], alias="category_codes"),
+    item_codes: list[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """EDA over sales_recent.csv: totals, daily trend, top items/routes,
@@ -151,10 +149,10 @@ def eda_last_active_date(svc: EdaService = Depends(get_eda_service)):
 def eda_business_kpis(
     start_date: str = Query(..., pattern=_DATE_RE, description="Inclusive lower bound (YYYY-MM-DD)"),
     end_date:   str = Query(..., pattern=_DATE_RE, description="Inclusive upper bound (YYYY-MM-DD), >= start_date"),
-    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
-    route_codes: List[str] = Query(default=[], alias="route_codes"),
-    category_codes: List[str] = Query(default=[], alias="category_codes"),
-    item_codes: List[str] = Query(default=[], alias="item_codes"),
+    warehouse_codes: list[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: list[str] = Query(default=[], alias="route_codes"),
+    category_codes: list[str] = Query(default=[], alias="category_codes"),
+    item_codes: list[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Four exec KPIs from a single (recs join sales) over rec-covered
@@ -167,10 +165,10 @@ def eda_business_kpis(
 
 @router.get("/eda/filter-dimensions", response_model=FilterDimensionsResponse)
 def eda_filter_dimensions(
-    warehouse_codes: List[str] = Query(default=[], alias="warehouse_codes"),
-    route_codes: List[str] = Query(default=[], alias="route_codes"),
-    category_codes: List[str] = Query(default=[], alias="category_codes"),
-    item_codes: List[str] = Query(default=[], alias="item_codes"),
+    warehouse_codes: list[str] = Query(default=[], alias="warehouse_codes"),
+    route_codes: list[str] = Query(default=[], alias="route_codes"),
+    category_codes: list[str] = Query(default=[], alias="category_codes"),
+    item_codes: list[str] = Query(default=[], alias="item_codes"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Cascading filter options for the dashboard FilterBar. Each downstream
@@ -218,7 +216,7 @@ def eda_live_van_composition(
 @router.get("/eda/item-stats", response_model=ItemStatsResponse)
 def eda_item_stats(
     item_code: str = Query(..., description="Item code to compute rolling stats for"),
-    route_code: Optional[str] = Query(default=None, description="Optional route filter"),
+    route_code: str | None = Query(default=None, description="Optional route filter"),
     svc: EdaService = Depends(get_eda_service),
 ):
     """Rolling averages (last week / 4 weeks / 3 months / 6 months) for a given item."""

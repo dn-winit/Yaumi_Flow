@@ -1,14 +1,13 @@
-from .naive import NaiveForecaster
-from .moving_average import MovingAverageForecaster
 from .croston import CrostonForecaster, CrostonSBAForecaster
-from .ets import ETSForecaster, _HAS_SM
-from .linear import LinearForecaster
-from .random_forest import RandomForestForecaster
+from .ets import _HAS_SM, ETSForecaster
 from .gradient_boosting import GradientBoostingForecaster
-from .lightgbm_model import LightGBMForecaster, LightGBMQuantileForecaster, _HAS_LGB
-from .xgboost_model import XGBoostForecaster, _HAS_XGB
+from .lightgbm_model import _HAS_LGB, LightGBMForecaster, LightGBMQuantileForecaster
+from .linear import LinearForecaster
+from .moving_average import MovingAverageForecaster
+from .naive import NaiveForecaster
+from .random_forest import RandomForestForecaster
 from .two_stage import TwoStageForecaster
-
+from .xgboost_model import _HAS_XGB, XGBoostForecaster
 
 REGISTRY = {
     "naive": NaiveForecaster,
@@ -49,5 +48,5 @@ def is_available(name):
 
 def build_model(name, params=None):
     if name not in REGISTRY:
-        raise ValueError("unknown model: {}".format(name))
+        raise ValueError(f"unknown model: {name}")
     return REGISTRY[name](params or {})

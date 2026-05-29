@@ -14,7 +14,6 @@ is added in exactly one place; every reader picks it up via
 
 from __future__ import annotations
 
-
 # Tuple (immutable) so callers can't mutate the canonical list.
 FLAG_COLUMNS: tuple[str, ...] = (
     "suspicious_zero",

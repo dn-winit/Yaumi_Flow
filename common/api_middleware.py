@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -158,7 +158,7 @@ def install_exception_handler(
                 "error": "Internal Server Error",
                 "type": err_type,
                 "request_id": request_id,
-                "timestamp": datetime.now(timezone.utc).isoformat(),
+                "timestamp": datetime.now(UTC).isoformat(),
             },
             headers={_REQUEST_ID_HEADER: request_id},
         )

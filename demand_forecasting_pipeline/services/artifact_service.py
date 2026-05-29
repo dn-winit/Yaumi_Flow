@@ -10,15 +10,15 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
+from demand_forecasting_pipeline.services.reconciliation.enrich import activity_mask
 from demand_forecasting_pipeline.services.storage.base import ARTIFACT_KEYS, StorageBackend
 from demand_forecasting_pipeline.services.storage.factory import create_storage
-from demand_forecasting_pipeline.services.reconciliation.enrich import activity_mask
 from demand_forecasting_pipeline.services.storage.file_storage import (
     SALES_TRANSACTIONS_RENAME,
 )
@@ -27,23 +27,23 @@ from demand_forecasting_pipeline.src.utils.config_loader import load_config, res
 logger = logging.getLogger(__name__)
 
 # Cache key: (path, mtime_ns, size); one stat() per request.
-_CacheKey = Tuple[str, int, int]
+_CacheKey = tuple[str, int, int]
 
 
 class ArtifactService:
     """Serves pipeline artifacts via mtime-keyed file reads; no TTL."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._storage: StorageBackend = create_storage(self._s)
         # Parallel DF/JSON maps so the same key in each surface stays isolated.
-        self._df_cache: Dict[str, Tuple[_CacheKey, pd.DataFrame]] = {}
-        self._json_cache: Dict[str, Tuple[_CacheKey, Dict[str, Any]]] = {}
+        self._df_cache: dict[str, tuple[_CacheKey, pd.DataFrame]] = {}
+        self._json_cache: dict[str, tuple[_CacheKey, dict[str, Any]]] = {}
         # Composite-key cache for derived frames spanning multiple on-disk files.
-        self._derived_cache: Dict[str, Tuple[Tuple[Optional[_CacheKey], ...], pd.DataFrame]] = {}
+        self._derived_cache: dict[str, tuple[tuple[_CacheKey | None, ...], pd.DataFrame]] = {}
         # Cache invariants: atomic tmp+rename upstream + (path, mtime_ns, size) key;
         # _cache_lock serialises concurrent miss-path readers on parse.
-        self._sales_tx_cache: Optional[Tuple[_CacheKey, pd.DataFrame]] = None
+        self._sales_tx_cache: tuple[_CacheKey, pd.DataFrame] | None = None
         self._cache_lock = threading.Lock()
 
         # Dtype contract + key column names from pipeline YAML; falls back to historical defaults.
@@ -75,7 +75,7 @@ class ArtifactService:
 
     # Test-predictions schema resolvers (shared by drift + summary KPI scorers).
 
-    def resolve_actual_column(self, df: pd.DataFrame) -> Optional[str]:
+    def resolve_actual_column(self, df: pd.DataFrame) -> str | None:
         """Realised-quantity column; configured target_col first, then ``actual_qty``."""
         configured = (self._target_col or "").strip()
         for cand in (configured, "actual_qty"):
@@ -83,7 +83,7 @@ class ArtifactService:
                 return cand
         return None
 
-    def resolve_prediction_column(self, df: pd.DataFrame) -> Optional[str]:
+    def resolve_prediction_column(self, df: pd.DataFrame) -> str | None:
         """``prediction`` (canonical) or legacy ``predicted``; None if absent."""
         for cand in ("prediction", "predicted"):
             if cand in df.columns:
@@ -99,8 +99,8 @@ class ArtifactService:
         return composite_kwargs_from_yaml(self._s.pipeline_config)
 
     def score_test_predictions(
-        self, *, recent_window_days: Optional[int] = None,
-    ) -> tuple[Optional[float], int]:
+        self, *, recent_window_days: int | None = None,
+    ) -> tuple[float | None, int]:
         """Score test_predictions; single source of truth for Pipeline-summary + drift.
 
         ``recent_window_days`` (positive int) restricts to N days from max; None = full.
@@ -111,7 +111,8 @@ class ArtifactService:
                 f"recent_window_days must be a positive int or None; got {recent_window_days!r}"
             )
         from demand_forecasting_pipeline.src.evaluation.metrics import (
-            composite_summary, resolve_class_array,
+            composite_summary,
+            resolve_class_array,
         )
         try:
             test_df, _total = self.get_test_predictions(limit=None, offset=0)
@@ -146,8 +147,8 @@ class ArtifactService:
 
     def get_test_predictions(
         self,
-        route_code: Optional[str] = None,
-        item_code: Optional[str] = None,
+        route_code: str | None = None,
+        item_code: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
@@ -273,7 +274,7 @@ class ArtifactService:
             enrich_with_load,
         )
 
-        pred_col: Optional[str] = None
+        pred_col: str | None = None
         for cand in ("prediction", "Predicted"):
             if cand in merged.columns:
                 pred_col = cand
@@ -293,7 +294,7 @@ class ArtifactService:
 
     def _van_load_enriched_snapshot_key(
         self,
-    ) -> Optional[Tuple[Optional[_CacheKey], ...]]:
+    ) -> tuple[_CacheKey | None, ...] | None:
         """mtime snapshot tuple for van_load_view_enriched; None when forecast mirror absent."""
         forecast_key = self._file_snapshot_key("future_forecast")
         if forecast_key is None:
@@ -305,7 +306,7 @@ class ArtifactService:
             self._s.customer_data_file,
             self._s.journey_plan_file,
         )
-        aux_keys: list[Optional[_CacheKey]] = []
+        aux_keys: list[_CacheKey | None] = []
         for fname in aux_filenames:
             try:
                 path = self._s.shared_data_path(fname)
@@ -453,8 +454,8 @@ class ArtifactService:
 
     def get_future_forecast(
         self,
-        route_code: Optional[str] = None,
-        item_code: Optional[str] = None,
+        route_code: str | None = None,
+        item_code: str | None = None,
         limit: int | None = None,
         offset: int = 0,
     ) -> tuple[pd.DataFrame, int]:
@@ -465,12 +466,12 @@ class ArtifactService:
         eff_limit = int(limit if limit is not None else self._s.default_page_limit)
         return df.iloc[offset : offset + eff_limit], total
 
-    def get_future_forecast_meta(self) -> tuple[int, Optional[str]]:
+    def get_future_forecast_meta(self) -> tuple[int, str | None]:
         """(total_rows, max_TrxDate_iso) from the cached frame; no slice/copy."""
         df = self._read_df("future_forecast")
         if df.empty:
             return 0, None
-        max_date: Optional[str] = None
+        max_date: str | None = None
         if "TrxDate" in df.columns:
             mx = df["TrxDate"].max()
             if pd.notna(mx):
@@ -481,7 +482,7 @@ class ArtifactService:
     # Metrics
     # ------------------------------------------------------------------
 
-    def get_model_metrics(self, demand_class: Optional[str] = None) -> pd.DataFrame:
+    def get_model_metrics(self, demand_class: str | None = None) -> pd.DataFrame:
         df = self._read_df("model_metrics")
         if demand_class and "class" in df.columns:
             df = df[df["class"] == demand_class]
@@ -504,8 +505,8 @@ class ArtifactService:
 
     def get_pair_model_lookup(
         self,
-        route_code: Optional[str] = None,
-        item_code: Optional[str] = None,
+        route_code: str | None = None,
+        item_code: str | None = None,
     ) -> pd.DataFrame:
         df = self._read_df("pair_model_lookup")
         return self._apply_filters(df, route_code=route_code, item_code=item_code)
@@ -514,7 +515,7 @@ class ArtifactService:
     # Explainability
     # ------------------------------------------------------------------
 
-    def get_pair_classes(self, demand_class: Optional[str] = None) -> pd.DataFrame:
+    def get_pair_classes(self, demand_class: str | None = None) -> pd.DataFrame:
         df = self._read_df("pair_classes")
         if demand_class and "class" in df.columns:
             df = df[df["class"] == demand_class]
@@ -522,9 +523,9 @@ class ArtifactService:
 
     def get_pair_explainability(
         self,
-        route_code: Optional[str] = None,
-        item_code: Optional[str] = None,
-        demand_class: Optional[str] = None,
+        route_code: str | None = None,
+        item_code: str | None = None,
+        demand_class: str | None = None,
     ) -> pd.DataFrame:
         df = self._read_df("pair_explainability")
         df = self._apply_filters(df, route_code=route_code, item_code=item_code)
@@ -639,7 +640,7 @@ class ArtifactService:
                 df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%Y-%m-%d")
         return df
 
-    def _file_snapshot_key(self, key: str) -> Optional[_CacheKey]:
+    def _file_snapshot_key(self, key: str) -> _CacheKey | None:
         """(path, mtime_ns, size) tuple; None for unknown/missing keys to skip caching."""
         path = self._storage.source_path(key)
         if path is None or not path.exists():
@@ -676,7 +677,7 @@ class ArtifactService:
                 self._json_cache[key] = (snapshot, data)
         return data
 
-    def _apply_filters(self, df: pd.DataFrame, route_code: Optional[str] = None, item_code: Optional[str] = None) -> pd.DataFrame:
+    def _apply_filters(self, df: pd.DataFrame, route_code: str | None = None, item_code: str | None = None) -> pd.DataFrame:
         if df.empty:
             return df
         rk, ik = self._route_key, self._item_key

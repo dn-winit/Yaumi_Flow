@@ -5,18 +5,17 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Dict, Optional
 
 import numpy as np
 import pandas as pd
 
 from recommended_order.core.calibration import RouteCalibration
 from recommended_order.core.explain import (
-    Explanation,
     KIND_CONSISTENT,
     KIND_DUE_NOW,
     KIND_OVERDUE,
     KIND_REGULAR_BUYER,
+    Explanation,
     Signal,
     detail_consistent_pattern,
     detail_due_now,
@@ -43,8 +42,8 @@ class PriorityCalculator:
         calibration: RouteCalibration,
         explanation: Explanation,
         tier: str = "MEDIUM",
-        total_visits: Optional[int] = None,
-        item_visits: Optional[int] = None,
+        total_visits: int | None = None,
+        item_visits: int | None = None,
     ) -> PriorityResult:
         if item_history is None or item_history.empty or cycle_days <= 0:
             return PriorityResult(0.0, 0.0, 0.0, 0.0)
@@ -149,7 +148,7 @@ class PriorityCalculator:
 
     # Tier nudges the freq-blend interpolant; magnitude < half a freq-band
     # so it can't invert the freq signal.
-    _TIER_T_OFFSET: Dict[str, float] = {"HEAVY": -0.2, "LIGHT": 0.2, "MEDIUM": 0.0}
+    _TIER_T_OFFSET: dict[str, float] = {"HEAVY": -0.2, "LIGHT": 0.2, "MEDIUM": 0.0}
 
     @classmethod
     def _blend_weights(

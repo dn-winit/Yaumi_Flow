@@ -24,7 +24,6 @@ loudly in the log so consumers of the forecast know which regime they're in.
 
 from __future__ import annotations
 
-import logging
 import os
 
 import pandas as pd
@@ -43,12 +42,16 @@ from ..utils.config_loader import (
     resolve_dtypes,
     resolve_recursive_iterations,
 )
-from ._metadata import check_inference_compatibility
 from ..utils.io_utils import (
-    ceil_int_columns, ensure_tuple, load_json, load_pickle, pair_mask, save_dataframe,
+    ceil_int_columns,
+    load_json,
+    load_pickle,
+    pair_mask,
+    save_dataframe,
 )
 from ..utils.logger import get_logger
 from ..utils.time_utils import build_date_range, period_offset
+from ._metadata import check_inference_compatibility
 
 
 def _future_skeleton(history_df, group_keys, date_col, horizon, granularity, anchor_date=None):
@@ -160,6 +163,7 @@ def run_inference(config_path, on_step=None):
     # df_pipeline_step_duration_seconds metric actually populates.
     import time as _time
     import uuid as _uuid
+
     from demand_forecasting_pipeline.observability import (
         PIPELINE_STEP_DURATION,
     )
@@ -286,7 +290,7 @@ def run_inference(config_path, on_step=None):
     # and DbPusher writes NULL for ``item_name``. Keeping last-known
     # meta per pair (``drop_duplicates(keep="last")``) matches the
     # semantic ``build_panel`` already uses.
-    _meta_lookup_full: "pd.DataFrame | None" = None
+    _meta_lookup_full: pd.DataFrame | None = None
     if meta_cols:
         _meta_present = [c for c in meta_cols if c in agg.columns]
         if _meta_present:
@@ -660,7 +664,7 @@ def run_inference(config_path, on_step=None):
                     continue
                 feats_slice = group_rows.drop(columns=["best_model"])
                 mdl = art["loaded_models"].get(best_name)
-                ens_weights = art["ens_weights"]
+                art["ens_weights"]
                 cls_feature_cols = art["cls_feature_cols"]
 
                 # Fast path: a single trained model serves every pair in

@@ -13,14 +13,13 @@ import os
 import sys
 import threading
 from pathlib import Path
-from typing import Optional
 
 logger = logging.getLogger(__name__)
 
 # Module-level singleton; lock handle survives async lifespan for the worker's lifetime.
 _LEASE_LOCK = threading.Lock()
-_LEASE_FH: Optional[object] = None
-_LEASE_PATH: Optional[Path] = None
+_LEASE_FH: object | None = None
+_LEASE_PATH: Path | None = None
 
 
 def _try_lock_posix(fh) -> bool:

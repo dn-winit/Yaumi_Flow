@@ -7,20 +7,21 @@ from identical arithmetic. Callers normalise to a per-customer dict with
 """
 from __future__ import annotations
 
-from typing import Any, Dict, Iterable, List, Mapping, Optional
+from collections.abc import Iterable, Mapping
+from typing import Any
 
 
 def aggregate_visit_totals(
     planned_visited: Iterable[Mapping[str, Any]],
     unplanned_visited_count: int = 0,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Compose the canonical ``visit_totals`` dict.
 
     ``planned_visited`` covers planned-customer visits (denominator of "Visited X/Y");
     drop-ins ride separately on ``unplanned_visited_count``. Returns the
     ``SessionVisitTotals``-shaped dict; ``avg_score`` is None only when no visits.
     """
-    items: List[Mapping[str, Any]] = list(planned_visited)
+    items: list[Mapping[str, Any]] = list(planned_visited)
     visited_count = len(items)
     if visited_count == 0:
         return {
@@ -32,7 +33,7 @@ def aggregate_visit_totals(
         }
     total_actual = int(sum(int(i["total_actual"]) for i in items))
     total_recommended = int(sum(int(i["total_recommended"]) for i in items))
-    avg_score: Optional[float] = round(
+    avg_score: float | None = round(
         sum(float(i["score"]) for i in items) / visited_count, 2,
     )
     return {

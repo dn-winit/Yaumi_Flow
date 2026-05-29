@@ -41,7 +41,7 @@ import os
 import threading
 from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -106,7 +106,7 @@ class LLMCache:
     # Public API
     # ------------------------------------------------------------------
 
-    def get(self, prefix: str, **kwargs) -> Optional[Dict[str, Any]]:
+    def get(self, prefix: str, **kwargs) -> dict[str, Any] | None:
         if not self._enabled:
             return None
         key = self._make_key(prefix, **kwargs)
@@ -133,7 +133,7 @@ class LLMCache:
             self._inc_miss()
             return None
 
-    def set(self, prefix: str, response: Dict[str, Any], **kwargs) -> None:
+    def set(self, prefix: str, response: dict[str, Any], **kwargs) -> None:
         if not self._enabled:
             return
         key = self._make_key(prefix, **kwargs)
@@ -180,7 +180,7 @@ class LLMCache:
             self._entry_count = 0
         return count
 
-    def stats(self) -> Dict[str, Any]:
+    def stats(self) -> dict[str, Any]:
         with self._stats_lock:
             hits, misses, entries = self.hits, self.misses, self._entry_count
         total = hits + misses

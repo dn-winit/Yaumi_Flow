@@ -13,7 +13,7 @@ conventions; the formatter normalises at the boundary.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from llm_analytics.config.settings import Settings, get_settings
 
@@ -48,7 +48,7 @@ def _sanitize(text: str) -> str:
     return s[:120]
 
 
-def _pick(d: Dict[str, Any], *keys: str, default: Any = 0) -> Any:
+def _pick(d: dict[str, Any], *keys: str, default: Any = 0) -> Any:
     """Return the first non-None value from ``keys`` in ``d``.
 
     Lets one formatter serve both snake_case (supervision) and
@@ -90,7 +90,7 @@ CYCLE_KEYS     = ("purchase_cycle_days", "purchaseCycleDays", "PurchaseCycleDays
 class DataFormatter:
     """Formats sales data into structured text for LLM prompts."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         s = settings or get_settings()
         self._max_items = s.max_items_per_customer
         self._max_customers = s.max_customers_per_route
@@ -99,7 +99,7 @@ class DataFormatter:
     # Customer analysis
     # ------------------------------------------------------------------
 
-    def format_current_visit(self, items: List[Dict[str, Any]]) -> str:
+    def format_current_visit(self, items: list[dict[str, Any]]) -> str:
         """Wide visit table -- carries the planning facts the supervisor prompt
         cites ("buys this every 7 days", "frequency 93%"). Earlier 5-col form
         forced the LLM to invent these numbers."""
@@ -149,7 +149,7 @@ class DataFormatter:
     # Route analysis
     # ------------------------------------------------------------------
 
-    def format_route_performance(self, visited_customers: List[Dict[str, Any]]) -> str:
+    def format_route_performance(self, visited_customers: list[dict[str, Any]]) -> str:
         if not visited_customers:
             return "No visited customer data"
 

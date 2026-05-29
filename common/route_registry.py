@@ -7,7 +7,6 @@ still apply on top of this baseline.
 from __future__ import annotations
 
 import os
-from typing import List
 
 # Baseline fleet as of 2026-05-18; field-roster order for scannable logs.
 _DEFAULT_ROUTE_CODES: tuple[str, ...] = (
@@ -16,7 +15,7 @@ _DEFAULT_ROUTE_CODES: tuple[str, ...] = (
 )
 
 
-def _parse_env_routes(raw: str) -> List[str]:
+def _parse_env_routes(raw: str) -> list[str]:
     """Parse CSV / whitespace separated env value to a clean list;
     empty tokens are dropped to avoid breaking SQL parameter binding.
     """
@@ -24,7 +23,7 @@ def _parse_env_routes(raw: str) -> List[str]:
     return [p for p in parts if p]
 
 
-def get_route_codes() -> List[str]:
+def get_route_codes() -> list[str]:
     """Return the configured fleet (env override or default). Reads env
     at call time so test fixtures that patch after import still work.
     """

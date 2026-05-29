@@ -6,7 +6,6 @@ snap, so daily-staple customers aren't rounded up to weekly).
 from __future__ import annotations
 
 import logging
-from typing import List, Tuple
 
 import numpy as np
 import pandas as pd
@@ -67,7 +66,7 @@ class CycleCalculator:
         confidence = self._confidence(gaps, len(dates))
         return CycleInfo(max(1, int(cycle)), confidence, "weighted_recent")
 
-    def pattern_quality(self, item_history: pd.DataFrame) -> Tuple[float, str]:
+    def pattern_quality(self, item_history: pd.DataFrame) -> tuple[float, str]:
         """Return (quality_score 0-1, pattern_type). CV-based."""
         if item_history is None or item_history.empty:
             return 0.0, "unknown"
@@ -91,7 +90,7 @@ class CycleCalculator:
     # Internal
     # ------------------------------------------------------------------
 
-    def _detect_patterns(self, gaps: np.ndarray) -> List[dict]:
+    def _detect_patterns(self, gaps: np.ndarray) -> list[dict]:
         """Distinct modes via log-spaced +/-20% buckets so daily/weekly/monthly stay separate.
 
         Bucket id = round(log(g) / log(1.2)); two gaps fall in the same bucket

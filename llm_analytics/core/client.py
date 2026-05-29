@@ -25,8 +25,8 @@ import logging
 import random
 import re
 import time
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 from llm_analytics.config.settings import Settings, get_settings
 from llm_analytics.services.cost_tracker import CostEntry, get_cost_tracker
@@ -46,7 +46,7 @@ class TruncatedResponseError(RuntimeError):
 
 def _emit_call_record(
     provider: str, model: str, outcome: str,
-    usage: Optional[Dict[str, Any]], elapsed_ms: float,
+    usage: dict[str, Any] | None, elapsed_ms: float,
     *, artifact: str, route_code: str, customer_code: str,
     cache_hit: bool = False,
 ) -> None:
@@ -70,7 +70,7 @@ def _emit_call_record(
         route_code or "-", customer_code or "-", cache_hit,
     )
     get_cost_tracker().record(CostEntry(
-        timestamp=datetime.now(timezone.utc),
+        timestamp=datetime.now(UTC),
         artifact=artifact,
         model=model,
         provider=provider,
@@ -118,7 +118,7 @@ def _retry_after_seconds(exc: Exception, default: float) -> float:
 class LLMClient:
     """Sends messages to the configured LLM provider and returns parsed JSON."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._client: Any = None
         self.is_available = False
@@ -135,11 +135,13 @@ class LLMClient:
         provider = self._s.provider
         try:
             if provider == "groq":
-                from groq import Groq, RateLimitError as GroqRateLimit
+                from groq import Groq
+                from groq import RateLimitError as GroqRateLimit
                 self._client = Groq(api_key=self._s.api_key, timeout=self._s.timeout)
                 self._rate_limit_cls = (GroqRateLimit,)
             elif provider == "openai":
-                from openai import OpenAI, RateLimitError as OAIRateLimit
+                from openai import OpenAI
+                from openai import RateLimitError as OAIRateLimit
                 self._client = OpenAI(api_key=self._s.api_key, timeout=self._s.timeout)
                 self._rate_limit_cls = (OAIRateLimit,)
             elif provider == "anthropic":
@@ -162,8 +164,8 @@ class LLMClient:
         artifact: str = "unknown",
         route_code: str = "",
         customer_code: str = "",
-        max_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         """Send a chat request and return parsed JSON response.
 
         ``artifact``, ``route_code``, ``customer_code`` flow into the cost
@@ -194,7 +196,7 @@ class LLMClient:
     def _chat_openai_compat(
         self, system: str, user: str, attempt: int,
         *, artifact: str, route_code: str, customer_code: str, max_tokens: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """OpenAI-compatible API (Groq, OpenAI). Honours Retry-After on
         429 and applies bounded exponential backoff for other transient
         failures. Surfaces ``finish_reason='length'`` as a dedicated
@@ -254,7 +256,7 @@ class LLMClient:
     def _chat_anthropic(
         self, system: str, user: str, attempt: int,
         *, artifact: str, route_code: str, customer_code: str, max_tokens: int,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Anthropic Messages API. Same Retry-After + truncation
         contract as the OpenAI-compatible path."""
         t0 = time.monotonic()
@@ -302,7 +304,7 @@ class LLMClient:
         return self._parse_json(response.content[0].text)
 
     @staticmethod
-    def _parse_json(raw: str) -> Dict[str, Any]:
+    def _parse_json(raw: str) -> dict[str, Any]:
         """Extract + parse a JSON object from arbitrary model output.
 
         Defense chain (each layer only runs if the prior raised):
@@ -357,7 +359,7 @@ class LLMClient:
             f"{primary.msg!r}; raw[:300]={raw[:300]!r}"
         )
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         return {
             "available": self.is_available,
             "provider": self._s.provider,

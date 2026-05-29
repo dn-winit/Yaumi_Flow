@@ -84,7 +84,7 @@ def fit_outlier_bounds(
         if not (np.isfinite(lo) and np.isfinite(hi)):
             continue
         key_tuple = keys if isinstance(keys, tuple) else (keys,)
-        row = {k: v for k, v in zip(group_keys, key_tuple)}
+        row = {k: v for k, v in zip(group_keys, key_tuple, strict=False)}
         row[_BOUND_LO] = float(max(lo, 0.0))
         row[_BOUND_HI] = float(hi)
         rows.append(row)

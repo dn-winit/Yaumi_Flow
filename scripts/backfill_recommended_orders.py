@@ -37,14 +37,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 load_dotenv()
 
 from data_import.config.settings import get_settings as di_settings  # noqa: E402
-from recommended_order.api.routes import _generate_routes              # noqa: E402
-from recommended_order.config.settings import get_settings              # noqa: E402
-from recommended_order.core.engine import RecommendationEngine          # noqa: E402
+from recommended_order.api.routes import _generate_routes  # noqa: E402
 from recommended_order.config.constants import RecommendationConstants  # noqa: E402
-from recommended_order.data.manager import DataManager                  # noqa: E402
-from recommended_order.services.db_pusher import DbPusher               # noqa: E402
+from recommended_order.config.settings import get_settings  # noqa: E402
+from recommended_order.core.engine import RecommendationEngine  # noqa: E402
+from recommended_order.data.manager import DataManager  # noqa: E402
+from recommended_order.services.db_pusher import DbPusher  # noqa: E402
 from recommended_order.services.storage.store import RecommendationStore  # noqa: E402
-
 
 logging.basicConfig(
     level=logging.INFO,

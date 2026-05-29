@@ -18,7 +18,8 @@ from __future__ import annotations
 import json
 import os
 import tempfile
-from typing import Any, Iterable
+from collections.abc import Iterable
+from typing import Any
 
 import joblib
 import numpy as np
@@ -58,7 +59,7 @@ def save_json(obj: Any, path: str) -> None:
 
 
 def load_json(path: str) -> Any:
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 

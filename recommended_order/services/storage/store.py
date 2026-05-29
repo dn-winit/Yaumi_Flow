@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -17,7 +17,7 @@ logger = logging.getLogger(__name__)
 class RecommendationStore:
     """Per-(date, route) CSV store. Single source of truth for reads."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._dir = Path(self._s.file_storage_dir)
         self._dir.mkdir(parents=True, exist_ok=True)
@@ -26,7 +26,7 @@ class RecommendationStore:
     # Path helpers
     # ------------------------------------------------------------------
 
-    def _path(self, date: str, route_code: Optional[str] = None) -> Path:
+    def _path(self, date: str, route_code: str | None = None) -> Path:
         if route_code:
             return self._dir / f"recommendations_{date}_{route_code}.csv"
         return self._dir / f"recommendations_{date}.csv"
@@ -35,7 +35,7 @@ class RecommendationStore:
     # Save
     # ------------------------------------------------------------------
 
-    def save(self, df: pd.DataFrame, date: str, route_code: str) -> Dict[str, Any]:
+    def save(self, df: pd.DataFrame, date: str, route_code: str) -> dict[str, Any]:
         """Atomic write: tmp + os.replace so concurrent readers never see a partial file."""
         if df.empty:
             return {"success": False, "records_saved": 0}
@@ -51,7 +51,7 @@ class RecommendationStore:
     # Read
     # ------------------------------------------------------------------
 
-    def get(self, date: str, route_code: Optional[str] = None) -> pd.DataFrame:
+    def get(self, date: str, route_code: str | None = None) -> pd.DataFrame:
         """Recommendations for ``date`` (optionally one route); empty if absent."""
         if route_code:
             path = self._path(date, route_code)
@@ -68,12 +68,12 @@ class RecommendationStore:
     # Existence checks
     # ------------------------------------------------------------------
 
-    def exists(self, date: str, route_code: Optional[str] = None) -> bool:
+    def exists(self, date: str, route_code: str | None = None) -> bool:
         if route_code:
             return self._path(date, route_code).exists()
         return bool(list(self._dir.glob(f"recommendations_{date}_*.csv")))
 
-    def exists_batch(self, date: str, route_codes: List[str]) -> Dict[str, bool]:
+    def exists_batch(self, date: str, route_codes: list[str]) -> dict[str, bool]:
         # One glob beats N stat() calls.
         present = {
             p.stem.rsplit("_", 1)[-1]
@@ -85,7 +85,7 @@ class RecommendationStore:
     # Info (used by the /info/{date} endpoint)
     # ------------------------------------------------------------------
 
-    def generation_info(self, date: str) -> Dict[str, Any]:
+    def generation_info(self, date: str) -> dict[str, Any]:
         files = sorted(self._dir.glob(f"recommendations_{date}_*.csv"))
         if not files:
             return {

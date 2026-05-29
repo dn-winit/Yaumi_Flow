@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 import logging
+from dataclasses import dataclass
+
 import numpy as np
 import pandas as pd
-
-from dataclasses import dataclass
 
 from recommended_order.models.recommendation import TrendInfo
 

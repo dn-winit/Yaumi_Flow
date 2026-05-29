@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
-
 
 # Redistribution wire models: extra=forbid so stray fields surface as 422.
 
@@ -24,7 +23,7 @@ class RedistributionGroup(BaseModel):
 
     itemCode: str
     itemName: str = ""
-    entries: List[RedistributionEntry] = Field(default_factory=list)
+    entries: list[RedistributionEntry] = Field(default_factory=list)
     keptOnTruck: int = 0
 
 
@@ -32,7 +31,7 @@ class RedistributionView(BaseModel):
     """Redistribution payload; empty groups signals "nothing to redistribute"."""
     model_config = ConfigDict(extra="forbid")
 
-    groups: List[RedistributionGroup] = Field(default_factory=list)
+    groups: list[RedistributionGroup] = Field(default_factory=list)
 
 
 class InitSessionRequest(BaseModel):
@@ -41,7 +40,7 @@ class InitSessionRequest(BaseModel):
     route_code: str
     date: str
     # Optional; server fetches from recommended_order when absent. Pass through to bypass the cache.
-    recommendations: List[Dict[str, Any]] = Field(default_factory=list)
+    recommendations: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ProcessVisitRequest(BaseModel):
@@ -50,8 +49,8 @@ class ProcessVisitRequest(BaseModel):
     session_id: str
     customer_code: str
     # Taken from the session; kept optional for client-side diagnostics echo.
-    route_code: Optional[str] = None
-    date: Optional[str] = None
+    route_code: str | None = None
+    date: str | None = None
 
 
 class UnplannedItem(BaseModel):
@@ -66,7 +65,7 @@ class UnplannedCustomer(BaseModel):
 
     customer_code: str
     customer_name: str = ""
-    items: List[UnplannedItem] = Field(default_factory=list)
+    items: list[UnplannedItem] = Field(default_factory=list)
     total_qty: int = 0
     unique_skus: int = 0
     live_visited: bool = True
@@ -77,14 +76,14 @@ class UnplannedVisitsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     success: bool
-    error: Optional[str] = None
+    error: str | None = None
     route_code: str = ""                            # required string, empty on error
     date: str = ""                                  # required string, empty on error
     planned_count: int = 0
     live_count: int = 0
     unplanned_count: int = 0
-    planned_visited_codes: List[str] = Field(default_factory=list)
-    customers: List[UnplannedCustomer] = Field(default_factory=list)
+    planned_visited_codes: list[str] = Field(default_factory=list)
+    customers: list[UnplannedCustomer] = Field(default_factory=list)
 
 
 class SavedVisitScore(BaseModel):
@@ -99,14 +98,14 @@ class SavedVisit(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     score: SavedVisitScore
-    actualSales: Dict[str, int] = Field(default_factory=dict)
+    actualSales: dict[str, int] = Field(default_factory=dict)
     totalActual: int = 0
     totalRecommended: int = 0
-    preVisitBriefing: Optional[str] = None
-    customerAnalysis: Optional[str] = None
+    preVisitBriefing: str | None = None
+    customerAnalysis: str | None = None
     redistributions: RedistributionView = Field(default_factory=RedistributionView)
     # Off-plan items hydrated from yf_supervision_items (rec=0, actual>0); same shape as /visit's alsoBought.
-    alsoBought: List[AlsoBoughtRow] = Field(default_factory=list)
+    alsoBought: list[AlsoBoughtRow] = Field(default_factory=list)
 
 
 class SessionVisitTotals(BaseModel):
@@ -116,7 +115,7 @@ class SessionVisitTotals(BaseModel):
     visited_count: int = 0
     total_actual: int = 0
     total_recommended: int = 0
-    avg_score: Optional[float] = None
+    avg_score: float | None = None
     unplanned_visited_count: int = 0
 
 
@@ -134,7 +133,7 @@ class SessionCustomerGrouped(BaseModel):
     customer_code: str
     customer_name: str = ""
     # Raw rec rows; opaque to backend, surfaced for the UI's per-row render.
-    items: List[Dict[str, Any]] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class SessionCustomerTile(BaseModel):
@@ -167,8 +166,8 @@ class SessionSummary(BaseModel):
     visitedActual: int = 0
     visitedAchievement: float = 0.0
     overallAchievement: float = 0.0
-    customers_grouped: List[SessionCustomerGrouped] = Field(default_factory=list)
-    customer_tiles: List[SessionCustomerTile] = Field(default_factory=list)
+    customers_grouped: list[SessionCustomerGrouped] = Field(default_factory=list)
+    customer_tiles: list[SessionCustomerTile] = Field(default_factory=list)
     recommendation_totals: SessionRecommendationTotals = Field(default_factory=SessionRecommendationTotals)
     visit_totals: SessionVisitTotals = Field(default_factory=SessionVisitTotals)
 
@@ -193,10 +192,10 @@ class VisitResultPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     score: VisitScore
-    actualSales: Dict[str, int] = Field(default_factory=dict)
+    actualSales: dict[str, int] = Field(default_factory=dict)
     actualQty: int = 0
     recommendedQty: int = 0
-    alsoBought: List[AlsoBoughtRow] = Field(default_factory=list)
+    alsoBought: list[AlsoBoughtRow] = Field(default_factory=list)
     redistributions: RedistributionView = Field(default_factory=RedistributionView)
     sessionTotals: SessionVisitTotals = Field(default_factory=SessionVisitTotals)
 
@@ -220,16 +219,16 @@ class SavedVisitsResponse(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     available: bool = False
-    session_id: Optional[str] = None
-    visits: Dict[str, SavedVisit] = Field(default_factory=dict)
+    session_id: str | None = None
+    visits: dict[str, SavedVisit] = Field(default_factory=dict)
     # routeAnalysis kept as Optional[str] for wire-shape parity with the
     # webapp's TypeScript model; always None now -- LLM analyses are
     # generated on-demand by the webapp directly against llm_analytics.
-    routeAnalysis: Optional[str] = None
+    routeAnalysis: str | None = None
     visit_totals: SessionVisitTotals = Field(default_factory=SessionVisitTotals)
     # Always-empty dict kept for wire-shape parity; LLM briefings are
     # generated on-demand by the webapp via llm_analytics, not pre-cached.
-    briefings: Dict[str, str] = Field(default_factory=dict)
+    briefings: dict[str, str] = Field(default_factory=dict)
 
 
 class HealthResponse(BaseModel):
@@ -237,6 +236,6 @@ class HealthResponse(BaseModel):
 
     status: str
     db_configured: bool
-    last_reconcile_epoch: Optional[float] = None
-    reconcile_lag_seconds: Optional[float] = None
+    last_reconcile_epoch: float | None = None
+    reconcile_lag_seconds: float | None = None
     reconcile_stale: bool = False

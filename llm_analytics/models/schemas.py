@@ -15,10 +15,8 @@ the analyzer's retry loop catches and re-prompts.
 from __future__ import annotations
 
 import re
-from typing import List
 
 from pydantic import BaseModel, Field, field_validator
-
 
 # Phrases that indicate the model refused or gave a non-answer. Tested
 # case-insensitively at the START of narrative fields (a legitimate
@@ -70,18 +68,18 @@ class CustomerAnalysis(BaseModel):
             "Cites one strength + one concern with specific item codes."
         ),
     )
-    supervisor_instructions: List[str] = Field(
+    supervisor_instructions: list[str] = Field(
         default_factory=list,
         description=(
             "3-4 actionable instructions. Each cites a real item code, the "
             "actual vs recommended qty, and a specific next-visit action."
         ),
     )
-    strengths: List[str] = Field(
+    strengths: list[str] = Field(
         default_factory=list,
         description="2-3 wins, each citing item code + qty + accuracy %.",
     )
-    weaknesses: List[str] = Field(
+    weaknesses: list[str] = Field(
         default_factory=list,
         description="2-3 misses, each citing item code + qty + likely cause.",
     )
@@ -101,15 +99,15 @@ class RouteAnalysis(BaseModel):
             "quantity achievement %, standout customer code, main concern."
         ),
     )
-    supervisor_priorities: List[str] = Field(
+    supervisor_priorities: list[str] = Field(
         default_factory=list,
         description="3-4 tomorrow-focused priorities with scale (N customers, X%) and target.",
     )
-    high_performers_with_practices: List[str] = Field(
+    high_performers_with_practices: list[str] = Field(
         default_factory=list,
         description="2-3 UNIQUE customer codes (no duplicates) with what they did right.",
     )
-    critical_issues: List[str] = Field(
+    critical_issues: list[str] = Field(
         default_factory=list,
         description="2-3 patterns affecting 3+ customers, with counts and root cause.",
     )
@@ -121,11 +119,11 @@ class RouteAnalysis(BaseModel):
 
     @field_validator("high_performers_with_practices")
     @classmethod
-    def _dedupe_performers(cls, v: List[str]) -> List[str]:
+    def _dedupe_performers(cls, v: list[str]) -> list[str]:
         # Catch the duplicate-customer hallucination at the validator layer so
         # the prompt instruction and the validator can never disagree.
         seen_codes: set = set()
-        deduped: List[str] = []
+        deduped: list[str] = []
         code_pattern = re.compile(r"\b(\d{6,12})\b")
         for line in v or []:
             codes = code_pattern.findall(line)
@@ -145,7 +143,7 @@ class PreVisitBriefing(BaseModel):
             "Weaves in cycle/frequency facts, overdue items, new suggestions, target."
         ),
     )
-    key_items: List[str] = Field(
+    key_items: list[str] = Field(
         default_factory=list,
         description=(
             "2-3 one-liners: 'ItemName - N units, key fact'. "

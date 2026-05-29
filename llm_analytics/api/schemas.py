@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -9,7 +9,7 @@ class CustomerAnalysisRequest(BaseModel):
     customer_code: str
     route_code: str
     date: str
-    current_items: List[Dict[str, Any]] = Field(description="Current visit items with actualQuantity/recommendedQuantity")
+    current_items: list[dict[str, Any]] = Field(description="Current visit items with actualQuantity/recommendedQuantity")
     performance_score: float = 0.0
     coverage: float = 0.0
     accuracy: float = 0.0
@@ -18,11 +18,11 @@ class CustomerAnalysisRequest(BaseModel):
 class RouteAnalysisRequest(BaseModel):
     route_code: str
     date: str
-    visited_customers: List[Dict[str, Any]] = Field(description="Visited customer summaries")
+    visited_customers: list[dict[str, Any]] = Field(description="Visited customer summaries")
     total_customers: int = 0
     total_actual: int = 0
     total_recommended: int = 0
-    actual_customer_codes: Optional[List[str]] = None
+    actual_customer_codes: list[str] | None = None
 
 
 class PreVisitRequest(BaseModel):
@@ -30,21 +30,21 @@ class PreVisitRequest(BaseModel):
     customer_name: str = ""
     route_code: str
     date: str
-    items: List[Dict[str, Any]] = Field(description="Recommendation items with qty, tier, source, whyItem")
+    items: list[dict[str, Any]] = Field(description="Recommendation items with qty, tier, source, whyItem")
 
 
 class AnalysisResponse(BaseModel):
     success: bool
     analysis_type: str
-    data: Dict[str, Any]
+    data: dict[str, Any]
 
 
 class HealthResponse(BaseModel):
     available: bool
     provider: str
     model: str
-    cache: Dict[str, Any]
-    prompts: List[str]
+    cache: dict[str, Any]
+    prompts: list[str]
 
 
 class CacheStatsResponse(BaseModel):
@@ -73,13 +73,13 @@ class PreviewResponse(BaseModel):
     provider:                 str
     max_tokens:               int
     estimated_input_tokens:   int
-    schema:                   Dict[str, Any]
+    schema:                   dict[str, Any]
 
 
 class CostSummaryResponse(BaseModel):
     """Aggregated LLM spend since ``since`` (defaults to start-of-day UTC)."""
     since:               str
-    route_code:          Optional[str] = None
+    route_code:          str | None = None
     total_calls:         int
     ok_calls:            int
     degraded_calls:      int
@@ -94,5 +94,5 @@ class CostSummaryResponse(BaseModel):
     cost_display:        float
     display_currency:    str
     display_rate:        float
-    per_artifact:        Dict[str, Dict[str, Any]]
-    per_outcome:         Dict[str, int]
+    per_artifact:        dict[str, dict[str, Any]]
+    per_outcome:         dict[str, int]

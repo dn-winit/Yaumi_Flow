@@ -13,10 +13,9 @@ import threading
 import time
 from collections import OrderedDict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
-import pyodbc
 
 from common.db_pool import get_pool
 from common.numeric import safe_float, safe_int
@@ -70,14 +69,14 @@ class EdaService:
     # 24h TTL is safe because importer.scheduler invalidates on each pull.
     _MAX_CACHE_ENTRIES = 2000  # cap so per-item keys can't grow unbounded
 
-    def __init__(self, settings: Optional[Settings] = None, ttl_seconds: int = 24 * 3600) -> None:
+    def __init__(self, settings: Settings | None = None, ttl_seconds: int = 24 * 3600) -> None:
         self._s = settings or get_settings()
         self._ttl = ttl_seconds
         self._lock = threading.Lock()
         self._cache: OrderedDict[str, tuple[float, Any]] = OrderedDict()
         # Parsed-DataFrame memo kept separate from the aggregation cache so
         # LRU eviction can't throw away heavy parses for cheap tile responses.
-        self._df_memo: Dict[Path, tuple[tuple[str, int, int], pd.DataFrame]] = {}
+        self._df_memo: dict[Path, tuple[tuple[str, int, int], pd.DataFrame]] = {}
 
     # ------------------------------------------------------------------
     # Cache helpers
@@ -88,7 +87,7 @@ class EdaService:
         key: str,
         loader,
         *,
-        ttl: Optional[int] = None,
+        ttl: int | None = None,
         cacheable=None,
     ) -> Any:
         """LRU + TTL cache. ``ttl`` overrides default 24h (use 60s for live
@@ -140,10 +139,10 @@ class EdaService:
     @staticmethod
     def _apply_sales_filters(
         df: pd.DataFrame,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: List[str],
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str],
     ) -> pd.DataFrame:
         if df.empty:
             return df
@@ -159,13 +158,13 @@ class EdaService:
 
     @staticmethod
     def _filter_key(
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: List[str],
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str],
     ) -> str:
         """Deterministic cache-key fragment; sorted so reorderings share a slot."""
-        def part(name: str, vals: List[str]) -> str:
+        def part(name: str, vals: list[str]) -> str:
             return f"{name}={'|'.join(sorted(set(map(str, vals))))}" if vals else f"{name}="
         return ";".join([
             part("w", warehouse_codes),
@@ -176,11 +175,11 @@ class EdaService:
 
     def get_filter_dimensions(
         self,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Cascading filter options for the dashboard FilterBar; each
         downstream dimension is scoped by upstream selections.
         ``trimmed_selections`` drops codes absent from the cascaded sets so
@@ -209,10 +208,10 @@ class EdaService:
 
     def _compute_filter_dimensions(
         self,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+    ) -> dict[str, Any]:
         df = self._load_sales_df()
         if df.empty:
             return {"warehouses": [], "routes": [], "categories": [], "items": []}
@@ -280,12 +279,12 @@ class EdaService:
     # Shared reference data
     # ------------------------------------------------------------------
 
-    def get_item_prices(self) -> Dict[str, float]:
+    def get_item_prices(self) -> dict[str, float]:
         """Return {ItemCode: avg unit price} from customer_data.csv;
         single source of truth for item pricing, cached like other derivations."""
         return self._cached("item_prices", self._compute_item_prices)
 
-    def _compute_item_prices(self) -> Dict[str, float]:
+    def _compute_item_prices(self) -> dict[str, float]:
         path = self._s.data_path(self._s.customer_data_file)
         if not path.exists():
             return {}
@@ -301,11 +300,11 @@ class EdaService:
     # Last active date: most recent day with sales activity in
     # sales_recent.csv; drawers seed defaults from this to avoid empty-state.
 
-    def get_last_active_date(self) -> Dict[str, Any]:
+    def get_last_active_date(self) -> dict[str, Any]:
         """Most recent date in sales_recent.csv (route-agnostic)."""
         return self._cached("last_active_date", self._compute_last_active_date)
 
-    def _compute_last_active_date(self) -> Dict[str, Any]:
+    def _compute_last_active_date(self) -> dict[str, Any]:
         df = self._load_sales_df()
         if df.empty:
             return {"available": False, "date": None}
@@ -322,11 +321,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: Optional[List[str]] = None,
-        route_codes: Optional[List[str]] = None,
-        category_codes: Optional[List[str]] = None,
-        item_codes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str] | None = None,
+        route_codes: list[str] | None = None,
+        category_codes: list[str] | None = None,
+        item_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
         w, r, c, i = warehouse_codes or [], route_codes or [], category_codes or [], item_codes or []
         key = f"sales_overview::{_period_key(start_date, end_date)}::" + self._filter_key(w, r, c, i)
         return self._cached(key, lambda: self._compute_sales_overview(start_date, end_date, w, r, c, i))
@@ -351,11 +350,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: Optional[List[str]] = None,
-        route_codes: Optional[List[str]] = None,
-        category_codes: Optional[List[str]] = None,
-        item_codes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str] | None = None,
+        route_codes: list[str] | None = None,
+        category_codes: list[str] | None = None,
+        item_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Sales aggregates for ``[start_date, end_date]``, optionally
         FilterBar-scoped. Daily axis pads every calendar day (zero bars
         on holidays). Leaderboards sorted by revenue to match UI titles."""
@@ -443,10 +442,10 @@ class EdaService:
     # Item catalog -- latest price + metadata per item (from sales_recent.csv)
     # ------------------------------------------------------------------
 
-    def get_item_catalog(self) -> Dict[str, Any]:
+    def get_item_catalog(self) -> dict[str, Any]:
         return self._cached("item_catalog", self._compute_item_catalog)
 
-    def _compute_item_catalog(self) -> Dict[str, Any]:
+    def _compute_item_catalog(self) -> dict[str, Any]:
         df = self._load_sales_df()
         if df.empty:
             return {"available": False, "items": []}
@@ -487,11 +486,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: Optional[List[str]] = None,
-        route_codes: Optional[List[str]] = None,
-        category_codes: Optional[List[str]] = None,
-        item_codes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str] | None = None,
+        route_codes: list[str] | None = None,
+        category_codes: list[str] | None = None,
+        item_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
         # Validate up front so the bad-input message matches /eda/sales
         # exactly across dashboard surfaces.
         try:
@@ -548,11 +547,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: List[str],
-    ) -> Optional[Dict[str, Any]]:
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str],
+    ) -> dict[str, Any] | None:
         """Cached entry to the shared (sales join forecast) merge; amortises
         the heavy join across business-kpis and forecast-rows for the common
         dashboard case of matching scopes."""
@@ -570,11 +569,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: List[str],
-    ) -> Optional[Dict[str, Any]]:
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str],
+    ) -> dict[str, Any] | None:
         """Per-(date, route, item) merge of past forecasts vs actual
         sales over ``[start_date, end_date]``; returns None if nothing in
         scope, else dict(sales, merged, forecast, anchor, working_days,
@@ -695,11 +694,11 @@ class EdaService:
         self,
         start_date: str,
         end_date: str,
-        warehouse_codes: List[str],
-        route_codes: List[str],
-        category_codes: List[str],
-        item_codes: List[str],
-    ) -> Dict[str, Any]:
+        warehouse_codes: list[str],
+        route_codes: list[str],
+        category_codes: list[str],
+        item_codes: list[str],
+    ) -> dict[str, Any]:
         """Four headline KPIs: total_revenue, total_volume, unique_items,
         lost_opportunity (Sigma max(0, predicted-actual) * price). All
         derive from the shared (sales join forecast) merge so dashboard
@@ -741,8 +740,8 @@ class EdaService:
             lost_amount = 0.0
             lost_units = 0.0
             items_lost = 0
-            avg_daily_coverage_pct: Optional[float] = None
-            daily_avg_lost: Optional[float] = None
+            avg_daily_coverage_pct: float | None = None
+            daily_avg_lost: float | None = None
         else:
             # Lost-opportunity uses the reconciled van load (how much of
             # the recommendation didn't sell); falls back to raw predicted.
@@ -768,7 +767,7 @@ class EdaService:
                 forecast.groupby(["TrxDate", "RouteCode"])["ItemCode"]
                 .apply(lambda s: set(s.unique()))
             )
-            cell_ratios: List[float] = []
+            cell_ratios: list[float] = []
             for key, sold_items_cell in sold_items_by_day_route.items():
                 if not sold_items_cell:
                     continue
@@ -835,11 +834,11 @@ class EdaService:
     # Per-item rolling stats (from sales_recent.csv)
     # ------------------------------------------------------------------
 
-    def get_item_stats(self, item_code: str, route_code: Optional[str] = None) -> Dict[str, Any]:
+    def get_item_stats(self, item_code: str, route_code: str | None = None) -> dict[str, Any]:
         key = f"item_stats::{item_code}::{route_code or ''}"
         return self._cached(key, lambda: self._compute_item_stats(item_code, route_code))
 
-    def _compute_item_stats(self, item_code: str, route_code: Optional[str]) -> Dict[str, Any]:
+    def _compute_item_stats(self, item_code: str, route_code: str | None) -> dict[str, Any]:
         df = self._load_sales_df()
         if df.empty:
             return {"available": False, "message": "sales_recent.csv not found or empty"}
@@ -872,7 +871,7 @@ class EdaService:
             "last_6_months": 180,
         }
 
-        def window_stats(days: int) -> Dict[str, Any]:
+        def window_stats(days: int) -> dict[str, Any]:
             cutoff = anchor - pd.Timedelta(days=days - 1)
             window = daily[daily["date"] >= cutoff]
             total = float(window["qty"].sum()) if not window.empty else 0.0
@@ -897,7 +896,7 @@ class EdaService:
     # Live per-customer sales (live from YaumiLive -- short-TTL cached)
     # ------------------------------------------------------------------
 
-    def get_live_customer_sales(self, route_code: str, date: str, customer_code: str) -> Dict[str, Any]:
+    def get_live_customer_sales(self, route_code: str, date: str, customer_code: str) -> dict[str, Any]:
         """Live items+qty for one (route, date, customer) from
         VW_GET_SALES_DETAILS (positive PCs, OrderItem, SalesInvoice).
         60s cached so rapid-fire visit clicks don't hammer the DB."""
@@ -909,7 +908,7 @@ class EdaService:
             cacheable=_envelope_available,
         )
 
-    def get_live_route_sales(self, route_code: str, date: str) -> Dict[str, Any]:
+    def get_live_route_sales(self, route_code: str, date: str) -> dict[str, Any]:
         """Live (customer, item, qty) tuples sold on (route, date); same
         filter chain as ``get_live_customer_sales`` to guarantee parity."""
         key = f"live_route_sales::{route_code}::{date}"
@@ -920,7 +919,7 @@ class EdaService:
             cacheable=_envelope_available,
         )
 
-    def _fetch_live_route_sales(self, route_code: str, date: str) -> Dict[str, Any]:
+    def _fetch_live_route_sales(self, route_code: str, date: str) -> dict[str, Any]:
         if not (self._s.db.host and self._s.db.username):
             return {"available": False, "message": "DB not configured", "customers": []}
 
@@ -960,7 +959,7 @@ class EdaService:
             return {"available": False, "message": str(exc), "customers": []}
 
         # Pivot to one entry per customer with nested items.
-        by_cust: Dict[str, Dict[str, Any]] = {}
+        by_cust: dict[str, dict[str, Any]] = {}
         for r in rows:
             code = str(r[0] or "").strip()
             if not code:
@@ -982,7 +981,7 @@ class EdaService:
             "fetched_at": pd.Timestamp.now().isoformat(),
         }
 
-    def _fetch_live_customer_sales(self, route_code: str, date: str, customer_code: str) -> Dict[str, Any]:
+    def _fetch_live_customer_sales(self, route_code: str, date: str, customer_code: str) -> dict[str, Any]:
         if not (self._s.db.host and self._s.db.username):
             return {"available": False, "message": "DB not configured", "items": []}
 
@@ -1035,7 +1034,7 @@ class EdaService:
     #   van_load     = past_leftover + today_allocation
     #   leftover_now = max(0, van_load - sold - bad_return - good_return)
 
-    def get_live_van_composition(self, route_code: str, date: str) -> Dict[str, Any]:
+    def get_live_van_composition(self, route_code: str, date: str) -> dict[str, Any]:
         key = f"live_van_comp::{route_code}::{date}"
         return self._cached(
             key,
@@ -1044,7 +1043,7 @@ class EdaService:
             cacheable=_envelope_available,
         )
 
-    def _fetch_live_van_composition(self, route_code: str, date: str) -> Dict[str, Any]:
+    def _fetch_live_van_composition(self, route_code: str, date: str) -> dict[str, Any]:
         if not (self._s.db.host and self._s.db.username):
             return {"available": False, "message": "DB not configured",
                     "items": [], "totals": {}}
@@ -1120,7 +1119,7 @@ class EdaService:
             return {"available": False, "message": str(exc),
                     "items": [], "totals": {}}
 
-        items: Dict[str, Dict[str, Any]] = {}
+        items: dict[str, dict[str, Any]] = {}
 
         def _ensure(item_code, name="", cat="", cat_name=""):
             ic = str(item_code or "").strip()

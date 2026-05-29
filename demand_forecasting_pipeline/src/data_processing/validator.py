@@ -18,7 +18,7 @@ numbers into the data-quality artifact without re-deriving them.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import pandas as pd
 
@@ -66,7 +66,7 @@ def validate_input(df: pd.DataFrame, cfg: dict) -> ValidationReport:
     # Compare in UTC; ``parsed`` came from ``pd.to_datetime`` which yields
     # naive timestamps when the input lacks a tz, so strip the tz from the
     # reference instant to keep the comparison apples-to-apples.
-    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    now = datetime.now(UTC).replace(tzinfo=None)
     report.future_dates = int((parsed > now).sum())
 
     # --- Duplicates (soft, policy driven) --------------------------------

@@ -4,10 +4,9 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import pandas as pd
-
 
 # Canonical artifact keys used throughout the system
 ARTIFACT_KEYS = (
@@ -47,11 +46,11 @@ class StorageBackend(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def read_json(self, key: str) -> Dict[str, Any]:
+    def read_json(self, key: str) -> dict[str, Any]:
         """Read a JSON artifact by key. Return empty dict if missing."""
 
     @abstractmethod
-    def write_json(self, key: str, data: Dict[str, Any]) -> bool:
+    def write_json(self, key: str, data: dict[str, Any]) -> bool:
         """Write a JSON artifact. Return success."""
 
     # ------------------------------------------------------------------
@@ -62,7 +61,7 @@ class StorageBackend(ABC):
     def exists(self, key: str) -> bool:
         """Check if an artifact exists."""
 
-    def check_all(self) -> Dict[str, bool]:
+    def check_all(self) -> dict[str, bool]:
         """Check existence of all known artifacts."""
         return {k: self.exists(k) for k in ARTIFACT_KEYS}
 
@@ -71,7 +70,7 @@ class StorageBackend(ABC):
     # ------------------------------------------------------------------
 
     @abstractmethod
-    def source_path(self, key: str) -> Optional[Path]:
+    def source_path(self, key: str) -> Path | None:
         """On-disk path for ``key`` so callers can mtime-cache; None for unknown keys."""
 
     # ------------------------------------------------------------------

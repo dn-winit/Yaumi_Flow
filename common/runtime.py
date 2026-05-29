@@ -8,7 +8,7 @@ heavier belongs in the per-service config layer.
 from __future__ import annotations
 
 import os
-from typing import Iterable
+from collections.abc import Iterable
 
 # Tokens that mean "operator hasn't actually filled this in" -- the literal
 # strings shipped in ``.env.example`` plus the common variants developers

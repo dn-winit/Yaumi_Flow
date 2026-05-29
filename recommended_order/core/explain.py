@@ -5,8 +5,7 @@ module constructs sentences."""
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List
-
+from typing import Any
 
 # Canonical signal kinds. Keep these short, lower-snake -- the UI keys off them.
 KIND_REGULAR_BUYER = "regular_buyer"
@@ -32,9 +31,9 @@ class Signal:
     kind: str
     detail: str
     weight: float
-    evidence: Dict[str, Any] = field(default_factory=dict)
+    evidence: dict[str, Any] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "kind": self.kind,
             "detail": self.detail,
@@ -157,8 +156,8 @@ class Explanation:
     """Signals for one candidate row. Separates ``item_signals`` (why
     the item) from ``quantity_signals`` (how the qty was sized)."""
 
-    item_signals: List[Signal] = field(default_factory=list)
-    quantity_signals: List[Signal] = field(default_factory=list)
+    item_signals: list[Signal] = field(default_factory=list)
+    quantity_signals: list[Signal] = field(default_factory=list)
 
     # ---- building ----
     def add_item_signal(self, signal: Signal) -> None:
@@ -168,12 +167,12 @@ class Explanation:
         self.quantity_signals.append(signal)
 
     # ---- merging (used when two generators pick the same item) ----
-    def merge(self, other: "Explanation") -> None:
+    def merge(self, other: Explanation) -> None:
         self.item_signals.extend(other.item_signals)
         self.quantity_signals.extend(other.quantity_signals)
 
     # ---- outputs ----
-    def _normalised(self, signals: List[Signal]) -> List[Signal]:
+    def _normalised(self, signals: list[Signal]) -> list[Signal]:
         total = sum(max(0.0, s.weight) for s in signals)
         if total <= 0:
             return signals
@@ -181,7 +180,7 @@ class Explanation:
             Signal(s.kind, s.detail, s.weight / total, s.evidence) for s in signals
         ]
 
-    def signals(self) -> List[Dict[str, Any]]:
+    def signals(self) -> list[dict[str, Any]]:
         """All signals (item + quantity), normalised so weights sum to 1."""
         all_sig = self.item_signals + self.quantity_signals
         return [s.to_dict() for s in self._normalised(all_sig)]

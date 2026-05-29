@@ -9,15 +9,17 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import datetime
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any
 
 import pyodbc
 
 # Shared bounded AIML pool across all YaumiAIML writers.
 from common.db_pool import get_pool, with_db_retry
-from common.numeric import safe_float as _to_float, safe_int as _to_int
+from common.numeric import safe_float as _to_float
+from common.numeric import safe_int as _to_int
 from sales_supervision.config.settings import Settings, get_settings
 
 logger = logging.getLogger(__name__)
@@ -50,7 +52,7 @@ _ITEM_COLS = [
 ]
 
 
-def _insert_sql(table_placeholder: str, cols: List[str]) -> str:
+def _insert_sql(table_placeholder: str, cols: list[str]) -> str:
     """Build parametric INSERT template; ``{table}`` slot filled at runtime."""
     col_list = ", ".join(f"[{c}]" for c in cols)
     placeholders = ", ".join("?" for _ in cols)
@@ -59,9 +61,9 @@ def _insert_sql(table_placeholder: str, cols: List[str]) -> str:
 
 def _merge_sql(
     table_placeholder: str,
-    all_cols: List[str],
-    update_cols: List[str],
-    key_cols: List[str],
+    all_cols: list[str],
+    update_cols: list[str],
+    key_cols: list[str],
     *,
     lock_hints: str = "HOLDLOCK, UPDLOCK",
 ) -> str:
@@ -176,7 +178,7 @@ def _str_clip(value: Any, max_len: int) -> str:
     return s[:max_len]
 
 
-def _empty_redistribution_dict() -> Dict[str, Any]:
+def _empty_redistribution_dict() -> dict[str, Any]:
     """Pydantic-driven empty RedistributionView dump. Single source of
     truth so a future wire-schema field is reflected here automatically."""
     from sales_supervision.api.schemas import RedistributionView
@@ -201,14 +203,14 @@ class _SkipReplay(Exception):
 class DbSaver:
     """Pushes supervision session data to 3 DB tables in YaumiAIML."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._db = self._s.db
         # Cache for load_session_visits; invalidated by reconcile_route + /visit, TTL backstop.
         # Stores (monotonic_ts, payload); payload=None caches "no rows yet" answers too.
-        self._saved_visits_cache: Dict[
-            Tuple[str, str, bool],
-            Tuple[float, Optional[Dict[str, Any]]],
+        self._saved_visits_cache: dict[
+            tuple[str, str, bool],
+            tuple[float, dict[str, Any] | None],
         ] = {}
         self._saved_visits_cache_lock = threading.Lock()
 
@@ -254,7 +256,7 @@ class DbSaver:
     # Per-visit upsert
     # ------------------------------------------------------------------
 
-    def upsert_visit(self, snapshot: Dict[str, Any], customer_code: str) -> Dict[str, Any]:
+    def upsert_visit(self, snapshot: dict[str, Any], customer_code: str) -> dict[str, Any]:
         """Single-transaction upsert of route header + one customer + their items.
 
         Idempotent on (session_id, customer_code). Called per process_visit, typically
@@ -311,7 +313,7 @@ class DbSaver:
     # Load
     # ------------------------------------------------------------------
 
-    def refresh_route_header(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+    def refresh_route_header(self, snapshot: dict[str, Any]) -> dict[str, Any]:
         """Stamp the route header from snapshot without touching customer/item rows.
 
         Called every reconcile_route tick so header columns always reflect the latest
@@ -341,7 +343,7 @@ class DbSaver:
             return {"success": False, "error": str(exc)}
 
     @with_db_retry
-    def load_session_by_id(self, session_id: str) -> Optional[Dict[str, Any]]:
+    def load_session_by_id(self, session_id: str) -> dict[str, Any] | None:
         """Load by exact session_id (vs load_session which collapses to most-recent on (route, date))."""
         if not self.available:
             return None
@@ -358,7 +360,7 @@ class DbSaver:
                 if not row:
                     return None
                 cols = [d[0] for d in cursor.description]
-                route = dict(zip(cols, row))
+                route = dict(zip(cols, row, strict=False))
                 rcode = route.get("route_code", "")
                 date = route.get("sup_date_str", "")
                 custs = self._fetch_all(cursor, self._s.customer_summary_table, session_id)
@@ -369,7 +371,7 @@ class DbSaver:
             return None
 
     @with_db_retry
-    def load_session(self, route_code: str, date: str) -> Optional[Dict[str, Any]]:
+    def load_session(self, route_code: str, date: str) -> dict[str, Any] | None:
         if not self.available:
             return None
         try:
@@ -387,7 +389,7 @@ class DbSaver:
                 if not row:
                     return None
                 cols = [d[0] for d in cursor.description]
-                route = dict(zip(cols, row))
+                route = dict(zip(cols, row, strict=False))
                 # Canonical sid; legacy {route}_{date}_{ts}_{uuid} rows still surface via the aggregation read below.
                 session_id = f"{route_code}_{date}"
 
@@ -437,7 +439,7 @@ class DbSaver:
 
 
     @with_db_retry
-    def repair_supervision_day(self, date: str) -> Dict[str, Any]:
+    def repair_supervision_day(self, date: str) -> dict[str, Any]:
         """Repair supervision rows whose recs were missing at write time.
 
         Single-transaction backfill that resolves the rec-timing race:
@@ -676,7 +678,7 @@ class DbSaver:
     def load_session_visits(
         self, route_code: str, date: str,
         *, include_redistributions: bool = False,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Saved per-customer visit data for a (route, date); shape matches /session/visit output.
 
         ``include_redistributions=True`` adds the per-visit redistribution-replay view
@@ -716,7 +718,7 @@ class DbSaver:
                             )
                     return None
                 rh_cols = [d[0] for d in cursor.description]
-                route_header = dict(zip(rh_cols, rh_row))
+                route_header = dict(zip(rh_cols, rh_row, strict=False))
 
                 custs, items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=True,
@@ -740,7 +742,7 @@ class DbSaver:
                 # any planned customer's briefing without a live LLM
                 # call. Empty when the cron has not yet briefed any
                 # customer on this route/date.
-                briefings: Dict[str, str] = {}  # LLM briefings are on-demand now, not pre-cached
+                briefings: dict[str, str] = {}  # LLM briefings are on-demand now, not pre-cached
                 # Current recommendation snapshot, used downstream to
                 # dedupe alsoBought against the live plan -- an item
                 # that became recommended AFTER the visit was recorded
@@ -781,7 +783,7 @@ class DbSaver:
     @with_db_retry
     def load_redistribution_for_customer(
         self, route_code: str, date: str, customer_code: str,
-    ) -> Optional[Dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Drill-in replay of a single customer's redistribution view; same wire shape as the hot path."""
         if not self.available:
             return None
@@ -799,7 +801,7 @@ class DbSaver:
                 if not rh_row:
                     return None
                 rh_cols = [d[0] for d in cursor.description]
-                route_header = dict(zip(rh_cols, rh_row))
+                route_header = dict(zip(rh_cols, rh_row, strict=False))
                 custs, items = self._fetch_canonical_rows(
                     cursor, route_code, date, visited_only=True,
                 )
@@ -828,22 +830,22 @@ class DbSaver:
 
     @staticmethod
     def _build_visits_payload(
-        sid: str, route_header: Dict, custs: List[Dict], items: List[Dict],
+        sid: str, route_header: dict, custs: list[dict], items: list[dict],
         *,
-        all_custs: Optional[List[Dict]] = None,
-        all_items: Optional[List[Dict]] = None,
+        all_custs: list[dict] | None = None,
+        all_items: list[dict] | None = None,
         include_redistributions: bool = True,
-        current_plan: Optional[Dict[str, "frozenset[str]"]] = None,
-    ) -> Dict[str, Any]:
+        current_plan: dict[str, frozenset[str]] | None = None,
+    ) -> dict[str, Any]:
         """Translate stored rows into the visit-result shape the live UI consumes.
 
         ``all_custs``/``all_items`` (full canonical set) drive the per-visit redistribution
         replay; omitted -> safe-default empty redistributions view.
         """
         # actuals = all invoiced items; also_bought = off-plan subset (rec=0, actual>0).
-        actuals_by_cust: Dict[str, Dict[str, int]] = {}
-        also_bought_by_cust: Dict[str, List[Dict[str, Any]]] = {}
-        _current_plan: Dict[str, "frozenset[str]"] = current_plan or {}
+        actuals_by_cust: dict[str, dict[str, int]] = {}
+        also_bought_by_cust: dict[str, list[dict[str, Any]]] = {}
+        _current_plan: dict[str, frozenset[str]] = current_plan or {}
         for it in items:
             cc = str(it.get("customer_code", ""))
             if not cc:
@@ -865,11 +867,11 @@ class DbSaver:
                     "item_code": ic,
                     "qty": qty_act,
                 })
-        for cc, rows in also_bought_by_cust.items():
+        for _cc, rows in also_bought_by_cust.items():
             rows.sort(key=lambda r: r["qty"], reverse=True)
 
         # One-pass redistribution replay; local imports break the api.schemas <-> core cycle.
-        redistributions_by_cust: Dict[str, Dict[str, Any]] = {}
+        redistributions_by_cust: dict[str, dict[str, Any]] = {}
         try:
             if not include_redistributions:
                 # Periodic-poll path skips the replay; drill-in uses compute_redistribution_for_customer.
@@ -879,15 +881,21 @@ class DbSaver:
             )
             from sales_supervision.models.schemas import (
                 ScoreResult,
+            )
+            from sales_supervision.models.schemas import (
                 Session as _Session,
+            )
+            from sales_supervision.models.schemas import (
                 SessionCustomer as _SessionCustomer,
+            )
+            from sales_supervision.models.schemas import (
                 SessionItem as _SessionItem,
             )
 
             # Minimal in-memory Session for the shaper; preserves tier so the planned/unplanned classifier matches the live path.
             roster_custs = all_custs if all_custs is not None else custs
             roster_items = all_items if all_items is not None else items
-            items_by_cust_for_replay: Dict[str, List[_SessionItem]] = {}
+            items_by_cust_for_replay: dict[str, list[_SessionItem]] = {}
             for it in roster_items:
                 cc = str(it.get("customer_code", ""))
                 if not cc:
@@ -905,7 +913,7 @@ class DbSaver:
                     tier=str(it.get("recommendation_tier") or ""),
                     van_inventory_qty=int(it.get("van_inventory_qty") or 0),
                 ))
-            roster: Dict[str, _SessionCustomer] = {}
+            roster: dict[str, _SessionCustomer] = {}
             for c in roster_custs:
                 cc = str(c.get("customer_code", ""))
                 if not cc:
@@ -954,7 +962,7 @@ class DbSaver:
                 sid, exc,
             )
 
-        visits: Dict[str, Dict[str, Any]] = {}
+        visits: dict[str, dict[str, Any]] = {}
         for c in custs:
             cc = str(c.get("customer_code", ""))
             if not cc:
@@ -1022,7 +1030,7 @@ class DbSaver:
     # ------------------------------------------------------------------
 
     def _upsert_route_header(
-        self, cursor: Any, sid: str, snapshot: Dict[str, Any],
+        self, cursor: Any, sid: str, snapshot: dict[str, Any],
         sup_date: str, now: datetime,
     ) -> None:
         """Atomic MERGE upsert for the route header row.
@@ -1062,7 +1070,7 @@ class DbSaver:
 
     def _upsert_customer(
         self, cursor: Any, sid: str, customer_code: str,
-        customer: Dict[str, Any], now: datetime,
+        customer: dict[str, Any], now: datetime,
     ) -> None:
         """Atomic MERGE upsert for one customer row.
 
@@ -1096,7 +1104,7 @@ class DbSaver:
 
     def _replace_customer_items(
         self, cursor: Any, sid: str, customer_code: str,
-        customer: Dict[str, Any], now: datetime,
+        customer: dict[str, Any], now: datetime,
     ) -> int:
         """DELETE prior item rows + INSERT current set, scoped to (session_id, customer_code).
 
@@ -1148,14 +1156,14 @@ class DbSaver:
     # Read helpers
     # ------------------------------------------------------------------
 
-    def _fetch_all(self, cursor: Any, table: str, sid: str) -> List[Dict]:
+    def _fetch_all(self, cursor: Any, table: str, sid: str) -> list[dict]:
         """Schema-driven read of every row for a session_id; ORDER BY id pins insertion order."""
         cursor.execute(
             f"SELECT * FROM {table} WHERE session_id = ? ORDER BY id",
             (sid,),
         )
         cols = [d[0] for d in cursor.description]
-        return [dict(zip(cols, row)) for row in cursor.fetchall()]
+        return [dict(zip(cols, row, strict=False)) for row in cursor.fetchall()]
 
     def _fetch_canonical_rows(
         self,
@@ -1164,7 +1172,7 @@ class DbSaver:
         date: str,
         *,
         visited_only: bool,
-    ) -> tuple[List[Dict], List[Dict]]:
+    ) -> tuple[list[dict], list[dict]]:
         """Per-(route, date) customer + item rows deduped across legacy parallel session_ids.
 
         Dedup rule: per customer_code, keep the row with most-recent record_saved_at (id tiebreak).
@@ -1199,7 +1207,7 @@ class DbSaver:
         cursor.execute(cust_sql, (route_code, date))
         cols = [d[0] for d in cursor.description]
         custs = [
-            {k: v for k, v in zip(cols, row) if k != "rn"}
+            {k: v for k, v in zip(cols, row, strict=False) if k != "rn"}
             for row in cursor.fetchall()
         ]
         if not custs:
@@ -1234,13 +1242,13 @@ class DbSaver:
         """
         cursor.execute(item_sql, (route_code, date))
         cols = [d[0] for d in cursor.description]
-        items = [dict(zip(cols, row)) for row in cursor.fetchall()]
+        items = [dict(zip(cols, row, strict=False)) for row in cursor.fetchall()]
         return custs, items
 
 
     def _fetch_current_plan_items(
         self, cursor: Any, route_code: str, date: str,
-    ) -> Dict[str, frozenset]:
+    ) -> dict[str, frozenset]:
         """Snapshot of the CURRENT recommendation set for this (route,
         date), keyed by ``customer_code -> frozenset(item_code)``.
 
@@ -1269,7 +1277,7 @@ class DbSaver:
             f"WHERE trx_date = ? AND route_code = ?"
         )
         cursor.execute(sql, (date, route_code))
-        result: Dict[str, set] = {}
+        result: dict[str, set] = {}
         for code, item in cursor.fetchall():
             if not code or not item:
                 continue
@@ -1281,14 +1289,14 @@ class DbSaver:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _reconstruct(sid: str, route_code: str, date: str, route: Dict, custs: List[Dict], items: List[Dict]) -> Dict:
+    def _reconstruct(sid: str, route_code: str, date: str, route: dict, custs: list[dict], items: list[dict]) -> dict:
         """Rebuild session JSON from DB rows; every key matches live (pre-save) semantics.
 
         RecommendedQuantity = engine ORIGINAL (adjusted value rides on EffectiveRecommended);
         accuracy = mean per-item accuracy (qty ratio is qtyFulfillmentRate).
         Explainability fields (WhyItem/WhyQuantity/Confidence/...) aren't persisted; modal shows "-".
         """
-        items_by_cust: Dict[str, list] = {}
+        items_by_cust: dict[str, list] = {}
         for it in items:
             cc = str(it.get("customer_code", ""))
             items_by_cust.setdefault(cc, []).append({

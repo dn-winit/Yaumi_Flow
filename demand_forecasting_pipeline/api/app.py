@@ -91,11 +91,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         else:
             log.info("scheduler_boot_skipped reason=not_leader")
             # Followers need stop_* symbols defined for shutdown; pass None for no-ops.
-            from demand_forecasting_pipeline.services.retrain_scheduler import (
-                stop_scheduler,
-            )
             from demand_forecasting_pipeline.services.reconciliation_refresh import (
                 stop_reconciliation_scheduler,
+            )
+            from demand_forecasting_pipeline.services.retrain_scheduler import (
+                stop_scheduler,
             )
 
         # Cache warm-up in daemon thread: pay enrich_with_load cold-start at boot.

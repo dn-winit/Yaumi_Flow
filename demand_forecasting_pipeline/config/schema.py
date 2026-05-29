@@ -101,7 +101,7 @@ class RoutingRule(_AllowExtra):
     hp_trials_multiplier: float | None = None
 
     @model_validator(mode="after")
-    def _validate_when(self) -> "RoutingRule":
+    def _validate_when(self) -> RoutingRule:
         for signal, cond in (self.when or {}).items():
             if signal not in _ROUTING_SIGNALS:
                 raise ConfigError(
@@ -179,7 +179,7 @@ class PipelineConfig(_AllowExtra):
         return v
 
     @model_validator(mode="after")
-    def _cross_validate(self) -> "PipelineConfig":
+    def _cross_validate(self) -> PipelineConfig:
         # Lazy import: registry pulls heavy ML deps, unavailable for syntax-only checks.
         try:
             from demand_forecasting_pipeline.src.models.registry import REGISTRY

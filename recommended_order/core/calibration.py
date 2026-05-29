@@ -13,10 +13,11 @@ import logging
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Iterable
 from dataclasses import dataclass, field
 from datetime import timedelta
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -41,7 +42,7 @@ class RouteCalibration:
     qty_benchmark: float              # P90 of avg item qty per visit
 
     # Scoring / tiering
-    tier_cuts: Dict[str, float]       # {"must_stock", "should_stock", "consider", "monitor"}
+    tier_cuts: dict[str, float]       # {"must_stock", "should_stock", "consider", "monitor"}
     completion_gate: float            # lowest completion ratio that opens scoring
     basket_min_confidence: float      # min P(B|A) for basket complements (P60 of route)
     recency_half_life_days: float     # exp-decay weighting
@@ -52,15 +53,15 @@ class RouteCalibration:
     peer_max_per_customer: int        # max peer recs emitted per customer
 
     # Adaptive priority weights (low-freq vs high-freq items)
-    priority_weights_low_freq: Dict[str, float]
-    priority_weights_high_freq: Dict[str, float]
+    priority_weights_low_freq: dict[str, float]
+    priority_weights_high_freq: dict[str, float]
 
     # Per-source feedback multipliers (history/basket/peer); missing -> 1.0.
-    source_weight_adjustments: Dict[str, float] = field(default_factory=dict)
+    source_weight_adjustments: dict[str, float] = field(default_factory=dict)
     # Per-source sample-size confidence min(1, n / k).
-    feedback_confidence: Dict[str, float] = field(default_factory=dict)
+    feedback_confidence: dict[str, float] = field(default_factory=dict)
     # Traceability per field; derived_from["window"] carries the rolling-window meta.
-    derived_from: Dict[str, Any] = field(default_factory=dict)
+    derived_from: dict[str, Any] = field(default_factory=dict)
 
 
 # ---------------------------------------------------------------------------
@@ -69,10 +70,10 @@ class RouteCalibration:
 
 _LOCK = threading.Lock()
 # key: (route_code, csv_mtime, window_days) -> (inserted_at, calib)
-_CACHE: "OrderedDict[Tuple[str, float, int], Tuple[float, RouteCalibration]]" = OrderedDict()
+_CACHE: OrderedDict[tuple[str, float, int], tuple[float, RouteCalibration]] = OrderedDict()
 
 
-def _cache_get(key: Tuple[str, float, int], ttl: int) -> Optional[RouteCalibration]:
+def _cache_get(key: tuple[str, float, int], ttl: int) -> RouteCalibration | None:
     with _LOCK:
         entry = _CACHE.get(key)
         if entry is None:
@@ -87,7 +88,7 @@ def _cache_get(key: Tuple[str, float, int], ttl: int) -> Optional[RouteCalibrati
 
 
 def _cache_put(
-    key: Tuple[str, float, int], calib: RouteCalibration, max_entries: int,
+    key: tuple[str, float, int], calib: RouteCalibration, max_entries: int,
 ) -> None:
     with _LOCK:
         _CACHE[key] = (time.time(), calib)
@@ -112,7 +113,7 @@ _MTIME_CACHE_TTL = 1.0  # seconds -- collapses N stats within a single
                         # generation run into one filesystem touch.
 
 
-def _csv_mtime(settings: Optional[Settings] = None) -> float:
+def _csv_mtime(settings: Settings | None = None) -> float:
     """Max mtime of the source CSVs -- any refresh invalidates cache.
 
     Memoised at 1-second TTL so a single ``/generate`` request that
@@ -143,14 +144,14 @@ def calibrate(
     demand_df: pd.DataFrame,
     route_code: str,
     *,
-    clamps: Optional[SafetyClamps] = None,
-    settings: Optional[Settings] = None,
-    corpus_median_customers: Optional[float] = None,
-    window_days: Optional[int] = None,
-    corpus_field_values: Optional[Dict[str, Iterable[float]]] = None,
-    source_weight_adjustments: Optional[Dict[str, float]] = None,
-    feedback_confidence: Optional[Dict[str, float]] = None,
-    as_of: Optional[pd.Timestamp] = None,
+    clamps: SafetyClamps | None = None,
+    settings: Settings | None = None,
+    corpus_median_customers: float | None = None,
+    window_days: int | None = None,
+    corpus_field_values: dict[str, Iterable[float]] | None = None,
+    source_weight_adjustments: dict[str, float] | None = None,
+    feedback_confidence: dict[str, float] | None = None,
+    as_of: pd.Timestamp | None = None,
 ) -> RouteCalibration:
     """Return a cached ``RouteCalibration`` for ``route_code``.
 
@@ -188,7 +189,7 @@ def calibrate(
 
 def _window_filter(
     customer_df: pd.DataFrame, window_days: int, clamps: SafetyClamps,
-) -> Tuple[pd.DataFrame, Dict[str, Any]]:
+) -> tuple[pd.DataFrame, dict[str, Any]]:
     """Trailing ``window_days`` filter; degenerate windows return the full
     frame with ``fallback=True`` in the meta dict."""
     if customer_df.empty or "TrxDate" not in customer_df.columns:
@@ -252,7 +253,7 @@ def _sanity_clamp(
     field_name: str,
     *,
     clamps: SafetyClamps,
-) -> Tuple[float, Dict[str, Any]]:
+) -> tuple[float, dict[str, Any]]:
     """Clamp outlier ``route_value`` to ``sanity_clamp_percentile`` of the
     corpus when |z| > ``sanity_clamp_zscore``. Small/degenerate corpora
     are a no-op."""
@@ -296,12 +297,12 @@ def _compute(
     c: SafetyClamps,
     *,
     window_days: int,
-    corpus_median_customers: Optional[float] = None,
-    corpus_field_values: Optional[Dict[str, Iterable[float]]] = None,
-    source_weight_adjustments: Optional[Dict[str, float]] = None,
-    feedback_confidence: Optional[Dict[str, float]] = None,
+    corpus_median_customers: float | None = None,
+    corpus_field_values: dict[str, Iterable[float]] | None = None,
+    source_weight_adjustments: dict[str, float] | None = None,
+    feedback_confidence: dict[str, float] | None = None,
 ) -> RouteCalibration:
-    derived: Dict[str, Any] = {}
+    derived: dict[str, Any] = {}
 
     # Rolling window applied up-front; everything below uses windowed.
     windowed, window_meta = _window_filter(customer_df, window_days, c)
@@ -473,7 +474,7 @@ def _compute(
     }
 
     # Anti-overfit sanity clamp against corpus distributions.
-    sanity_meta: Dict[str, Any] = {}
+    sanity_meta: dict[str, Any] = {}
     if corpus_field_values:
         for name, current in (
             ("frequency_floor", frequency_floor),
@@ -527,17 +528,17 @@ def _compute(
 
 def _basket_min_confidence(
     customer_df: pd.DataFrame, c: SafetyClamps,
-) -> Tuple[float, Any]:
+) -> tuple[float, Any]:
     """P60 of observed per-route co-occurrence confidences, clamped."""
     if customer_df.empty:
         return (
             _clamp(0.5, c.basket_min_confidence_min, c.basket_min_confidence_max),
             "empty -> midpoint",
         )
-    cust_items: Dict[str, set] = {}
+    cust_items: dict[str, set] = {}
     for (cust, item) in customer_df[["CustomerCode", "ItemCode"]].itertuples(index=False):
         cust_items.setdefault(str(cust), set()).add(str(item))
-    item_customers: Dict[str, set] = {}
+    item_customers: dict[str, set] = {}
     for cust, items in cust_items.items():
         for it in items:
             item_customers.setdefault(it, set()).add(cust)
@@ -569,8 +570,8 @@ def _basket_min_confidence(
 
 
 def _tier_cuts(
-    customer_df: pd.DataFrame, c: SafetyClamps, derived: Dict[str, Any]
-) -> Dict[str, float]:
+    customer_df: pd.DataFrame, c: SafetyClamps, derived: dict[str, Any]
+) -> dict[str, float]:
     """Quantile-based tier thresholds (0-100 priority scale)."""
     if customer_df.empty:
         cuts = {
@@ -628,7 +629,7 @@ def _median_cycle_days(customer_df: pd.DataFrame) -> int:
     return int(np.median(gaps))
 
 
-def classify_tier(score: float, cuts: Dict[str, float]) -> str:
+def classify_tier(score: float, cuts: dict[str, float]) -> str:
     """Classify a 0-100 priority score using calibrated cuts."""
     if score >= cuts["must_stock"]:
         return "MUST_STOCK"

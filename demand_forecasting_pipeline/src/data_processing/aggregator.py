@@ -138,7 +138,7 @@ def fill_missing_periods(df, group_keys, date_col, target_col, freq, fill_value=
         g.index.name = date_col
         if add_activity_flag:
             g["activity_flag"] = g[target_col].notna().astype(int)
-        for k, v in zip(group_keys, ensure_tuple(keys)):
+        for k, v in zip(group_keys, ensure_tuple(keys), strict=False):
             g[k] = v
         g[target_col] = g[target_col].fillna(fill_value)
         # ffill carries the last-known price forward; bfill covers the

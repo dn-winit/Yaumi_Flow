@@ -25,7 +25,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -161,7 +160,7 @@ def load_pair_origins(
     against the runtime list so a config rename surfaces loudly rather
     than silently applying the wrong origin map."""
     p = Path(path)
-    with open(p, "r", encoding="utf-8") as fh:
+    with open(p, encoding="utf-8") as fh:
         payload = json.load(fh)
     saved = list(payload.get("group_keys") or [])
     if saved != list(expected_group_keys):
@@ -192,7 +191,7 @@ def add_temporal_features(
     *,
     group_keys: list[str] | None = None,
     granularity: str = "D",
-    pair_origins: Optional[pd.DataFrame] = None,
+    pair_origins: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Emit temporal features listed in ``cfg['components']`` that are valid
     at the current granularity. Unknown / out-of-scope components are

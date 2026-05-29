@@ -81,7 +81,7 @@ class Router:
         class_menus: dict[str, list[str]],
         *,
         known_signals: set[str] | None = None,
-    ) -> "Router":
+    ) -> Router:
         cfg = cfg or {}
         raw_rules = cfg.get("rules") or []
         rules = [Rule.from_dict(r) for r in raw_rules]

@@ -6,7 +6,7 @@ In the service layer so retrain_scheduler can reuse it without route->service in
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Optional
+from typing import TYPE_CHECKING
 
 import pandas as pd
 
@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger(__name__)
 
 
-def compute_forecast_summary(svc: ArtifactService) -> "ForecastSummaryResponse":
+def compute_forecast_summary(svc: ArtifactService) -> ForecastSummaryResponse:
     """KPI payload for the Pipeline page; canonical class-aware composite shared with drift."""
     # Lazy import to avoid circular dep.
     from demand_forecasting_pipeline.api.schemas import ForecastSummaryResponse
@@ -36,7 +36,7 @@ def compute_forecast_summary(svc: ArtifactService) -> "ForecastSummaryResponse":
 
     class_summary = svc.get_class_summary()
     raw_total = class_summary.get("total_pairs")
-    total_pairs: Optional[int] = (
+    total_pairs: int | None = (
         int(raw_total) if isinstance(raw_total, int) and raw_total > 0 else None
     )
     classes = {str(k): int(v) for k, v in class_summary.get("classes", {}).items()}
@@ -119,7 +119,7 @@ def _build_training_overview(svc: ArtifactService, test_df: pd.DataFrame) -> dic
     return overview
 
 
-def _last_demand_forecast_push(svc: ArtifactService) -> Optional[str]:
+def _last_demand_forecast_push(svc: ArtifactService) -> str | None:
     """MAX(created_at) on the demand-forecast table as ISO; None if DB unreachable / empty.
 
     Reads the table FQN from settings (``demand_table``) rather than a string

@@ -24,9 +24,10 @@ import os
 import sys
 import time
 import uuid
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import structlog
 from prometheus_client import Counter, Gauge, Histogram

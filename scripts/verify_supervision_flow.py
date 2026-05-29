@@ -14,17 +14,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from dotenv import load_dotenv
+
 load_dotenv()
 
 from sales_supervision.config.settings import get_settings as ss_settings
 from sales_supervision.core.session import SessionManager
 from sales_supervision.models.schemas import (
-    ScoreResult, Session, SessionCustomer, SessionItem,
+    ScoreResult,
+    Session,
+    SessionCustomer,
+    SessionItem,
 )
 from sales_supervision.services.auto_visit_service import (
-    AutoVisitService, _SessionCacheEntry,
+    AutoVisitService,
+    _SessionCacheEntry,
 )
-
 
 # ----------------------------------------------------------------------
 # Stubs that capture calls instead of touching real I/O.
@@ -215,7 +219,7 @@ def main() -> int:
     assert u_items[0]["tier"] == "UNPLANNED"
     assert u_items[0]["recommended_qty"] == 0
     assert u_items[0]["actual_qty"] == 12
-    print(f"    PASS: customer LLM fires for both, unplanned tagged tier=UNPLANNED, recommended_qty=0, actual_qty=12")
+    print("    PASS: customer LLM fires for both, unplanned tagged tier=UNPLANNED, recommended_qty=0, actual_qty=12")
 
     # 3. Route LLM payload split
     print("\n[3] _fire_route_llm -- payload shape with is_planned flag")

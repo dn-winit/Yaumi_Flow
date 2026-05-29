@@ -8,7 +8,6 @@ and never mutates session state.
 from __future__ import annotations
 
 import logging
-from typing import Dict, Optional
 
 from sales_supervision.config.constants import SupervisionConstants
 from sales_supervision.core.scoring import ScoringEngine
@@ -20,7 +19,7 @@ logger = logging.getLogger(__name__)
 class VisitProcessor:
     """Processes a customer visit: apply actuals + score."""
 
-    def __init__(self, constants: Optional[SupervisionConstants] = None) -> None:
+    def __init__(self, constants: SupervisionConstants | None = None) -> None:
         c = constants or SupervisionConstants()
         self._scorer = ScoringEngine(c)
 
@@ -28,7 +27,7 @@ class VisitProcessor:
         self,
         session: Session,
         customer_code: str,
-        actual_sales: Dict[str, int],
+        actual_sales: dict[str, int],
     ) -> VisitResult:
         """
         Process a visit:
@@ -46,7 +45,7 @@ class VisitProcessor:
             customer.visit_sequence = session.visit_sequence_counter + 1
 
         # Actuals come from YaumiLive via data_import; was_edited stays default (no manual override).
-        unsold: Dict[str, int] = {}
+        unsold: dict[str, int] = {}
         for item in customer.items:
             qty = actual_sales.get(item.item_code, 0)
             item.actual_qty = qty

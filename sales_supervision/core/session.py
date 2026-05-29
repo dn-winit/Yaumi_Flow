@@ -5,7 +5,7 @@ Session manager -- creates, loads, and manages supervision sessions.
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from sales_supervision.config.constants import SupervisionConstants
 from sales_supervision.core.visit_processor import VisitProcessor
@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 class SessionManager:
     """Creates and manages supervision sessions."""
 
-    def __init__(self, constants: Optional[SupervisionConstants] = None) -> None:
+    def __init__(self, constants: SupervisionConstants | None = None) -> None:
         self._c = constants or SupervisionConstants()
         self._processor = VisitProcessor(self._c)
 
@@ -35,7 +35,7 @@ class SessionManager:
         self,
         route_code: str,
         date: str,
-        recommendations: List[Dict[str, Any]],
+        recommendations: list[dict[str, Any]],
     ) -> Session:
         """
         Build a Session from recommendation records.
@@ -47,7 +47,7 @@ class SessionManager:
         # Deterministic sid per (route, date) -- makes route/customer/item upserts idempotent across page reloads.
         session_id = f"{route_code}_{date}"
 
-        customers: Dict[str, SessionCustomer] = {}
+        customers: dict[str, SessionCustomer] = {}
 
         for rec in recommendations:
             ccode = str(rec.get("CustomerCode", ""))
@@ -94,7 +94,7 @@ class SessionManager:
     def hydrate_saved_visits(
         self,
         session: Session,
-        saved: Dict[str, Any],
+        saved: dict[str, Any],
     ) -> int:
         """Layer persisted visit state (actuals + score + alsoBought) onto a fresh session.
 
@@ -133,7 +133,7 @@ class SessionManager:
             also_bought = sv.get("alsoBought") or []
             existing_codes = {it.item_code for it in cust.items}
             for ab in also_bought:
-                code = str((ab.get("item_code") or "")).strip()
+                code = str(ab.get("item_code") or "").strip()
                 qty = int(ab.get("qty", 0) or 0)
                 if not code or qty <= 0 or code in existing_codes:
                     continue
@@ -169,7 +169,7 @@ class SessionManager:
         self,
         session: Session,
         customer_code: str,
-        actual_sales: Dict[str, int],
+        actual_sales: dict[str, int],
     ) -> VisitResult:
         return self._processor.process(session, customer_code, actual_sales)
 
@@ -184,9 +184,9 @@ class SessionManager:
     # Rebuild session from stored data
     # ------------------------------------------------------------------
 
-    def rebuild_session(self, data: Dict[str, Any]) -> Session:
+    def rebuild_session(self, data: dict[str, Any]) -> Session:
         """Reconstruct a Session from stored dict (loaded from file/DB)."""
-        customers: Dict[str, SessionCustomer] = {}
+        customers: dict[str, SessionCustomer] = {}
 
         for ccode, cdata in data.get("customers", {}).items():
             items = [

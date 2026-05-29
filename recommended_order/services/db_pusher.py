@@ -5,13 +5,15 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
 # Shared AIML pool factory so a single semaphore bounds connections across services.
 from common.db_pool import (
     FATAL_DB_ERRORS as _POOL_FATAL_ERRORS,
+)
+from common.db_pool import (
     get_pool,
 )
 from recommended_order.config.settings import Settings, get_settings
@@ -68,7 +70,7 @@ _LOCK_HINTS_RE = __import__("re").compile(r"^[A-Z_, ]+$")
 _ISOLATION_RE = __import__("re").compile(r"^[A-Z ]+$")
 
 
-def _dataframe_to_records(df: pd.DataFrame, cols: List[str]) -> List[tuple]:
+def _dataframe_to_records(df: pd.DataFrame, cols: list[str]) -> list[tuple]:
     """Project ``df`` to ``cols`` as a list of plain Python tuples for
     ``cursor.executemany``; NaN -> None, numpy scalars unboxed via .item()."""
     return [
@@ -80,7 +82,7 @@ def _dataframe_to_records(df: pd.DataFrame, cols: List[str]) -> List[tuple]:
 class DbPusher:
     """Pushes recommendation data to yf_recommended_orders."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._db = self._s.db
 
@@ -99,13 +101,13 @@ class DbPusher:
             autocommit=False,
         )
 
-    def push_dataframe(self, df: pd.DataFrame, date: str, route_code: str) -> Dict[str, Any]:
+    def push_dataframe(self, df: pd.DataFrame, date: str, route_code: str) -> dict[str, Any]:
         """Push a DataFrame directly (called after generation)."""
         if not self.available:
             return {"success": False, "error": "DB not configured"}
         return self._push(df, date, route_code)
 
-    def _push(self, df: pd.DataFrame, date: str, route_code: Optional[str]) -> Dict[str, Any]:
+    def _push(self, df: pd.DataFrame, date: str, route_code: str | None) -> dict[str, Any]:
         table = self._s.recommendation_table
         t0 = time.time()
 
@@ -129,7 +131,7 @@ class DbPusher:
         # DELETE+chunked INSERT in one txn so partial INSERT failures roll
         # back the DELETE; re-runs are idempotent on the (date[, route]) key.
         delete_sql = _DELETE_SQL_BASE.format(table=table, hint_clause=hint_clause)
-        delete_params: List[Any] = [date, date]
+        delete_params: list[Any] = [date, date]
         if route_code:
             delete_sql += _DELETE_ROUTE_SUFFIX
             delete_params.append(route_code)
@@ -138,7 +140,7 @@ class DbPusher:
         chunk = self._db.executemany_chunk_size
 
         pool = self._pool()
-        last_error: Optional[str] = None
+        last_error: str | None = None
         for attempt in range(1, self._db.retry_attempts + 1):
             try:
                 # pool.acquire() releases the semaphore + closes the conn on exit.

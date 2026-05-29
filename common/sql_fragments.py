@@ -5,7 +5,6 @@ return-netting CASE clause stays byte-identical between
 """
 from __future__ import annotations
 
-
 # Per-row net-sold CASE clause. Drops non-positive gross rows and clamps
 # the net at 0 so an over-return can't push one line negative and mask
 # other lines in the same GROUP BY. Fixed aliases: ``s`` outer invoice

@@ -8,9 +8,9 @@ import csv
 import logging
 import threading
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from recommended_order.config.constants import SafetyClamps
 
@@ -41,7 +41,7 @@ class MetricsCsvSink:
         self._lock = threading.Lock()
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def append(self, rows: List[Dict[str, Any]]) -> None:
+    def append(self, rows: list[dict[str, Any]]) -> None:
         if not rows:
             return
         with self._lock:
@@ -82,7 +82,7 @@ class MetricsCsvSink:
 class _DurationRing:
     """Rolling window of the last N generation durations (seconds)."""
     capacity: int = 5
-    values: List[float] = field(default_factory=list)
+    values: list[float] = field(default_factory=list)
 
     def add(self, secs: float) -> None:
         self.values.append(float(secs))
@@ -99,10 +99,10 @@ class LastGenerationTracker:
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._last_run_at: Optional[str] = None
-        self._last_target_date: Optional[str] = None
+        self._last_run_at: str | None = None
+        self._last_target_date: str | None = None
         # route -> { "generated_at": iso, "gens": [...], "calibration": {...} }
-        self._routes: Dict[str, Dict[str, Any]] = {}
+        self._routes: dict[str, dict[str, Any]] = {}
         self._durations = _DurationRing()
 
     def record(
@@ -110,12 +110,12 @@ class LastGenerationTracker:
         *,
         route_code: str,
         target_date: str,
-        gen_metrics: List[Dict[str, Any]],
-        calibration_summary: Dict[str, Any],
+        gen_metrics: list[dict[str, Any]],
+        calibration_summary: dict[str, Any],
         duration_seconds: float,
     ) -> None:
         # UTC-aware ISO so client parsers see an explicit offset.
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         with self._lock:
             self._last_run_at = now
             self._last_target_date = target_date
@@ -128,7 +128,7 @@ class LastGenerationTracker:
             }
             self._durations.add(duration_seconds)
 
-    def snapshot(self) -> Dict[str, Any]:
+    def snapshot(self) -> dict[str, Any]:
         with self._lock:
             return {
                 "last_run_at": self._last_run_at,
@@ -137,7 +137,7 @@ class LastGenerationTracker:
                 "avg_duration_seconds_last_n": round(self._durations.avg, 3),
             }
 
-    def route_last_timestamps(self) -> Dict[str, str]:
+    def route_last_timestamps(self) -> dict[str, str]:
         with self._lock:
             return {rc: meta["generated_at"] for rc, meta in self._routes.items()}
 
@@ -148,8 +148,8 @@ class LastGenerationTracker:
 
 # Module-level singletons (injected via dependencies).
 
-_TRACKER: Optional[LastGenerationTracker] = None
-_CSV_SINK: Optional[MetricsCsvSink] = None
+_TRACKER: LastGenerationTracker | None = None
+_CSV_SINK: MetricsCsvSink | None = None
 _SINGLETON_LOCK = threading.Lock()
 
 
@@ -162,7 +162,7 @@ def get_last_generation_tracker() -> LastGenerationTracker:
 
 
 def get_metrics_csv_sink(
-    shared_data_dir: str, clamps: Optional[SafetyClamps] = None,
+    shared_data_dir: str, clamps: SafetyClamps | None = None,
 ) -> MetricsCsvSink:
     global _CSV_SINK
     c = clamps or SafetyClamps()
@@ -180,7 +180,7 @@ def log_gen_metrics_line(
     gen: str,
     candidates: int,
     kept: int,
-    extras: Optional[Dict[str, Any]] = None,
+    extras: dict[str, Any] | None = None,
 ) -> None:
     """Emit the ``gen_metrics`` key=value log line parsed by dashboards."""
     parts = [

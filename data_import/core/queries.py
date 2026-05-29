@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import List, Optional
-
 from common.sql_fragments import NET_SOLD_CASE_SQL, RETURNS_SUBQUERY_BODY_SQL
 from data_import.config.settings import Settings, get_settings
 
@@ -11,10 +9,10 @@ from data_import.config.settings import Settings, get_settings
 class QueryBuilder:
     """Builds SQL for customer data, journey plan, and sales recent."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
 
-    def _route_ph(self, routes: List[str]) -> str:
+    def _route_ph(self, routes: list[str]) -> str:
         return ",".join("?" for _ in routes)
 
     # ------------------------------------------------------------------
@@ -23,9 +21,9 @@ class QueryBuilder:
 
     def customer_data(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         """``since_date`` -> incremental (TrxDate > date); else full refresh
         over last ``lookback_days``."""
@@ -74,9 +72,9 @@ class QueryBuilder:
 
     def journey_plan(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        window_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        window_days: int | None = None,
     ) -> tuple[str, list]:
         # Explicit columns pin the view-schema contract; order matches the
         # downstream CSV header so read_csv consumers stay byte-stable.
@@ -120,9 +118,9 @@ class QueryBuilder:
 
     def demand_forecast(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
@@ -170,9 +168,9 @@ class QueryBuilder:
 
     def sales_transactions(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
@@ -218,9 +216,9 @@ class QueryBuilder:
 
     def closing_stock(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
@@ -255,9 +253,9 @@ class QueryBuilder:
 
     def load_allocation(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
@@ -292,9 +290,9 @@ class QueryBuilder:
 
     def sales_returns(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)
@@ -342,7 +340,7 @@ class QueryBuilder:
     # (InvoiceRef IS NULL) flow through ``sales_returns`` instead.
     # Line-level CASE floors at 0 so an over-return can't go negative.
 
-    def _date_clause(self, *, alias: str, since_date: Optional[str],
+    def _date_clause(self, *, alias: str, since_date: str | None,
                      lookback_days: int) -> tuple[str, list]:
         """Date-window WHERE fragment shared by outer query + returns
         subquery so both bound the scan to the same window."""
@@ -355,9 +353,9 @@ class QueryBuilder:
 
     def sales_recent(
         self,
-        routes: Optional[List[str]] = None,
-        since_date: Optional[str] = None,
-        lookback_days: Optional[int] = None,
+        routes: list[str] | None = None,
+        since_date: str | None = None,
+        lookback_days: int | None = None,
     ) -> tuple[str, list]:
         routes = routes or self._s.route_codes
         ph = self._route_ph(routes)

@@ -24,14 +24,14 @@ Invariants covered:
 from __future__ import annotations
 
 import re
+from collections.abc import Iterable
 from datetime import date, timedelta
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 import pytest
 
 from tests.common.helpers import assert_ok, assert_status
-
 
 # ---------------------------------------------------------------------------
 # Helpers local to this file
@@ -362,7 +362,9 @@ def test_pipelinerun_default_construction_is_safe() -> None:
        branch never instantiates anything.
     """
     import dataclasses
+
     import pytest as _pytest
+
     from demand_forecasting_pipeline.services.pipeline_service import (
         PipelineRun,
     )
@@ -386,6 +388,7 @@ def test_pipelinerun_default_construction_is_safe() -> None:
     # ``PipelineRun()`` as a dict-get default. Grep the service module
     # itself so a future paste of the old pattern fails the test.
     import inspect
+
     from demand_forecasting_pipeline.services import pipeline_service as _ps
     src = inspect.getsource(_ps)
     # Allow the pattern inside comments / docstrings; flag only code.

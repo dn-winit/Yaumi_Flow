@@ -5,43 +5,49 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
+from ..data_processing.aggregator import build_panel
+from ..data_processing.anomaly import detect_suspicious_zeros
+from ..data_processing.cleaner import (
+    apply_outlier_bounds,
+    clip_negative_to_zero,
+    fit_outlier_bounds,
+)
+from ..data_processing.flags import FLAG_COLUMNS as _FLAG_COLUMNS
+from ..data_processing.lifecycle import assign_lifecycle_flags
+from ..data_processing.loader import load_raw
+from ..data_processing.quality import build_report as build_data_quality_report
+from ..data_processing.split_audit import audit_split
+from ..data_processing.split_audit import summarise as summarise_split_audit
+from ..data_processing.splitter import time_based_split
+from ..data_processing.validator import validate_input
+from ..evaluation.metrics import (
+    composite_kwargs_from_cfg,
+    composite_summary,
+    compute_all,
+)
+from ..feature_engineering.builder import build_features
+from ..feature_engineering.classifier import classify_dataset
+from ..feature_engineering.explainability import compute_pair_explainability
+from ..models.ensemble import weighted_average_ensemble, weights_from_metric
+from ..models.registry import build_model, is_available
+from ..routing import Route, Router, build_pair_signals
+from ..tuning.optuna_tuner import tune_model
 from ..utils.config_loader import (
     ensure_dirs,
     load_config,
     resolve_dtypes,
     resolve_recursive_iterations,
 )
-from ..utils.logger import get_logger
-from ._metadata import build_training_metadata
 from ..utils.io_utils import (
-    ceil_int_columns, save_json, save_pickle, save_dataframe, pair_mask,
+    ceil_int_columns,
+    pair_mask,
+    save_dataframe,
+    save_json,
+    save_pickle,
 )
-from ..utils.time_utils import period_offset, build_date_range
-from ..data_processing.loader import load_raw
-from ..data_processing.aggregator import build_panel
-from ..data_processing.cleaner import (
-    apply_outlier_bounds,
-    clip_negative_to_zero,
-    fit_outlier_bounds,
-)
-from ..data_processing.splitter import time_based_split
-from ..data_processing.validator import validate_input
-from ..data_processing.lifecycle import assign_lifecycle_flags
-from ..data_processing.anomaly import detect_suspicious_zeros
-from ..data_processing.quality import build_report as build_data_quality_report
-from ..data_processing.split_audit import audit_split, summarise as summarise_split_audit
-from ..feature_engineering.classifier import classify_dataset
-from ..feature_engineering.explainability import compute_pair_explainability
-from ..feature_engineering.builder import build_features
-from ..models.registry import build_model, is_available
-from ..models.ensemble import weighted_average_ensemble, weights_from_metric
-from ..tuning.optuna_tuner import tune_model
-from ..evaluation.metrics import (
-    compute_all, composite_summary, composite_kwargs_from_cfg,
-)
-from ..data_processing.flags import FLAG_COLUMNS as _FLAG_COLUMNS
-from ..routing import Route, Router, build_pair_signals
-
+from ..utils.logger import get_logger
+from ..utils.time_utils import build_date_range, period_offset
+from ._metadata import build_training_metadata
 
 # Flag columns must never leak into the feature matrix. They encode
 # train-time labels whose inference-time values would be either stale
@@ -293,6 +299,7 @@ def run_training(config_path, on_step=None):
     # log line + Prometheus histogram observation share a correlation id.
     import time as _time
     import uuid as _uuid
+
     from demand_forecasting_pipeline.observability import (
         PIPELINE_STEP_DURATION,
     )
@@ -505,7 +512,8 @@ def run_training(config_path, on_step=None):
     te_artifact: tuple[pd.DataFrame, float] | None = None
     if te_cfg.get("enabled", False):
         from ..feature_engineering.target_encoding import (
-            compute_target_encoding, save_target_encoding,
+            compute_target_encoding,
+            save_target_encoding,
         )
         te_smoothing = int(te_cfg.get("smoothing", 10))
         te_df_frozen, te_global_mean = compute_target_encoding(
@@ -532,7 +540,8 @@ def run_training(config_path, on_step=None):
     # inline min only for pairs that didn't exist at training (cold
     # start).
     from ..feature_engineering.temporal_features import (
-        fit_pair_origins, save_pair_origins,
+        fit_pair_origins,
+        save_pair_origins,
     )
     pair_origins_df = fit_pair_origins(agg, group_keys, date_col)
     if not pair_origins_df.empty:
@@ -822,13 +831,13 @@ def run_training(config_path, on_step=None):
     # to run. Per-pair correctness is unaffected (each pair maps to one
     # class deterministically), but reproducibility audits get cleaner diffs.
     for cls in sorted(classes_df["class"].unique()):
-        logger.info("=== Class: {} ===".format(cls))
+        logger.info(f"=== Class: {cls} ===")
         cls_pairs = classes_df[classes_df["class"] == cls].reset_index()[group_keys]
         cls_train = train.merge(cls_pairs, on=group_keys, how="inner")
         cls_val = val.merge(cls_pairs, on=group_keys, how="inner") if not val.empty else val
         cls_test = test.merge(cls_pairs, on=group_keys, how="inner")
         if cls_train.empty or cls_test.empty:
-            logger.info("Skipping class {} (empty)".format(cls))
+            logger.info(f"Skipping class {cls} (empty)")
             continue
 
         cls_feature_cols = _feature_columns(cls_train, group_keys, date_col, target_col)
@@ -849,7 +858,7 @@ def run_training(config_path, on_step=None):
             if not models_to_run:
                 logger.info("Class %s: no models after route filter - using fallback", cls)
                 models_to_run = [m for m in fallback if is_available(m)]
-        logger.info("Models for {}: {}".format(cls, models_to_run))
+        logger.info(f"Models for {cls}: {models_to_run}")
 
         # Class-level tuning decision aggregated from per-pair routes.
         class_skip_tuning, class_hp_mult = _tuning_for_class(cls)
@@ -933,7 +942,7 @@ def run_training(config_path, on_step=None):
                 cls_test_predictions[m_name] = test_merged
 
                 m_metrics = compute_all(test_merged[target_col].values, test_merged["prediction"].values, metrics_names)
-                logger.info("{} {} test metrics: {}".format(cls, m_name, m_metrics))
+                logger.info(f"{cls} {m_name} test metrics: {m_metrics}")
                 cls_class_metric[m_name] = m_metrics.get(_resolve_selection_metric(selection_metric, cls))
                 # ``regime=direct``: 1-step direct prediction over the test
                 # window. The recursive multi-step regime is scored by
@@ -973,10 +982,10 @@ def run_training(config_path, on_step=None):
                             cls, m_name, exc,
                         )
 
-                model_path = os.path.join(cfg["paths"]["models_dir"], "{}_{}.pkl".format(cls, m_name))
+                model_path = os.path.join(cfg["paths"]["models_dir"], f"{cls}_{m_name}.pkl")
                 try:
                     save_pickle(mdl_full, model_path)
-                    artifacts["models_path"]["{}__{}".format(cls, m_name)] = model_path
+                    artifacts["models_path"][f"{cls}__{m_name}"] = model_path
                 except Exception as e:
                     # Pickle failure means the production model is unrecoverable
                     # for this (class, model). Log as ERROR so monitoring fires
@@ -1029,7 +1038,7 @@ def run_training(config_path, on_step=None):
             test_merged["prediction"] = test_merged["prediction"].fillna(0.0)
             cls_test_predictions["ensemble"] = test_merged
             m_metrics = compute_all(test_merged[target_col].values, test_merged["prediction"].values, metrics_names)
-            logger.info("{} ensemble test metrics: {}".format(cls, m_metrics))
+            logger.info(f"{cls} ensemble test metrics: {m_metrics}")
             metrics_records.append({
                 "class": cls, "model": "ensemble", "regime": "direct", **m_metrics,
             })
@@ -1046,9 +1055,9 @@ def run_training(config_path, on_step=None):
 
             save_json(
                 {k: float(v) for k, v in (weights or {}).items()},
-                os.path.join(cfg["paths"]["models_dir"], "{}_ensemble_weights.json".format(cls)),
+                os.path.join(cfg["paths"]["models_dir"], f"{cls}_ensemble_weights.json"),
             )
-            artifacts["models_path"]["{}__ensemble".format(cls)] = "weights"
+            artifacts["models_path"][f"{cls}__ensemble"] = "weights"
 
         # Class-level winner (used as fallback for pairs with no test rows or
         # when per-pair selection isn't active).
@@ -1074,7 +1083,7 @@ def run_training(config_path, on_step=None):
 
         if per_pair_selection and len(selection_source) >= 2:
             sel_label = "validation" if can_select_on_val else "test"
-            logger.info("Per-pair model selection for {} on {} set".format(cls, sel_label))
+            logger.info(f"Per-pair model selection for {cls} on {sel_label} set")
             pair_best = _per_pair_evaluate(
                 selection_source, group_keys, date_col, target_col, _resolve_selection_metric(selection_metric, cls),
                 pair_routes=pair_routes,
@@ -1097,7 +1106,7 @@ def run_training(config_path, on_step=None):
                 pair_model_lookup.append(row)
             unscored = all_class_pair_tuples - set(pair_best.keys())
         else:
-            logger.info("Class-winner selection for {}: {}".format(cls, class_winner))
+            logger.info(f"Class-winner selection for {cls}: {class_winner}")
             best_pred = (
                 cls_test_predictions[class_winner].copy()
                 if class_winner in cls_test_predictions else pd.DataFrame()
@@ -1331,7 +1340,7 @@ def run_training(config_path, on_step=None):
                             cls, exc,
                         )
 
-                save_pickle(qi_model, os.path.join(cfg["paths"]["models_dir"], "quantile_{}.pkl".format(cls)))
+                save_pickle(qi_model, os.path.join(cfg["paths"]["models_dir"], f"quantile_{cls}.pkl"))
             except Exception as e:
                 # Quantile model failure means this class's prediction
                 # intervals will fall back to the unconformalized base model

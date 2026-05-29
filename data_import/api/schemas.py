@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -10,7 +10,7 @@ from pydantic import BaseModel, Field
 class ImportRequest(BaseModel):
     dataset: str = Field(description="customer_data | journey_plan | sales_recent | demand_forecast")
     mode: str = Field(default="incremental", description="incremental | full")
-    lookback_days: Optional[int] = Field(
+    lookback_days: int | None = Field(
         default=None,
         ge=1,
         le=730,
@@ -20,7 +20,7 @@ class ImportRequest(BaseModel):
 
 class ImportAllRequest(BaseModel):
     mode: str = Field(default="incremental", description="incremental | full")
-    lookback_days: Optional[int] = Field(default=None, ge=1, le=730)
+    lookback_days: int | None = Field(default=None, ge=1, le=730)
 
 
 class ImportResponse(BaseModel):
@@ -37,21 +37,21 @@ class ImportResponse(BaseModel):
 
 class ImportAllResponse(BaseModel):
     success: bool
-    results: Dict[str, Any]
+    results: dict[str, Any]
 
 
 class DatasetInfo(BaseModel):
     exists: bool
     rows: int = 0
-    first_date: Optional[str] = None
-    last_date: Optional[str] = None
+    first_date: str | None = None
+    last_date: str | None = None
     file: str = ""
     size_mb: float = 0.0
 
 
 class StatusResponse(BaseModel):
     success: bool
-    datasets: Dict[str, DatasetInfo]
+    datasets: dict[str, DatasetInfo]
 
 
 class HealthResponse(BaseModel):
@@ -62,10 +62,10 @@ class HealthResponse(BaseModel):
 
 
 class DataSummaryResponse(BaseModel):
-    datasets: Dict[str, DatasetInfo]
+    datasets: dict[str, DatasetInfo]
     total_rows: int
     db_connected: bool
-    last_updated: Optional[str] = None
+    last_updated: str | None = None
 
 
 # EDA response envelopes -- deep payloads are Dict/List of Any so additive
@@ -75,55 +75,55 @@ class DataSummaryResponse(BaseModel):
 
 class _AvailableEnvelope(BaseModel):
     available: bool
-    message: Optional[str] = None
+    message: str | None = None
 
 
 class LastActiveDateResponse(BaseModel):
     """Most recent date with sales activity in sales_recent.csv. Used to
     seed default reporting periods that land on a date with data."""
     available: bool
-    date: Optional[str] = None
+    date: str | None = None
 
 
 class SalesOverviewResponse(_AvailableEnvelope):
     # Echo of the (start_date, end_date) the server filtered on (ISO YYYY-MM-DD).
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    totals: Optional[Dict[str, Any]] = None
-    daily_trend: Optional[List[Dict[str, Any]]] = None
-    top_routes: Optional[List[Dict[str, Any]]] = None
-    categories: Optional[List[Dict[str, Any]]] = None
+    start_date: str | None = None
+    end_date: str | None = None
+    totals: dict[str, Any] | None = None
+    daily_trend: list[dict[str, Any]] | None = None
+    top_routes: list[dict[str, Any]] | None = None
+    categories: list[dict[str, Any]] | None = None
 
 
 class BusinessKpisResponse(_AvailableEnvelope):
     # Echo of the requested window (see SalesOverviewResponse).
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    anchor_date: Optional[str] = None
-    working_days: Optional[int] = None
-    covered_routes: Optional[int] = None
-    covered_days: Optional[int] = None
-    total_revenue: Optional[Dict[str, Any]] = None
-    total_volume: Optional[Dict[str, Any]] = None
-    unique_items: Optional[Dict[str, Any]] = None
-    lost_opportunity: Optional[Dict[str, Any]] = None
+    start_date: str | None = None
+    end_date: str | None = None
+    anchor_date: str | None = None
+    working_days: int | None = None
+    covered_routes: int | None = None
+    covered_days: int | None = None
+    total_revenue: dict[str, Any] | None = None
+    total_volume: dict[str, Any] | None = None
+    unique_items: dict[str, Any] | None = None
+    lost_opportunity: dict[str, Any] | None = None
 
 
 class TrimmedFilterSelections(BaseModel):
     """Selection vector with codes absent from the cascaded option sets
     dropped; frontend applies verbatim so stale codes can't silently
     filter results to nothing."""
-    warehouse_codes: List[str] = Field(default_factory=list)
-    route_codes: List[str] = Field(default_factory=list)
-    category_codes: List[str] = Field(default_factory=list)
-    item_codes: List[str] = Field(default_factory=list)
+    warehouse_codes: list[str] = Field(default_factory=list)
+    route_codes: list[str] = Field(default_factory=list)
+    category_codes: list[str] = Field(default_factory=list)
+    item_codes: list[str] = Field(default_factory=list)
 
 
 class FilterDimensionsResponse(BaseModel):
-    warehouses: List[Dict[str, Any]] = Field(default_factory=list)
-    routes: List[Dict[str, Any]] = Field(default_factory=list)
-    categories: List[Dict[str, Any]] = Field(default_factory=list)
-    items: List[Dict[str, Any]] = Field(default_factory=list)
+    warehouses: list[dict[str, Any]] = Field(default_factory=list)
+    routes: list[dict[str, Any]] = Field(default_factory=list)
+    categories: list[dict[str, Any]] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
     trimmed_selections: TrimmedFilterSelections = Field(
         default_factory=TrimmedFilterSelections,
     )
@@ -132,36 +132,36 @@ class FilterDimensionsResponse(BaseModel):
 class ItemCatalogResponse(BaseModel):
     available: bool
     count: int = 0
-    items: List[Dict[str, Any]] = Field(default_factory=list)
+    items: list[dict[str, Any]] = Field(default_factory=list)
 
 
 class ItemStatsResponse(_AvailableEnvelope):
-    item_code: Optional[str] = None
-    route_code: Optional[str] = None
-    anchor_date: Optional[str] = None
-    total_transactions: Optional[int] = None
-    windows: Optional[Dict[str, Any]] = None
+    item_code: str | None = None
+    route_code: str | None = None
+    anchor_date: str | None = None
+    total_transactions: int | None = None
+    windows: dict[str, Any] | None = None
 
 
 class LiveRouteSalesResponse(_AvailableEnvelope):
-    route_code: Optional[str] = None
-    date: Optional[str] = None
-    customers: List[Dict[str, Any]] = Field(default_factory=list)
-    fetched_at: Optional[str] = None
+    route_code: str | None = None
+    date: str | None = None
+    customers: list[dict[str, Any]] = Field(default_factory=list)
+    fetched_at: str | None = None
 
 
 class LiveCustomerSalesResponse(_AvailableEnvelope):
-    route_code: Optional[str] = None
-    customer_code: Optional[str] = None
-    date: Optional[str] = None
-    items: List[Dict[str, Any]] = Field(default_factory=list)
-    fetched_at: Optional[str] = None
+    route_code: str | None = None
+    customer_code: str | None = None
+    date: str | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    fetched_at: str | None = None
 
 
 class LiveVanCompositionResponse(_AvailableEnvelope):
     """Per-item van composition for one (route, date)."""
-    route_code: Optional[str] = None
-    date: Optional[str] = None
-    items: List[Dict[str, Any]] = Field(default_factory=list)
-    totals: Dict[str, Any] = Field(default_factory=dict)
-    fetched_at: Optional[str] = None
+    route_code: str | None = None
+    date: str | None = None
+    items: list[dict[str, Any]] = Field(default_factory=list)
+    totals: dict[str, Any] = Field(default_factory=dict)
+    fetched_at: str | None = None

@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -99,7 +99,7 @@ def build_report(
             )
 
     return DataQualityReport(
-        generated_at=datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+        generated_at=datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         input={
             **_target_stats(raw, target_col),
             "unique_pairs": _n_pairs(raw, group_keys),

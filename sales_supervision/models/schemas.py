@@ -5,7 +5,7 @@ Domain models -- pure data containers for supervision state.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -25,13 +25,13 @@ class SessionItem:
     frequency_percent: float = 0.0
     van_inventory_qty: int = 0
     # Original PascalCase rec from recommended_order; carries explainability fields verbatim.
-    raw: Dict[str, Any] = field(default_factory=dict)
+    raw: dict[str, Any] = field(default_factory=dict)
 
     @property
     def effective_recommended(self) -> int:
         return self.recommended_qty + self.adjustment
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         # Canonical PascalCase; dataclass fields first, then raw, then supervision runtime fields (winners).
         return {
             "ItemCode":              self.item_code,
@@ -51,7 +51,7 @@ class SessionItem:
             "WasEdited":            self.was_edited,
         }
 
-    def to_llm_payload(self) -> Dict[str, Any]:
+    def to_llm_payload(self) -> dict[str, Any]:
         """Canonical snake_case payload for llm_analytics.
 
         Single source of truth for the LLM-facing item shape -- both the
@@ -102,7 +102,7 @@ class ScoreResult:
 class SessionCustomer:
     customer_code: str
     customer_name: str = ""
-    items: List[SessionItem] = field(default_factory=list)
+    items: list[SessionItem] = field(default_factory=list)
     visited: bool = False
     visit_sequence: int = 0
     score: ScoreResult = field(default_factory=ScoreResult)
@@ -119,7 +119,7 @@ class SessionCustomer:
     def items_sold(self) -> int:
         return sum(1 for it in self.items if it.was_sold)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "customerCode": self.customer_code,
             "customerName": self.customer_name,
@@ -141,7 +141,7 @@ class Session:
     session_id: str
     route_code: str
     date: str
-    customers: Dict[str, SessionCustomer] = field(default_factory=dict)
+    customers: dict[str, SessionCustomer] = field(default_factory=dict)
     status: str = "active"  # active | closed
 
     @property
@@ -164,7 +164,7 @@ class Session:
     def visit_sequence_counter(self) -> int:
         return max((c.visit_sequence for c in self.customers.values() if c.visited), default=0)
 
-    def summary(self) -> Dict[str, Any]:
+    def summary(self) -> dict[str, Any]:
         """Wire-shaped summary for the live UI.
 
         ``customers_grouped`` and ``customer_tiles`` filter to items with effective_recommended > 0;
@@ -193,11 +193,11 @@ class Session:
         )
         visited_rec = _aggregated["total_recommended"]
         visited_act = _aggregated["total_actual"]
-        avg_score = _aggregated["avg_score"]
+        _aggregated["avg_score"]
 
         # Pre-shaped customer payload: filter qty>0 items and drop empty customers.
-        customers_grouped: List[Dict[str, Any]] = []
-        customer_tiles: List[Dict[str, Any]] = []
+        customers_grouped: list[dict[str, Any]] = []
+        customer_tiles: list[dict[str, Any]] = []
         unique_items: set[str] = set()
         total_units = 0
         for c in self.customers.values():
@@ -254,7 +254,7 @@ class Session:
             "visit_totals": visit_totals,
         }
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             **self.summary(),
             "customers": {k: v.to_dict() for k, v in self.customers.items()},
@@ -265,9 +265,9 @@ class Session:
 class VisitResult:
     customer_code: str
     score: ScoreResult
-    unsold_items: Dict[str, int] = field(default_factory=dict)
+    unsold_items: dict[str, int] = field(default_factory=dict)
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "customerCode": self.customer_code,
             "score": {"score": self.score.score, "coverage": self.score.coverage, "accuracy": self.score.accuracy},

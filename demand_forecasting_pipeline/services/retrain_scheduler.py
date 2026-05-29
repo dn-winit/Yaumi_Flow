@@ -9,13 +9,13 @@ import json
 import logging
 import math
 import os
-import tempfile
 import threading
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -29,7 +29,7 @@ logger = logging.getLogger(__name__)
 
 def _utcnow() -> datetime:
     """UTC ISO-8601 with offset; centralised post-utcnow() deprecation."""
-    return datetime.now(timezone.utc)
+    return datetime.now(UTC)
 
 
 # Champion-challenger promotion gate; pure function (no I/O, deterministic).
@@ -38,9 +38,9 @@ def _utcnow() -> datetime:
 class PromotionDecision:
     """Gate outcome; comparison details audited via history + manifest."""
     action: str             # "promote" | "reject" | "cold_start"
-    champion_accuracy: Optional[float]
-    challenger_accuracy: Optional[float]
-    delta_pp: Optional[float]      # challenger - champion (positive = improvement)
+    champion_accuracy: float | None
+    challenger_accuracy: float | None
+    delta_pp: float | None      # challenger - champion (positive = improvement)
     threshold_pp: float            # configured max_regression_pp at evaluation time
     reason: str
 
@@ -49,7 +49,7 @@ class PromotionDecision:
         return self.action != "reject"
 
 
-def _finite_score(x: Optional[float]) -> Optional[float]:
+def _finite_score(x: float | None) -> float | None:
     """Coerce to finite float else None; prevents NaN-silent promotion."""
     if x is None:
         return None
@@ -61,8 +61,8 @@ def _finite_score(x: Optional[float]) -> Optional[float]:
 
 
 def evaluate_challenger(
-    challenger_acc: Optional[float],
-    champion_acc: Optional[float],
+    challenger_acc: float | None,
+    champion_acc: float | None,
     *,
     max_regression_pp: float,
 ) -> PromotionDecision:
@@ -116,7 +116,7 @@ def evaluate_challenger(
 class AutoRetrainConfig:
     """Loads / saves the retrain config JSON with atomic writes and a lock."""
 
-    def __init__(self, path: Optional[str] = None, settings: Optional[Settings] = None) -> None:
+    def __init__(self, path: str | None = None, settings: Settings | None = None) -> None:
         s = settings or get_settings()
         self._path = Path(path or s.retrain_config_path)
         self._lock = threading.Lock()
@@ -169,7 +169,7 @@ class AutoRetrainConfig:
 
     # -- computed -----------------------------------------------------------
 
-    def _compute_next_scheduled(self) -> Optional[str]:
+    def _compute_next_scheduled(self) -> str | None:
         last = self._data.get("last_auto_retrain")
         freq = self._data.get("frequency_days", self._default_frequency_days)
         if not self._data.get("enabled"):
@@ -178,7 +178,7 @@ class AutoRetrainConfig:
             try:
                 dt = datetime.fromisoformat(str(last))
                 if dt.tzinfo is None:
-                    dt = dt.replace(tzinfo=timezone.utc)
+                    dt = dt.replace(tzinfo=UTC)
                 return (dt + timedelta(days=freq)).isoformat()
             except (ValueError, TypeError):
                 pass
@@ -197,7 +197,7 @@ class AutoRetrainConfig:
             try:
                 scheduled = datetime.fromisoformat(str(ns))
                 if scheduled.tzinfo is None:
-                    scheduled = scheduled.replace(tzinfo=timezone.utc)
+                    scheduled = scheduled.replace(tzinfo=UTC)
                 return _utcnow() >= scheduled
             except (ValueError, TypeError):
                 return False
@@ -226,7 +226,7 @@ class AutoRetrainConfig:
 
     def rotate_baseline_if_eligible(
         self, *, window: int, min_history: int,
-    ) -> Optional[dict[str, Any]]:
+    ) -> dict[str, Any] | None:
         """Rotate baseline to trailing rolling-median when min_history is met; None else.
         Median + epsilon-bounded write so flat history doesn't churn the file."""
         with self._lock:
@@ -254,9 +254,9 @@ class AutoRetrainConfig:
 
     def update_settings(
         self,
-        enabled: Optional[bool] = None,
-        frequency_days: Optional[int] = None,
-        auto_inference_after_train: Optional[bool] = None,
+        enabled: bool | None = None,
+        frequency_days: int | None = None,
+        auto_inference_after_train: bool | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             if enabled is not None:
@@ -313,7 +313,7 @@ def invalidate_drift_cache() -> None:
 def compute_drift_status(
     artifact_svc: Any,
     accuracy_svc: Any = None,
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     bypass_cache: bool = False,
 ) -> dict[str, Any]:
     """Compare live post-training accuracy against the training-time baseline.
@@ -349,9 +349,9 @@ def compute_drift_status(
     baseline_acc, _ = artifact_svc.score_test_predictions()
 
     # Primary: live accuracy from YaumiLive.
-    recent_acc: Optional[float] = None
-    recent_reconciled: Optional[float] = None
-    rows_compared: Optional[int] = None
+    recent_acc: float | None = None
+    recent_reconciled: float | None = None
+    rows_compared: int | None = None
     source = "unavailable"
 
     if accuracy_svc is not None and getattr(accuracy_svc, "available", False):
@@ -467,7 +467,7 @@ def _recent_window(settings: Settings) -> tuple[str, str]:
 _auto_retrain_pending: dict[str, Any] = {}
 _pending_lock = threading.Lock()
 
-def _max_sales_recent_date(s: Settings) -> Optional[pd.Timestamp]:
+def _max_sales_recent_date(s: Settings) -> pd.Timestamp | None:
     """Latest TrxDate in sales_recent CSV mirror; None on missing/empty (freshness unknown)."""
     # ``sales_recent_file`` is a bare filename; resolve through shared_data_path
     # so the existence check actually hits the mirrored CSV under <data-root>/imports.
@@ -493,7 +493,7 @@ def check_and_retrain(
     config: AutoRetrainConfig,
     pipeline_service: Any,
     artifact_service: Any,
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
 ) -> None:
     """Called periodically by APScheduler. Non-blocking."""
     s = settings or get_settings()
@@ -604,7 +604,7 @@ def check_and_retrain(
     # storm; it is computed dynamically below from the operator-chosen
     # ``frequency_days`` so it scales with the selected cadence.
     time_due = config.is_due()
-    trigger: Optional[str] = "schedule" if time_due else None
+    trigger: str | None = "schedule" if time_due else None
     if not time_due and getattr(s, "retrain_on_drift_alert_enabled", True):
         drift = compute_drift_status(artifact_service, settings=s)
         # ``compute_drift_status`` emits one of three labels:
@@ -648,12 +648,12 @@ def check_and_retrain(
             )
             last_iso = cfg_now.get("last_auto_retrain")
             gap_ok = True
-            gap_days_observed: Optional[int] = None
+            gap_days_observed: int | None = None
             if last_iso:
                 try:
                     last_dt = datetime.fromisoformat(str(last_iso))
                     if last_dt.tzinfo is None:
-                        last_dt = last_dt.replace(tzinfo=timezone.utc)
+                        last_dt = last_dt.replace(tzinfo=UTC)
                     gap_days_observed = (_utcnow() - last_dt).days
                     gap_ok = gap_days_observed >= cooldown_days
                 except (ValueError, TypeError):
@@ -853,7 +853,7 @@ def update_last_train_age(artifact_svc: Any) -> None:
             return
         trained_at = datetime.fromisoformat(str(ts))
         if trained_at.tzinfo is None:
-            trained_at = trained_at.replace(tzinfo=timezone.utc)
+            trained_at = trained_at.replace(tzinfo=UTC)
         age = (_utcnow() - trained_at).total_seconds()
         LAST_TRAIN_AGE_SECONDS.set(max(0.0, age))
     except Exception:

@@ -9,7 +9,7 @@ value-based (higher-is-better score metrics) weighting.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional
+from collections.abc import Iterable
 
 import numpy as np
 import pandas as pd
@@ -24,9 +24,9 @@ def _infer_key_cols(frame: pd.DataFrame) -> list[str]:
 
 def weighted_average_ensemble(
     predictions: dict[str, pd.DataFrame],
-    weights: Optional[dict[str, float]] = None,
+    weights: dict[str, float] | None = None,
     *,
-    key_cols: Optional[Iterable[str]] = None,
+    key_cols: Iterable[str] | None = None,
 ) -> pd.DataFrame:
     """Combine per-model prediction frames via weighted average on shared
     (group_keys + date) keys.
@@ -87,7 +87,7 @@ def weighted_average_ensemble(
     # Outer-merge every component on the key columns. ``how="outer"`` so
     # any coverage mismatch surfaces as NaN we then detect and raise.
     # We rename ``prediction`` per-component so columns don't collide.
-    merged: Optional[pd.DataFrame] = None
+    merged: pd.DataFrame | None = None
     for name in names:
         col = f"_pred_{name}"
         f = predictions[name][keys + ["prediction"]].rename(columns={"prediction": col})

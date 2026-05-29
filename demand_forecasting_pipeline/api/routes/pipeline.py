@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Any, Optional
+from typing import Any
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Body, Depends
@@ -60,7 +60,7 @@ _PUBLISH_PRIORITY: dict[str, int] = {
 }
 
 
-def _map_status(raw: Optional[str]) -> Optional[str]:
+def _map_status(raw: str | None) -> str | None:
     if not raw:
         return None
     return _STATUS_MAP.get(str(raw).lower())
@@ -74,7 +74,7 @@ def _fmt_int(n: Any) -> str:
         return str(n)
 
 
-def _fmt_date(iso: Optional[str]) -> Optional[str]:
+def _fmt_date(iso: str | None) -> str | None:
     if not iso:
         return None
     s = str(iso).strip()
@@ -90,7 +90,7 @@ def _fmt_date(iso: Optional[str]) -> Optional[str]:
         return s[:10]
 
 
-def _fmt_datetime(iso: Optional[str]) -> Optional[str]:
+def _fmt_datetime(iso: str | None) -> str | None:
     """ISO -> ``DD MMM YYYY, HH:MM`` in display TZ; naive input rendered as-is."""
     if not iso:
         return None
@@ -106,7 +106,7 @@ def _fmt_datetime(iso: Optional[str]) -> Optional[str]:
     return dt.strftime("%d %b %Y, %H:%M")
 
 
-def _fmt_duration(seconds: Optional[float]) -> str:
+def _fmt_duration(seconds: float | None) -> str:
     """``Xs`` / ``Xm`` / ``Xm Ys`` -- mirrors the frontend helper."""
     if seconds is None or seconds <= 0:
         return "0s"
@@ -121,7 +121,7 @@ def _fmt_duration(seconds: Optional[float]) -> str:
 def _resolve_step(
     step: dict[str, Any],
     statuses: dict[str, dict[str, Any]],
-) -> tuple[str, Optional[dict[str, Any]]]:
+) -> tuple[str, dict[str, Any] | None]:
     """First matching step status; returns (status, parent_run_info)."""
     pipeline_keys: tuple[str, ...] = step["pipeline_keys"]
     for pipeline in ("train", "inference"):
@@ -143,7 +143,7 @@ def _resolve_step(
 
 def _resolve_publish(
     statuses: dict[str, dict[str, Any]],
-) -> tuple[str, Optional[dict[str, Any]], dict[str, Any]]:
+) -> tuple[str, dict[str, Any] | None, dict[str, Any]]:
     """Most recent run owns publish display; worst-of-two over cascade substeps."""
     candidates = [
         statuses[p]
@@ -166,10 +166,10 @@ def _resolve_publish(
 
 def _step_metric_text(
     step_key: str,
-    summary: Optional[dict[str, Any]],
+    summary: dict[str, Any] | None,
     publish_status: str,
     cascade_text: str,
-) -> Optional[str]:
+) -> str | None:
     """Plain-language metric line per phase; mirrors the legacy stepMetric() switch."""
     summary = summary or {}
     overview = summary.get("training_overview") or {}
@@ -241,8 +241,8 @@ def _step_metric_text(
 
 def _step_detail_text(
     status: str,
-    info: Optional[dict[str, Any]],
-) -> Optional[str]:
+    info: dict[str, Any] | None,
+) -> str | None:
     """Static (non-running) detail line; running elapsed timer is client-side."""
     if status == "failed":
         msg = (info or {}).get("error")

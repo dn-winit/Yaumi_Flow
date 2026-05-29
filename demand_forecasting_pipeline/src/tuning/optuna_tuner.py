@@ -24,7 +24,7 @@ Everything external to the objective is config-driven:
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -37,6 +37,8 @@ try:
     _HAS_OPTUNA = True
 except ImportError:  # pragma: no cover - declared as a dep
     _HAS_OPTUNA = False
+
+from datetime import UTC
 
 from ..evaluation.metrics import compute_all
 from ..models.registry import build_model
@@ -393,10 +395,10 @@ def _persist_study(
     *,
     artifacts_dir: str,
     model_name: str,
-    demand_class: Optional[str],
+    demand_class: str | None,
     metric: str,
     direction: str,
-    random_seed: Optional[int],
+    random_seed: int | None,
 ) -> None:
     """Write a study's best_params + trial history to disk.
 
@@ -409,10 +411,7 @@ def _persist_study(
     Atomic writes via tmp+rename so a kill mid-write never produces
     a torn artifact a future warm-start would choke on.
     """
-    import json
-    import os
-    import tempfile
-    from datetime import datetime, timezone
+    from datetime import datetime
     from pathlib import Path
 
     label = f"{demand_class or 'global'}__{model_name}"
@@ -429,7 +428,7 @@ def _persist_study(
         "n_trials_attempted": len(study.trials),
         "best_value": float(study.best_value),
         "best_params": dict(study.best_params),
-        "tuned_at": datetime.now(timezone.utc).isoformat(),
+        "tuned_at": datetime.now(UTC).isoformat(),
     }
 
     # Atomic JSON + CSV writes via the shared io_utils helpers. Same
@@ -437,7 +436,8 @@ def _persist_study(
     # one home for atomic writes (``src/utils/io_utils``), not five
     # copies of mkstemp+open+replace boilerplate.
     from demand_forecasting_pipeline.src.utils.io_utils import (
-        save_dataframe, save_json,
+        save_dataframe,
+        save_json,
     )
     save_json(payload, str(out_dir / "best_params.json"))
 

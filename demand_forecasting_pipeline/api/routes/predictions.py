@@ -7,7 +7,6 @@ output stays internal; callers needing it use ``/predictions/test`` or accuracy_
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
@@ -21,12 +20,11 @@ from demand_forecasting_pipeline.api.schemas import (
 )
 from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
-from demand_forecasting_pipeline.services.reconciliation import enrich_with_load
 
 router = APIRouter(prefix="/predictions", tags=["predictions"])
 
 
-def _detect_predicted_col(df: pd.DataFrame) -> Optional[str]:
+def _detect_predicted_col(df: pd.DataFrame) -> str | None:
     """Artefacts use ``prediction``; raw demand_forecast.csv uses ``Predicted``."""
     for c in ("prediction", "Predicted"):
         if c in df.columns:
@@ -36,8 +34,8 @@ def _detect_predicted_col(df: pd.DataFrame) -> Optional[str]:
 
 @router.get("/test", response_model=PredictionResponse)
 def get_test_predictions(
-    route_code: Optional[str] = Query(None),
-    item_code: Optional[str] = Query(None),
+    route_code: str | None = Query(None),
+    item_code: str | None = Query(None),
     limit: int = Query(
         default_factory=lambda: get_settings().default_page_limit,
         ge=1, le=100_000,
@@ -54,7 +52,7 @@ def get_test_predictions(
 
 @router.get("/forecast/route-summary", response_model=FutureRouteSummaryResponse)
 def get_future_route_summary(
-    date: Optional[str] = Query(None, description="YYYY-MM-DD; defaults to full horizon"),
+    date: str | None = Query(None, description="YYYY-MM-DD; defaults to full horizon"),
     svc: ArtifactService = Depends(get_artifact_service),
 ):
     """Per-route aggregates for the VanLoad page tiles.
@@ -124,7 +122,7 @@ def get_future_route_summary(
     )
 
     # Peak-day per route only meaningful across multiple days; with ``date`` it equals that date.
-    peak_by_route: dict[str, Optional[str]] = {}
+    peak_by_route: dict[str, str | None] = {}
     if date:
         for r in by_route.itertuples(index=False):
             peak_by_route[str(r.RouteCode)] = date
@@ -157,8 +155,8 @@ def get_future_route_summary(
 
 @router.get("/forecast", response_model=PredictionResponse)
 def get_future_forecast(
-    route_code: Optional[str] = Query(None),
-    item_code: Optional[str] = Query(None),
+    route_code: str | None = Query(None),
+    item_code: str | None = Query(None),
     limit: int = Query(
         default_factory=lambda: get_settings().default_page_limit,
         ge=1, le=100_000,

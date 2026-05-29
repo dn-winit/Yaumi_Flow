@@ -7,8 +7,6 @@ this module only carries safety clamps and infra constants.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict
-
 
 # ---------------------------------------------------------------------------
 # Safety clamps -- the ONLY numeric "magic" allowed in business code

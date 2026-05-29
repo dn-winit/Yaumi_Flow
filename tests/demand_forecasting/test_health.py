@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import httpx
 
-from tests.common.helpers import assert_keys, assert_ok
+from tests.common.helpers import assert_ok
 
 
 def test_health_returns_2xx(client: httpx.Client, base_urls: dict[str, str]) -> None:

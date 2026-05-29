@@ -44,7 +44,6 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-
 _STATS_COLUMNS = (
     "n_periods",
     "n_nonzero_periods",
@@ -150,7 +149,7 @@ def compute_pair_explainability(
             "recent_range_qty": recent_max - recent_min,
         }
         key_tuple = keys if isinstance(keys, tuple) else (keys,)
-        for k, v in zip(group_keys, key_tuple):
+        for k, v in zip(group_keys, key_tuple, strict=False):
             record[k] = v
         rows.append(record)
 

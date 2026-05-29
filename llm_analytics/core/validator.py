@@ -10,7 +10,8 @@ from __future__ import annotations
 
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Set
+from collections.abc import Iterable
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -34,8 +35,8 @@ _ITEM_CODE_RES = (
 def _scrub_codes(
     text: str,
     *,
-    allowed_items: Set[str],
-    allowed_customers: Set[str],
+    allowed_items: set[str],
+    allowed_customers: set[str],
 ) -> str:
     """Replace any item/customer code in ``text`` that's not in the allow-sets.
 
@@ -69,12 +70,12 @@ def _scrub_codes(
 
 
 def scrub_hallucinated_entities(
-    response: Dict[str, Any],
+    response: dict[str, Any],
     *,
     allowed_items: Iterable[str] = (),
     allowed_customers: Iterable[str] = (),
     text_fields: Iterable[str] = (),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Walk every narrative field in ``response`` and whitelist codes.
 
     No-op for fields not in ``text_fields`` (lets callers be explicit
@@ -103,7 +104,7 @@ def scrub_hallucinated_entities(
 
 # Back-compat alias kept for the route-analysis call site; new code should
 # call ``scrub_hallucinated_entities`` directly with the full allow-set.
-def sanitize_customer_codes(response: Dict[str, Any], actual_codes: Set[str]) -> Dict[str, Any]:
+def sanitize_customer_codes(response: dict[str, Any], actual_codes: set[str]) -> dict[str, Any]:
     """Legacy entry point -- delegates to scrub_hallucinated_entities."""
     return scrub_hallucinated_entities(
         response,

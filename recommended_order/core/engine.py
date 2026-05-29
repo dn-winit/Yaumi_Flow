@@ -13,7 +13,8 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from collections.abc import Callable
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -52,27 +53,27 @@ logger = logging.getLogger(__name__)
 class RecommendationEngine:
     """Orchestrates calibration + generators + constraints."""
 
-    def __init__(self, constants: Optional[RecommendationConstants] = None) -> None:
+    def __init__(self, constants: RecommendationConstants | None = None) -> None:
         self._c = constants or RecommendationConstants()
         self._trend = TrendCalculator()
         self._priority = PriorityCalculator()
         self._quantity = QuantityCalculator(self._c.clamps)
-        self._corpus_median_customers: Optional[float] = None
+        self._corpus_median_customers: float | None = None
         # Corpus-wide distributions per calibration field; reference for
         # ``_sanity_clamp`` in calibration.py.
-        self._corpus_field_values: Optional[Dict[str, List[float]]] = None
+        self._corpus_field_values: dict[str, list[float]] | None = None
         # Per-source feedback multipliers + confidence, keyed by route_code.
-        self._feedback_adjustments: Dict[str, Dict[str, float]] = {}
-        self._feedback_confidence: Dict[str, Dict[str, float]] = {}
+        self._feedback_adjustments: dict[str, dict[str, float]] = {}
+        self._feedback_confidence: dict[str, dict[str, float]] = {}
         # LRU+TTL lookalike cache keyed (route_code, csv_mtime, window_days).
-        self._lookalike_cache: "OrderedDict[Tuple[str, float, int], Tuple[float, Dict[str, Any]]]" = OrderedDict()
+        self._lookalike_cache: OrderedDict[tuple[str, float, int], tuple[float, dict[str, Any]]] = OrderedDict()
         self._cache_lock = threading.Lock()
 
     def set_corpus_stats(
         self,
         *,
-        median_active_customers: Optional[float],
-        field_values: Optional[Dict[str, List[float]]] = None,
+        median_active_customers: float | None,
+        field_values: dict[str, list[float]] | None = None,
     ) -> None:
         """Inject corpus-level stats the engine can't compute per-route."""
         self._corpus_median_customers = median_active_customers
@@ -80,9 +81,9 @@ class RecommendationEngine:
 
     def set_feedback_adjustments(
         self,
-        adjustments: Dict[str, Dict[str, float]],
+        adjustments: dict[str, dict[str, float]],
         *,
-        confidence: Optional[Dict[str, Dict[str, float]]] = None,
+        confidence: dict[str, dict[str, float]] | None = None,
     ) -> None:
         """Inject the latest per-route per-source feedback multipliers and
         (Sprint-4) the per-route per-source sample-size confidence."""
@@ -108,13 +109,13 @@ class RecommendationEngine:
     def generate(
         self,
         customer_df: pd.DataFrame,
-        journey_customers: List[str],
-        van_items: Dict[str, int],
-        item_names: Dict[str, str],
-        customer_names: Dict[str, str],
+        journey_customers: list[str],
+        van_items: dict[str, int],
+        item_names: dict[str, str],
+        customer_names: dict[str, str],
         route_code: str,
         target_date: str,
-        demand_df: Optional[pd.DataFrame] = None,
+        demand_df: pd.DataFrame | None = None,
     ) -> pd.DataFrame:
         t0 = time.time()
         target_dt = pd.to_datetime(target_date).normalize()
@@ -162,7 +163,7 @@ class RecommendationEngine:
                 "peer_skip route=%s reason=micro_route active_customers=%d threshold=%d",
                 route_code, active_customers, self._c.clamps.peer_min_active_customers,
             )
-            lookalike_ctx: Dict[str, Any] = {}
+            lookalike_ctx: dict[str, Any] = {}
         else:
             lookalike_ctx = self._get_or_build_lookalike(
                 route_code, customer_df, target_dt, calibration,
@@ -170,11 +171,11 @@ class RecommendationEngine:
 
         co_occurrence, co_median = self._co_occurrence(customer_df, calibration)
 
-        records: List[Dict[str, Any]] = []
+        records: list[dict[str, Any]] = []
         counts = {"journey": len(journey_customers), "active": 0, "reactivated": 0, "seeded": 0}
 
         # Per-generator tallies for metrics
-        gen_stats: Dict[str, Dict[str, Any]] = {
+        gen_stats: dict[str, dict[str, Any]] = {
             "history": {"candidates": 0, "kept": 0},
             "peer": {"candidates": 0, "kept": 0, "similarity_sum": 0.0, "similarity_n": 0},
             "basket": {"candidates": 0, "kept": 0},
@@ -217,7 +218,7 @@ class RecommendationEngine:
             item_dict = cust_data["items"]
             profile = cust_data["profile"]
 
-            all_cands: List[Candidate] = []
+            all_cands: list[Candidate] = []
 
             history_cands = self._safe_call(
                 "history", route_code,
@@ -303,12 +304,12 @@ class RecommendationEngine:
             records.extend(kept_rows)
 
         # Emit per-generator structured logs
-        gen_metrics_payload: List[Dict[str, Any]] = []
+        gen_metrics_payload: list[dict[str, Any]] = []
         date_str = str(target_dt.date())
         now_iso = pd.Timestamp.utcnow().isoformat()
         total_kept = sum(s["kept"] for s in gen_stats.values())
         for gname, s in gen_stats.items():
-            extras: Dict[str, Any] = {}
+            extras: dict[str, Any] = {}
             if gname == "peer" and s.get("similarity_n", 0) > 0:
                 extras["similarity_avg"] = round(
                     s["similarity_sum"] / max(1, s["similarity_n"]), 4
@@ -369,8 +370,8 @@ class RecommendationEngine:
 
     @staticmethod
     def _safe_call(
-        gen_name: str, route_code: str, fn: Callable[[], List[Candidate]],
-    ) -> List[Candidate]:
+        gen_name: str, route_code: str, fn: Callable[[], list[Candidate]],
+    ) -> list[Candidate]:
         """Circuit breaker: swallow generator exceptions + log, never fail route."""
         try:
             return fn() or []
@@ -382,7 +383,7 @@ class RecommendationEngine:
             return []
 
     @staticmethod
-    def _calibration_summary(calib: RouteCalibration) -> Dict[str, Any]:
+    def _calibration_summary(calib: RouteCalibration) -> dict[str, Any]:
         """Slim, JSON-safe snapshot for the metrics endpoint."""
         window = calib.derived_from.get("window", {})
         return {
@@ -407,7 +408,7 @@ class RecommendationEngine:
         customer_df: pd.DataFrame,
         target_dt: pd.Timestamp,
         calibration: RouteCalibration,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         c = self._c.clamps
         # target_dt is part of the key because the upstream as-of filter
         # makes different target dates produce different similarity matrices
@@ -437,15 +438,15 @@ class RecommendationEngine:
 
     def _rows(
         self,
-        candidates: List[Candidate],
+        candidates: list[Candidate],
         customer: str,
         target_dt: pd.Timestamp,
         route_code: str,
-        item_names: Dict[str, str],
-        customer_names: Dict[str, str],
+        item_names: dict[str, str],
+        customer_names: dict[str, str],
         calibration: RouteCalibration,
-    ) -> List[Dict[str, Any]]:
-        rows: List[Dict[str, Any]] = []
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
         for cand in candidates:
             tier = classify_tier(cand.priority_score, calibration.tier_cuts)
             if tier == "EXCLUDE":
@@ -482,7 +483,7 @@ class RecommendationEngine:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _top_van_items(van_items: Dict[str, int], k: int) -> List[Tuple[str, int]]:
+    def _top_van_items(van_items: dict[str, int], k: int) -> list[tuple[str, int]]:
         if k <= 0 or not van_items:
             return []
         # Defence-in-depth stockout guard (dm.get_van_items already filters).
@@ -490,7 +491,7 @@ class RecommendationEngine:
         return [(code, int(qty)) for code, qty in ranked[:k] if int(qty or 0) > 0]
 
     @staticmethod
-    def _basket_thresholds(customer_df: pd.DataFrame) -> Tuple[float, float]:
+    def _basket_thresholds(customer_df: pd.DataFrame) -> tuple[float, float]:
         """Route-wide P25/P75 of per-customer avg basket size; buckets
         customers into HEAVY/MEDIUM/LIGHT tiers. Uses full route history so
         the tier is intrinsic, not relative to today's journey set."""
@@ -511,7 +512,7 @@ class RecommendationEngine:
         basket_p75: float,
         fallback_gate: float,
         fallback_half_life: float,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Per-customer profile: tier (basket-size band), personal
         completion_gate (from median cycle), and recency half-life (3x
         median cycle). Falls back to route calibration when sample is thin.
@@ -534,7 +535,7 @@ class RecommendationEngine:
         # --- Personal completion gate + half-life from overall cycle ---
         completion_gate = fallback_gate
         half_life_days = fallback_half_life
-        median_cycle: Optional[float] = None
+        median_cycle: float | None = None
         if not cust_history.empty:
             dates = pd.to_datetime(cust_history["TrxDate"]).sort_values().unique()
             if len(dates) >= 3:
@@ -558,18 +559,18 @@ class RecommendationEngine:
     @staticmethod
     def _precompute(
         customer_df: pd.DataFrame,
-        journey_customers: List[str],
+        journey_customers: list[str],
         *,
         basket_p25: float = 0.0,
         basket_p75: float = 0.0,
         fallback_gate: float = 0.6,
         fallback_half_life: float = 14.0,
-    ) -> Dict[str, Dict]:
+    ) -> dict[str, dict]:
         journey_set = set(journey_customers)
         relevant = customer_df[customer_df["CustomerCode"].isin(journey_set)]
         if relevant.empty:
             return {}
-        out: Dict[str, Dict] = {}
+        out: dict[str, dict] = {}
         for cust_code, cust_group in relevant.groupby("CustomerCode", sort=False):
             out[str(cust_code)] = {
                 "history": cust_group,
@@ -591,7 +592,7 @@ class RecommendationEngine:
         customer_df: pd.DataFrame,
         target_dt: pd.Timestamp,
         calibration: RouteCalibration,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         """Build the customer-item recency-weighted matrix + cosine similarities."""
         empty = {
             "customers": [],
@@ -655,31 +656,31 @@ class RecommendationEngine:
     @staticmethod
     def _co_occurrence(
         customer_df: pd.DataFrame, calibration: RouteCalibration,
-    ) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    ) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
         """Build item -> item co-occurrence confidence and median co-qty."""
         if customer_df.empty:
             return {}, {}
-        cust_items: Dict[str, set] = {}
-        cust_qty: Dict[Tuple[str, str], float] = {}
+        cust_items: dict[str, set] = {}
+        cust_qty: dict[tuple[str, str], float] = {}
         grouped = customer_df.groupby(["CustomerCode", "ItemCode"])["TotalQuantity"].mean()
         for (cust, item), q in grouped.items():
             cust_items.setdefault(str(cust), set()).add(str(item))
             cust_qty[(str(cust), str(item))] = float(q)
 
-        item_customers: Dict[str, set] = {}
+        item_customers: dict[str, set] = {}
         for cust, items in cust_items.items():
             for it in items:
                 item_customers.setdefault(it, set()).add(cust)
 
-        confidence: Dict[str, Dict[str, float]] = {}
-        co_qty: Dict[str, Dict[str, float]] = {}
+        confidence: dict[str, dict[str, float]] = {}
+        co_qty: dict[str, dict[str, float]] = {}
         min_conf = calibration.basket_min_confidence
 
         for a, a_customers in item_customers.items():
             if len(a_customers) < 3:
                 continue
-            conf_a: Dict[str, float] = {}
-            qty_a: Dict[str, float] = {}
+            conf_a: dict[str, float] = {}
+            qty_a: dict[str, float] = {}
             for b, b_customers in item_customers.items():
                 if a == b:
                     continue

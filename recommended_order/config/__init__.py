@@ -1,4 +1,4 @@
-from .settings import get_settings, Settings
 from .constants import RecommendationConstants
+from .settings import Settings, get_settings
 
 __all__ = ["get_settings", "Settings", "RecommendationConstants"]

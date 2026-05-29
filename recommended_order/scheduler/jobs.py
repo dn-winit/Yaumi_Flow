@@ -38,7 +38,10 @@ def _routes_for_today(dm, today: str) -> list[str]:
 def _run_daily_generation(settings: Settings) -> dict:
     """Generate for today. Returns result summary."""
     from recommended_order.api.dependencies import (
-        get_data_manager, get_engine, get_store, get_db_pusher,
+        get_data_manager,
+        get_db_pusher,
+        get_engine,
+        get_store,
     )
     from recommended_order.api.routes import _generate_routes
 

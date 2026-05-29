@@ -65,7 +65,7 @@ def _validate_lags(lags: list[int]) -> None:
     config should fail at feature-build time, not silently corrupt the
     model. Validation is unconditional -- runs whether or not the
     horizon-safe filter is also enabled."""
-    bad = [l for l in lags if not isinstance(l, int) or l < 1]
+    bad = [lag for lag in lags if not isinstance(lag, int) or lag < 1]
     if bad:
         raise ValueError(
             f"lags must be positive integers (>=1) to avoid target leakage; "

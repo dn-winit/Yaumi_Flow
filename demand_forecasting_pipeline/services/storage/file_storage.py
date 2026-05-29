@@ -11,7 +11,7 @@ from __future__ import annotations
 import logging
 import re
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -27,7 +27,7 @@ logger = logging.getLogger(__name__)
 
 
 # Wire mapping from demand_forecast.csv (PascalCase) to snake_case; unmapped keys pass through.
-_PREDICTIONS_RENAME: Dict[str, str] = {
+_PREDICTIONS_RENAME: dict[str, str] = {
     "Predicted":          "prediction",
     "DemandProbability":  "p_demand",
     "QtyIfDemand":        "qty_if_demand",
@@ -64,9 +64,9 @@ _DB_BACKED_PREDICTION_KEYS = {"test_predictions", "future_forecast"}
 _SQL_AS_ALIAS_RX = re.compile(r"(\w+)\s+AS\s+(\w+)", re.IGNORECASE)
 
 
-def _aliases_in_select(sql: str) -> Dict[str, str]:
+def _aliases_in_select(sql: str) -> dict[str, str]:
     """{snake_db_col: PascalAlias} from a SELECT; strips CAST(... AS T) wrappers."""
-    aliases: Dict[str, str] = {}
+    aliases: dict[str, str] = {}
     # Strip CAST(... AS T) wrappers; leaves outer "... AS Alias".
     cast_rx = re.compile(r"CAST\s*\(([^()]+?)\s+AS\s+\w+(?:\s*\(\s*\d+(?:\s*,\s*\d+)?\s*\))?\s*\)",
                          re.IGNORECASE)
@@ -79,8 +79,8 @@ def _aliases_in_select(sql: str) -> Dict[str, str]:
 def _assert_inverse_of_sales_transactions_aliases() -> None:
     """Cross-check rename map vs SQL producer; drift -> RuntimeError (lazy import for tests)."""
     try:
-        from data_import.core.queries import QueryBuilder
         from data_import.config.settings import Settings as DISettings
+        from data_import.core.queries import QueryBuilder
     except Exception as exc:  # pragma: no cover - env w/o data_import
         logger.debug("Skipped sales_transactions alias check (no data_import): %s", exc)
         return
@@ -121,11 +121,11 @@ _assert_inverse_of_sales_transactions_aliases()
 class FileStorage(StorageBackend):
     """Reads/writes artifacts as CSV/JSON; predictions go through the DB mirror."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         # Artifact key -> file paths
         models_dir = Path(self._s.models_dir)
-        self._paths: Dict[str, Path] = {
+        self._paths: dict[str, Path] = {
             # Write-side back-compat for predictions; reads use the DB mirror.
             "test_predictions": self._s.predictions_path(self._s.test_predictions_file),
             "future_forecast": self._s.predictions_path(self._s.future_forecast_file),
@@ -205,7 +205,7 @@ class FileStorage(StorageBackend):
     # JSON
     # ------------------------------------------------------------------
 
-    def read_json(self, key: str) -> Dict[str, Any]:
+    def read_json(self, key: str) -> dict[str, Any]:
         path = self._paths.get(key)
         if not path or not path.exists():
             return {}
@@ -215,7 +215,7 @@ class FileStorage(StorageBackend):
             logger.error("Failed to read JSON %s from %s: %s", key, path, exc)
             return {}
 
-    def write_json(self, key: str, data: Dict[str, Any]) -> bool:
+    def write_json(self, key: str, data: dict[str, Any]) -> bool:
         path = self._paths.get(key)
         if not path:
             return False
@@ -238,7 +238,7 @@ class FileStorage(StorageBackend):
     # Source path (drives upstream mtime-keyed caches)
     # ------------------------------------------------------------------
 
-    def source_path(self, key: str) -> Optional[Path]:
+    def source_path(self, key: str) -> Path | None:
         """File the read path will consult; DB-mirror CSV for predictions, registered path else."""
         if key in _DB_BACKED_PREDICTION_KEYS:
             return self._predictions_mirror

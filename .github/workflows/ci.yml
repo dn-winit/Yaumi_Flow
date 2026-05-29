@@ -1,23 +1,14 @@
 # CI: hermetic gates that catch the bulk of staged-branch regressions
-# without needing a real warehouse.
+# without needing a real warehouse. Every job is a hard merge gate:
 #
-# Required (red blocks merge):
 #   - python_compile  : byte-compile every module.
+#   - python_lint     : ruff check against the pyproject rule set.
+#   - python_test     : pytest -m "not slow and not requires_db and
+#                       not requires_live_server" -- runs the hermetic
+#                       in-process tests under ``tests/common/``;
+#                       the live-server suites auto-skip via the
+#                       ``requires_live_server`` marker.
 #   - webapp          : lint + format:check + typecheck.
-#
-# Advisory (continue-on-error during baseline cleanup):
-#   - python_lint     : ruff check. Existing tree has ~1.8k baseline
-#                       findings that need incremental triage; the job
-#                       reports red without blocking merge until the
-#                       baseline is cleared. Track residue with
-#                       ``ruff check --statistics``.
-#   - python_test     : pytest -m "not slow and not requires_db".
-#                       Hermetic test surface is currently small; tests
-#                       under ``tests/`` mostly use ``httpx.Client``
-#                       against ``localhost:*``, which won't connect on
-#                       runners. Job runs so import-time regressions are
-#                       caught, but failures don't block merge until
-#                       ASGI-transport coverage exists.
 #
 # Anything heavier (db integration, e2e, slow LLM calls) requires the live
 # warehouse and runs locally before each push.
@@ -63,13 +54,8 @@ jobs:
             scripts
 
   python_lint:
-    name: Python lint (ruff, advisory)
+    name: Python lint (ruff)
     runs-on: ubuntu-latest
-    # Existing tree has a ~1.8k-finding baseline (mostly E402 path-setup
-    # before imports, I001 isort, F401 unused re-exports). The job runs
-    # red on those today but isn't a merge gate; track residue with
-    # ``ruff check --statistics`` and clear by module.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -89,12 +75,8 @@ jobs:
         run: ruff check --no-fix .
 
   python_test:
-    name: Python tests (hermetic, advisory)
+    name: Python tests (hermetic)
     runs-on: ubuntu-latest
-    # Currently advisory because most tests use httpx against
-    # ``localhost:*`` rather than FastAPI's ASGITransport. Once a
-    # meaningful ASGI-transport surface exists, drop continue-on-error.
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -130,11 +112,11 @@ jobs:
           pip install pytest httpx python-dotenv
 
       - name: Run hermetic pytest
-        # Skips ``slow`` (LLM calls / multi-minute recon) and
-        # ``requires_db`` (needs a live warehouse) so this stays runnable
-        # on GitHub-hosted runners. Coverage of common/, numeric, schema
-        # validators, redistribution, scoring helpers, etc.
-        run: pytest -m "not slow and not requires_db" --maxfail=5 -q
+        # Skips ``slow`` (LLM calls / multi-minute recon), ``requires_db``
+        # (needs a live warehouse) and ``requires_live_server`` (the
+        # localhost:* integration suites that conftest.py auto-marks).
+        # Coverage is the ``tests/common/`` ASGI-transport surface.
+        run: pytest -m "not slow and not requires_db and not requires_live_server" --maxfail=5 -q
 
   webapp:
     name: Webapp lint + typecheck

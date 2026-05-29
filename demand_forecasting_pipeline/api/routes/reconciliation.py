@@ -10,7 +10,7 @@ Four GET/POST endpoints, all dynamic and parameterised:
 from __future__ import annotations
 
 import logging
-from typing import Any, Dict
+from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
@@ -54,7 +54,7 @@ def manual_refresh(
         True,
         description="False short-circuits if a recent refresh ran (same dedup window as cron).",
     ),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Run reconciliation refresh; same path as the daily cron.
 
     Writes to yf_sales_transactions for past + today; future dates out of scope.
@@ -364,8 +364,8 @@ def past_performance(
 
     # Closing index convention: opening[d, item] = ClosingQty[(route, item, d-1)] or 0.
     # ClosingQty=0 is never logged, so a missing row means "rep had nothing left".
-    start_dt = min(window_dates) if window_dates else pd.Timestamp(end_date).normalize()
-    end_dt   = max(window_dates) if window_dates else pd.Timestamp(end_date).normalize()
+    min(window_dates) if window_dates else pd.Timestamp(end_date).normalize()
+    max(window_dates) if window_dates else pd.Timestamp(end_date).normalize()
     # Anchor items: (route, item) pairs with Predicted > 0 in window.
     # Only scope compared so we never claim credit on items we didn't predict.
     anchor_items: set[str] = (
@@ -485,7 +485,7 @@ def past_performance(
             _ic_arr, _dates_str,
             _open_arr, _load_arr, _van_arr,
             _ryopen_arr, _ryfresh_arr, _ryleft_arr, _ryvan_arr,
-            _sold_arr,
+            _sold_arr, strict=False,
         ):
             key = (str(ic), str(d_str))
             rec_carried_by_item_day[key]  = float(op)
@@ -566,7 +566,7 @@ def past_performance(
                 pd.to_numeric(fc_df_full[lo_col], errors="coerce").fillna(0.0).clip(lower=0.0).tolist()
                 if lo_col is not None else [None] * len(ic_arr)
             )
-            for ic, d_str2, op, lo in zip(ic_arr, d_arr, op_arr, lo_arr):
+            for ic, d_str2, op, lo in zip(ic_arr, d_arr, op_arr, lo_arr, strict=False):
                 if op is not None:
                     next_day_opening_by_item_date[(ic, d_str2)] = float(op)
                 if lo is not None:
@@ -660,10 +660,10 @@ def past_performance(
                 _ic = closing_window.ItemCode,
                 _qty = pd.to_numeric(closing_window.ClosingQty, errors="coerce").fillna(0.0).clip(lower=0.0),
             )
-            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty, strict=False):
                 same_day_close[(ic, d.strftime("%Y-%m-%d"))] = float(qty)
             # Map row date forward by one day so ClosingQty[d-1] becomes opening[d].
-            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty, strict=False):
                 nxt = (d + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
                 prior_close[(ic, nxt)] = float(qty)
 
@@ -675,7 +675,7 @@ def past_performance(
                 _ic = alloc_window.ItemCode,
                 _qty = pd.to_numeric(alloc_window.AllocatedPC, errors="coerce").fillna(0.0).clip(lower=0.0),
             )
-            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty):
+            for ic, d, qty in zip(tmp._ic, tmp.TrxDate, tmp._qty, strict=False):
                 alloc_lookup[(ic, d.strftime("%Y-%m-%d"))] = float(qty)
 
         # TotalQuantity from sales_recent.csv (route-scoped, window-scoped).
@@ -799,7 +799,6 @@ def past_performance(
     ))
 
     # Leftovers comparison: integer per-row sums; pct via common.numeric.pct.
-    from common.numeric import pct as _pct
     rep_leftover_units = float(sum(it.actual_leftover       for it in items_payload))
     our_leftover_units = float(sum(it.recommended_leftover  for it in items_payload))
     leftover_units_saved = rep_leftover_units - our_leftover_units

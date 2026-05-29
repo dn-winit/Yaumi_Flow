@@ -93,11 +93,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         # the full-import probe, otherwise ``workers>1`` would have N workers
         # all racing the same CSV ``os.replace`` and hammering YaumiLive.
         try:
-            from data_import.api.dependencies import get_eda_service, get_importer
-            from common.leader_election import try_acquire_leader_lock
             import threading
             from datetime import datetime, timedelta
             from pathlib import Path
+
+            from common.leader_election import try_acquire_leader_lock
+            from data_import.api.dependencies import get_eda_service, get_importer
 
             startup_is_leader = (
                 settings.scheduler_enabled

@@ -12,7 +12,6 @@ import logging
 import os
 import threading
 from pathlib import Path
-from typing import Dict, Optional, Tuple
 
 import numpy as np
 import pandas as pd
@@ -25,20 +24,20 @@ logger = logging.getLogger(__name__)
 class BiasService:
     """Per-(route, item) bias_pct + calibration_ratio cache; parquet-persisted, mtime-keyed."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._lock = threading.Lock()
-        self._cache_key: Optional[Tuple[int, int]] = None
+        self._cache_key: tuple[int, int] | None = None
         # Parallel tables computed in one pass.
-        self._cache_bias: Optional[Dict[Tuple[str, str], float]] = None
-        self._cache_calibration: Optional[Dict[Tuple[str, str], float]] = None
+        self._cache_bias: dict[tuple[str, str], float] | None = None
+        self._cache_calibration: dict[tuple[str, str], float] | None = None
 
-    def get_table(self) -> Dict[Tuple[str, str], float]:
+    def get_table(self) -> dict[tuple[str, str], float]:
         """Legacy bias_pct table."""
         self._ensure_cached()
         return self._cache_bias or {}
 
-    def get_calibration_table(self) -> Dict[Tuple[str, str], float]:
+    def get_calibration_table(self) -> dict[tuple[str, str], float]:
         """Calibration ratios; pairs without history are absent (caller defaults to 1.0)."""
         self._ensure_cached()
         return self._cache_calibration or {}
@@ -103,8 +102,8 @@ class BiasService:
 
 
     def _load_persisted(
-        self, key: Tuple[int, int],
-    ) -> Optional[Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]]:
+        self, key: tuple[int, int],
+    ) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], float]] | None:
         path = self._persisted_path()
         if not path.exists():
             return None
@@ -134,9 +133,9 @@ class BiasService:
 
     def _persist(
         self,
-        bias_table: Dict[Tuple[str, str], float],
-        calib_table: Dict[Tuple[str, str], float],
-        key: Tuple[int, int],
+        bias_table: dict[tuple[str, str], float],
+        calib_table: dict[tuple[str, str], float],
+        key: tuple[int, int],
     ) -> None:
         path = self._persisted_path()
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -169,7 +168,7 @@ class BiasService:
 
     def _compute(
         self, path: Path,
-    ) -> Tuple[Dict[Tuple[str, str], float], Dict[Tuple[str, str], float]]:
+    ) -> tuple[dict[tuple[str, str], float], dict[tuple[str, str], float]]:
         """Compute the per-pair calibration_ratio (and the legacy bias_pct
         fallback) from the last ``bias_lookback_days`` of data.
 
@@ -236,7 +235,7 @@ class BiasService:
         # ---- Real actuals from sales_recent.csv --------------------------
         sales_path = self._s.shared_data_path(self._s.sales_recent_file)
         actuals = pd.DataFrame(columns=["RouteCode", "ItemCode", "TrxDate", "ActualQty"])
-        active_dates_per_route: Dict[str, set] = {}
+        active_dates_per_route: dict[str, set] = {}
         if sales_path.exists():
             try:
                 sales = pd.read_csv(
@@ -373,15 +372,15 @@ class BiasService:
         cap = float(self._s.bias_calibration_cap)
         ratios = np.clip(ratios, a_min=0.0, a_max=cap)
 
-        calib_table: Dict[Tuple[str, str], float] = {
+        calib_table: dict[tuple[str, str], float] = {
             (str(rc), str(ic)): float(r)
-            for rc, ic, r in zip(agg["RouteCode"], agg["ItemCode"], ratios)
+            for rc, ic, r in zip(agg["RouteCode"], agg["ItemCode"], ratios, strict=False)
         }
 
         # ---- Legacy bias_pct (used as fallback for pairs without ratio) --
         nz = df[df["ActualQty"] > 0]
         if nz.empty:
-            bias_table: Dict[Tuple[str, str], float] = {}
+            bias_table: dict[tuple[str, str], float] = {}
         else:
             bias_raw = ((nz["Predicted"] - nz["ActualQty"]) / nz["ActualQty"]).clip(-cap, cap)
             agg_bias = (

@@ -12,8 +12,7 @@ would block the retry from ever running.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Optional
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, Query
 
@@ -31,7 +30,6 @@ from llm_analytics.api.schemas import (
 )
 from llm_analytics.config.settings import get_settings
 from llm_analytics.core.analyzer import DEGRADED_KEY, Analyzer
-from llm_analytics.core.schema_render import render_schema_for_prompt
 from llm_analytics.models.schemas import CustomerAnalysis, PreVisitBriefing, RouteAnalysis
 from llm_analytics.services.cost_tracker import get_cost_tracker
 
@@ -216,7 +214,7 @@ def preview_pre_visit(
 
 @router.get("/cost/today", response_model=CostSummaryResponse)
 def cost_today(
-    route_code: Optional[str] = Query(default=None, description="Filter to one route"),
+    route_code: str | None = Query(default=None, description="Filter to one route"),
 ):
     """Aggregate LLM spend since start-of-day UTC.
 
@@ -239,7 +237,7 @@ def cost_today(
 @router.get("/cost/since", response_model=CostSummaryResponse)
 def cost_since(
     since_iso: str = Query(description="ISO timestamp lower bound (UTC), e.g. 2026-05-27T00:00:00Z"),
-    route_code: Optional[str] = Query(default=None),
+    route_code: str | None = Query(default=None),
 ):
     """Aggregate spend since an arbitrary ISO timestamp -- supports
     custom windows (last hour, last shift, etc.) without restarting."""
@@ -247,10 +245,10 @@ def cost_since(
     try:
         cutoff = datetime.fromisoformat(since_iso.replace("Z", "+00:00"))
         if cutoff.tzinfo is None:
-            cutoff = cutoff.replace(tzinfo=timezone.utc)
+            cutoff = cutoff.replace(tzinfo=UTC)
     except ValueError as exc:
         from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail=f"invalid since_iso: {exc}")
+        raise HTTPException(status_code=400, detail=f"invalid since_iso: {exc}") from exc
     summary = get_cost_tracker().summary(
         price_input_usd_per_million=s.price_input_usd_per_million,
         price_output_usd_per_million=s.price_output_usd_per_million,

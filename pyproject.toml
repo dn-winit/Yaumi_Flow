@@ -36,6 +36,31 @@ ignore = [
 [tool.ruff.lint.per-file-ignores]
 "**/__init__.py" = ["F401"]  # re-exports
 "scripts/**.py"  = ["E402"]  # path-setup before imports is intentional
+# Each service's ``__main__.py`` configures sys.path / loads .env before
+# importing internal modules -- that ordering is the entire point.
+"*/__main__.py" = ["E402"]
+# Recommendation engine uses immediate-invoke lambdas in a per-customer
+# loop. Late-bound loop variable warnings are technically true but every
+# call site invokes the lambda inside the same iteration, so the binding
+# is captured at the right moment in practice.
+"recommended_order/core/engine.py" = ["B023"]
+# Domain-specific routing rules: dense guard clauses are clearer as
+# single-line ``if cond: return val`` than multi-line bodies.
+"demand_forecasting_pipeline/src/routing/rules.py" = ["E701", "E702"]
+# Forecast horizon route -- imports inside the cache miss path
+# intentionally defer pandas/numpy until first call.
+"demand_forecasting_pipeline/api/routes/predictions.py" = ["E402"]
+# File storage helper conditionally imports pyarrow at module load if
+# available, then guards usage downstream.
+"demand_forecasting_pipeline/services/storage/file_storage.py" = ["E402"]
+# Analyzer lazy-imports provider SDKs inside the dispatch branches.
+"llm_analytics/core/analyzer.py" = ["E402", "E701"]
+# Session module legacy: inline structure conversions kept compact for
+# readability of the redistribution path.
+"sales_supervision/api/routes/session.py" = ["E402"]
+# Integration tests -- live-server probes via httpx with intentional
+# compact assertion expressions.
+"tests/**.py" = ["E701", "E702", "B904"]
 
 [tool.ruff.lint.isort]
 known-first-party = [
@@ -53,6 +78,13 @@ testpaths = ["tests"]
 python_files = "test_*.py"
 python_classes = "Test*"
 python_functions = "test_*"
+addopts = "--strict-markers --tb=short"
+markers = [
+    "slow: long-running tests (LLM calls, reconciliation refresh)",
+    "requires_db: needs a live AIML DB connection (auto-skip if unavailable)",
+    "requires_live_data: needs today's plan on at least one configured route",
+    "requires_live_server: needs the five backends running on the configured ports (auto-skip when no server is reachable)",
+]
 filterwarnings = [
     "error::DeprecationWarning:demand_forecasting_pipeline.*",
     "error::DeprecationWarning:recommended_order.*",

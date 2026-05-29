@@ -107,10 +107,10 @@ def main() -> int:
 
     def shutdown(*_: object) -> None:
         print("\n[launcher           ] SIGINT received; stopping all services...")
-        for label, p in reversed(procs):
+        for _label, p in reversed(procs):
             if p.poll() is None:
                 p.terminate()
-        for label, p in reversed(procs):
+        for _label, p in reversed(procs):
             try:
                 p.wait(timeout=10)
             except subprocess.TimeoutExpired:

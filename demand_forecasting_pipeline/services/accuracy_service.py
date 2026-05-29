@@ -6,17 +6,17 @@ Aggregation: GROUP BY (TrxDate, RouteCode, ItemCode), SUM positive QuantityInPCs
 from __future__ import annotations
 
 import logging
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import (
     FATAL_DB_ERRORS,
     get_pool,
     with_db_retry,
 )
+from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.src.evaluation.metrics import (
     composite_kwargs_from_yaml,
     composite_summary,
@@ -45,7 +45,7 @@ _EMPTY_SUMMARY: dict[str, Any] = {
 class AccuracyService:
     """Cross-DB query: predicted from YaumiAIML + actual from YaumiLive."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
 
     @property
@@ -103,11 +103,11 @@ class AccuracyService:
 
     def get_comparison(
         self,
-        start_date: Optional[str] = None,
-        end_date: Optional[str] = None,
-        route_code: Optional[str] = None,
-        item_code: Optional[str] = None,
-        limit: Optional[int] = 5000,
+        start_date: str | None = None,
+        end_date: str | None = None,
+        route_code: str | None = None,
+        item_code: str | None = None,
+        limit: int | None = 5000,
     ) -> dict[str, Any]:
         """Per-(date, route, item) rows with predicted + live actual.
 
@@ -206,11 +206,11 @@ class AccuracyService:
 
     def _fetch_predicted(
         self,
-        start_date: Optional[str],
-        end_date: Optional[str],
-        route_code: Optional[str],
-        item_code: Optional[str],
-        limit: Optional[int],
+        start_date: str | None,
+        end_date: str | None,
+        route_code: str | None,
+        item_code: str | None,
+        limit: int | None,
     ) -> pd.DataFrame:
         # limit=None skips the SQL TOP cap (drift/audit); paged UI keeps the cap.
         top_clause = f"TOP {int(limit)}" if limit is not None else ""
@@ -244,8 +244,8 @@ class AccuracyService:
     def _fetch_actuals(
         self,
         pred_df: pd.DataFrame,
-        route_code: Optional[str],
-        item_code: Optional[str],
+        route_code: str | None,
+        item_code: str | None,
     ) -> pd.DataFrame:
         """Pull actuals from YaumiLive with EXACT pipeline aggregation."""
         # Use the date range from predicted to scope the actuals query

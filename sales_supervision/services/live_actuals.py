@@ -7,7 +7,6 @@ the supervisor see real-time sales the moment a customer is marked visited.
 from __future__ import annotations
 
 import logging
-from typing import Dict
 
 import httpx
 
@@ -42,7 +41,7 @@ class LiveActualsClient:
             return []
         return payload.get("customers", []) or []
 
-    def get_actuals(self, route_code: str, date: str, customer_code: str) -> Dict[str, int]:
+    def get_actuals(self, route_code: str, date: str, customer_code: str) -> dict[str, int]:
         """Return ``{item_code: qty}`` for today's (or any) visit to a customer.
 
         Returns an empty dict on any upstream failure -- the caller treats that
@@ -61,7 +60,7 @@ class LiveActualsClient:
 
         if not payload.get("available"):
             return {}
-        out: Dict[str, int] = {}
+        out: dict[str, int] = {}
         for row in payload.get("items", []):
             code = str(row.get("item_code") or "").strip()
             if not code:

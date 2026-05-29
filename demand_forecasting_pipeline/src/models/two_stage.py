@@ -93,7 +93,7 @@ from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 
 from .base import BaseForecaster
-from .lightgbm_model import LightGBMForecaster, _HAS_LGB
+from .lightgbm_model import _HAS_LGB, LightGBMForecaster
 from .random_forest import RandomForestForecaster
 
 logger = logging.getLogger(__name__)

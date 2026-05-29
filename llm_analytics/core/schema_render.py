@@ -12,12 +12,12 @@ auto-updates on the next call.
 from __future__ import annotations
 
 import json
-from typing import Any, Dict, Type
+from typing import Any
 
 from pydantic import BaseModel
 
 
-def render_schema_for_prompt(model_cls: Type[BaseModel]) -> str:
+def render_schema_for_prompt(model_cls: type[BaseModel]) -> str:
     """Return a compact JSON-Schema-style description for the model class.
 
     Format chosen for readability + token economy: one line per field with
@@ -26,7 +26,7 @@ def render_schema_for_prompt(model_cls: Type[BaseModel]) -> str:
     tokens for the same constraint information on these flat models.
     """
     schema = model_cls.model_json_schema()
-    props: Dict[str, Any] = schema.get("properties", {})
+    props: dict[str, Any] = schema.get("properties", {})
 
     lines = ["{"]
     field_lines = []
@@ -39,7 +39,7 @@ def render_schema_for_prompt(model_cls: Type[BaseModel]) -> str:
     return "\n".join(lines)
 
 
-def _type_hint(spec: Dict[str, Any]) -> str:
+def _type_hint(spec: dict[str, Any]) -> str:
     """Compact type representation from a Pydantic JSON Schema property."""
     t = spec.get("type")
     if t == "array":

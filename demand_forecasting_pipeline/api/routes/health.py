@@ -9,12 +9,13 @@
 from __future__ import annotations
 
 import time
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 from fastapi import APIRouter, Depends, Response
 
+from common.db_pool import get_pool
 from demand_forecasting_pipeline.api.dependencies import (
     get_artifact_service,
     get_pipeline_service,
@@ -22,7 +23,6 @@ from demand_forecasting_pipeline.api.dependencies import (
 from demand_forecasting_pipeline.api.schemas import ArtifactStatus, HealthResponse
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
-from common.db_pool import get_pool
 from demand_forecasting_pipeline.services.pipeline_service import PipelineService
 
 router = APIRouter(tags=["health"])
@@ -97,8 +97,8 @@ def _last_train_age(
     try:
         when = datetime.fromisoformat(str(ts))
         if when.tzinfo is None:
-            when = when.replace(tzinfo=timezone.utc)
-        age = (datetime.now(timezone.utc) - when).total_seconds()
+            when = when.replace(tzinfo=UTC)
+        age = (datetime.now(UTC) - when).total_seconds()
         return {
             "available": True,
             "trained_at": ts,
@@ -165,7 +165,7 @@ def liveness() -> dict[str, Any]:
     """K8s liveness probe; 200 if process is alive. Never fails on downstream issues."""
     return {
         "status": "alive",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
     }
 
 
@@ -233,7 +233,7 @@ def readiness(
 
     body: dict[str, Any] = {
         "status": "ready" if must_be_green else "not_ready",
-        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "timestamp": datetime.now(UTC).isoformat(),
         "checks": checks,
     }
     response.status_code = 200 if must_be_green else 503

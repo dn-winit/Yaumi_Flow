@@ -24,10 +24,9 @@ Three production-grade invariants the rest of the module enforces:
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -57,7 +56,7 @@ logger = logging.getLogger(__name__)
 DEGRADED_KEY = "_degraded"
 
 
-def _items_signature(items: List[Dict[str, Any]]) -> str:
+def _items_signature(items: list[dict[str, Any]]) -> str:
     """Stable digest over EVERY per-item field the prompt actually reads.
 
     Folds quantities (rec, actual), tier, frequency, days_since, cycle,
@@ -95,11 +94,13 @@ def _items_signature(items: List[Dict[str, Any]]) -> str:
 # producer, add it to formatter.py once and every consumer picks it up.
 from llm_analytics.core.formatter import (
     ACT_QTY_KEYS as _ACT_QTY_KEYS,
+)
+from llm_analytics.core.formatter import (
     REC_QTY_KEYS as _REC_QTY_KEYS,
 )
 
 
-def _is_empty_visit(items: List[Dict[str, Any]]) -> bool:
+def _is_empty_visit(items: list[dict[str, Any]]) -> bool:
     """No items at all OR every item has zero recommended *and* zero actual."""
     from llm_analytics.core.formatter import _pick
     if not items:
@@ -135,7 +136,7 @@ def _prompts_version(prompts_dir: str) -> str:
 class Analyzer:
     """Production-grade analysis engine with cache, rate limiting, retries."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._client = LLMClient(self._s)
         self._prompts = PromptLoader(self._s)
@@ -160,7 +161,7 @@ class Analyzer:
         # Pydantic models so the system prompt and the validator never drift.
         # If a field is added/renamed in models/schemas.py the next service
         # restart picks it up without any prompt YAML edit.
-        self._schema_text: Dict[str, str] = {
+        self._schema_text: dict[str, str] = {
             "pre_visit_briefing":  render_schema_for_prompt(PreVisitBriefing),
             "customer_analysis":   render_schema_for_prompt(CustomerAnalysis),
             "route_analysis":      render_schema_for_prompt(RouteAnalysis),
@@ -196,11 +197,11 @@ class Analyzer:
         customer_code: str,
         route_code: str,
         date: str,
-        current_items: List[Dict[str, Any]],
+        current_items: list[dict[str, Any]],
         performance_score: float = 0.0,
         coverage: float = 0.0,
         accuracy: float = 0.0,
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         cache_kwargs = dict(
             customer_code=customer_code, route_code=route_code, date=date,
             _v=self._cache_version,
@@ -270,12 +271,12 @@ class Analyzer:
         self,
         route_code: str,
         date: str,
-        visited_customers: List[Dict[str, Any]],
+        visited_customers: list[dict[str, Any]],
         total_customers: int,
         total_actual: int = 0,
         total_recommended: int = 0,
-        actual_customer_codes: Optional[Set[str]] = None,
-    ) -> Dict[str, Any]:
+        actual_customer_codes: set[str] | None = None,
+    ) -> dict[str, Any]:
         # Route signature folds in every visited customer's totals so the
         # cache distinguishes "13/40 customers in, partial actuals" from
         # "40/40 in, full actuals" -- the two states produce different
@@ -348,8 +349,8 @@ class Analyzer:
         customer_name: str,
         route_code: str,
         date: str,
-        items: List[Dict[str, Any]],
-    ) -> Dict[str, Any]:
+        items: list[dict[str, Any]],
+    ) -> dict[str, Any]:
         cache_kwargs = dict(
             customer_code=customer_code, route_code=route_code, date=date,
             analysis_type="pre_visit",
@@ -410,7 +411,7 @@ class Analyzer:
 
     def build_customer_prompt(
         self, *, customer_code: str, route_code: str, date: str,
-        current_items: List[Dict[str, Any]],
+        current_items: list[dict[str, Any]],
         performance_score: float, coverage: float, accuracy: float,
     ) -> tuple[str, str]:
         visit_table = self._formatter.format_current_visit(current_items)
@@ -427,7 +428,7 @@ class Analyzer:
 
     def build_route_prompt(
         self, *, route_code: str, date: str,
-        visited_customers: List[Dict[str, Any]],
+        visited_customers: list[dict[str, Any]],
         total_customers: int,
         total_actual: int = 0, total_recommended: int = 0,
     ) -> tuple[str, str]:
@@ -449,7 +450,7 @@ class Analyzer:
 
     def build_pre_visit_prompt(
         self, *, customer_code: str, customer_name: str,
-        route_code: str, date: str, items: List[Dict[str, Any]],
+        route_code: str, date: str, items: list[dict[str, Any]],
     ) -> tuple[str, str]:
         """Render the briefing prompt with the rich items table that carries
         every explainability field the prompt template references."""
@@ -460,7 +461,7 @@ class Analyzer:
         def _safe(v: Any) -> str:
             return str(v).replace('"', " inch").replace("\\", "/") if v is not None else ""
 
-        lines: List[str] = []
+        lines: list[str] = []
         total_qty = 0
         for it in items:
             qty   = int(_get(it, "recommended_qty", "recommendedQty", "RecommendedQuantity", default=0) or 0)
@@ -477,7 +478,7 @@ class Analyzer:
                 f"  Item: {_safe(_get(it, 'item_code', 'itemCode', 'ItemCode', default='?'))} - {_safe(_get(it, 'item_name', 'itemName', 'ItemName'))}",
                 f"  Recommended qty: {qty} | Tier: {_safe(tier)} | Source: {_safe(source)}",
             ]
-            facts: List[str] = []
+            facts: list[str] = []
             if cycle:
                 try: facts.append(f"buys every {int(round(float(cycle)))} days")
                 except (TypeError, ValueError): pass
@@ -520,7 +521,7 @@ class Analyzer:
     # Health
     # ------------------------------------------------------------------
 
-    def health(self) -> Dict[str, Any]:
+    def health(self) -> dict[str, Any]:
         return {
             **self._client.health(),
             "cache": self._cache.stats(),
@@ -534,7 +535,7 @@ class Analyzer:
     def clear_cache(self) -> int:
         return self._cache.clear()
 
-    def cache_stats(self) -> Dict[str, Any]:
+    def cache_stats(self) -> dict[str, Any]:
         return self._cache.stats()
 
     # ------------------------------------------------------------------
@@ -543,8 +544,8 @@ class Analyzer:
 
     def _call_with_retry(
         self, system: str, user: str, model_cls: type, label: str,
-        *, route_code: str = "", customer_code: str = "", max_tokens: Optional[int] = None,
-    ) -> Dict[str, Any]:
+        *, route_code: str = "", customer_code: str = "", max_tokens: int | None = None,
+    ) -> dict[str, Any]:
         """Call LLM with retries on transient errors. Validation failures
         on the final attempt return the raw dict (so a structurally
         almost-right response still degrades gracefully). Truncations are
@@ -554,9 +555,9 @@ class Analyzer:
         ``label`` doubles as the cost-tracker ``artifact`` label so spend
         slices naturally per analyze_* method.
         """
-        last_exc: Optional[str] = None
+        last_exc: str | None = None
         for attempt in range(self._s.max_retries):
-            raw: Optional[Dict[str, Any]] = None
+            raw: dict[str, Any] | None = None
             try:
                 raw = self._client.chat(
                     system, user, attempt=attempt,
@@ -596,9 +597,9 @@ class Analyzer:
         return self._fallback(label, reason=last_exc or "All retries exhausted")
 
     @staticmethod
-    def _fallback(label: str, **context: Any) -> Dict[str, Any]:
+    def _fallback(label: str, **context: Any) -> dict[str, Any]:
         reason = context.get("reason", "Analysis unavailable")
-        base: Dict[str, Any] = {
+        base: dict[str, Any] = {
             "performance_summary": f"Analysis not available: {reason}",
             "route_summary": f"Analysis not available: {reason}",
             "briefing": f"Analysis not available: {reason}",
@@ -619,7 +620,7 @@ class Analyzer:
         return base
 
     @staticmethod
-    def _empty_customer_response(customer_code: str) -> Dict[str, Any]:
+    def _empty_customer_response(customer_code: str) -> dict[str, Any]:
         """Deterministic honest response when there is no visit data to
         analyse. Saves an LLM call and prevents hallucinated narratives
         like "clean slate / build relationship from the ground up".
@@ -641,7 +642,7 @@ class Analyzer:
         }
 
     @staticmethod
-    def _empty_route_response(route_code: str) -> Dict[str, Any]:
+    def _empty_route_response(route_code: str) -> dict[str, Any]:
         return {
             "route_code": route_code,
             "route_summary": "No visited customers yet on this route.",
@@ -653,7 +654,7 @@ class Analyzer:
         }
 
     @staticmethod
-    def _empty_briefing_response(customer_code: str) -> Dict[str, Any]:
+    def _empty_briefing_response(customer_code: str) -> dict[str, Any]:
         return {
             "customer_code": customer_code,
             "briefing": "No recommendations for this customer today.",

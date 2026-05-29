@@ -7,7 +7,7 @@ request filters are FastAPI ``Query(...)`` decls on the route signatures.
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -36,7 +36,7 @@ class MetricsResponse(BaseModel):
 
 class ClassSummaryResponse(BaseModel):
     success: bool
-    total_pairs: Optional[int] = None
+    total_pairs: int | None = None
     classes: dict[str, int] = {}
 
 # ------------------------------------------------------------------
@@ -46,14 +46,14 @@ class ClassSummaryResponse(BaseModel):
 class PipelineRunRequest(BaseModel):
     """Trigger a pipeline run; ``config_path`` (if given) must resolve to a YAML
     file inside the deployed pipeline config dir. Prevents arbitrary-file-read."""
-    config_path: Optional[str] = Field(
+    config_path: str | None = Field(
         default=None,
         description="Custom config YAML path inside deployed pipeline config dir.",
     )
 
     @field_validator("config_path")
     @classmethod
-    def _validate_config_path(cls, v: Optional[str]) -> Optional[str]:
+    def _validate_config_path(cls, v: str | None) -> str | None:
         if v is None:
             return v
         # Lazy import keeps schemas cheap for doc tooling.
@@ -64,7 +64,9 @@ class PipelineRunRequest(BaseModel):
             target = Path(v).resolve(strict=False)
         except (OSError, RuntimeError, ValueError):
             # Generic message; absolute paths are info-disclosure pre-auth.
-            raise ValueError("config_path is not a valid filesystem path")
+            # ``from None`` suppresses the wrapped exception so the chain
+            # doesn't surface filesystem internals to the caller.
+            raise ValueError("config_path is not a valid filesystem path") from None
         if target.suffix.lower() not in (".yaml", ".yml"):
             raise ValueError("config_path must be a .yaml or .yml file")
         # Containment check; do NOT echo base dir to caller.
@@ -74,22 +76,22 @@ class PipelineRunRequest(BaseModel):
             raise ValueError(
                 "config_path must resolve inside the deployed pipeline "
                 "config directory"
-            )
+            ) from None
         return str(target)
 
 class PipelineRunResponse(BaseModel):
     success: bool
     message: str
-    config: Optional[str] = None
+    config: str | None = None
 
 class PipelineStatusResponse(BaseModel):
     pipeline: str
     status: str
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
+    started_at: str | None = None
+    finished_at: str | None = None
     duration_seconds: float = 0.0
-    last_success_duration_seconds: Optional[float] = None
-    error: Optional[str] = None
+    last_success_duration_seconds: float | None = None
+    error: str | None = None
     result: dict[str, Any] = {}
     steps: dict[str, str] = {}
 
@@ -100,13 +102,13 @@ class ResolvedStep(BaseModel):
     key: str
     name: str
     status: str  # idle | running | completed | failed | skipped
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
-    error: Optional[str] = None
-    last_success_duration_seconds: Optional[float] = None
+    started_at: str | None = None
+    finished_at: str | None = None
+    error: str | None = None
+    last_success_duration_seconds: float | None = None
     # Plain-language tile lines, server-computed; ``None`` until honest data exists.
-    metric_text: Optional[str] = None
-    detail_text: Optional[str] = None
+    metric_text: str | None = None
+    detail_text: str | None = None
 
 class ResolvedPipelineStatus(BaseModel):
     """Composite payload for the Pipeline page; each step fully shaped server-side."""
@@ -120,11 +122,11 @@ class FutureRouteSummaryRow(BaseModel):
     # Rep's TOTAL van load for the route = opening_stock + recommended_load, summed.
     predicted_qty: float = 0.0
     # Day with the highest van-load total in the response window; busiest forward-day when date=None.
-    peak_day: Optional[str] = None
+    peak_day: str | None = None
 
 class FutureRouteSummaryResponse(BaseModel):
     success: bool = True
-    date: Optional[str] = None
+    date: str | None = None
     routes: list[FutureRouteSummaryRow] = []
     # False indicates degraded mode (bias missing / cold start); UI shows a warning chip.
     reconciled: bool = True
@@ -156,14 +158,14 @@ class HealthResponse(BaseModel):
 class ForecastSummaryResponse(BaseModel):
     # accuracy_pct / total_pairs nullable: numeric zero renders misleadingly mid-training;
     # None lets the UI show "-" until artifacts exist.
-    accuracy_pct: Optional[float] = None
-    total_pairs: Optional[int] = None
+    accuracy_pct: float | None = None
+    total_pairs: int | None = None
     classes: dict[str, int] = {}
     test_predictions_count: int = 0
     future_forecast_count: int = 0
-    last_forecast_date: Optional[str] = None
+    last_forecast_date: str | None = None
     training_summary_exists: bool = False
-    training_overview: Optional[dict[str, Any]] = None
+    training_overview: dict[str, Any] | None = None
 
 # ------------------------------------------------------------------
 # Retrain config / history
@@ -174,10 +176,10 @@ class RetrainConfigResponse(BaseModel):
     enabled: bool = False
     frequency_days: int = 14
     auto_inference_after_train: bool = True
-    last_auto_retrain: Optional[str] = None
-    next_scheduled: Optional[str] = None
+    last_auto_retrain: str | None = None
+    next_scheduled: str | None = None
     history: list[dict[str, Any]] = Field(default_factory=list)
-    drift: Optional[dict[str, Any]] = None
+    drift: dict[str, Any] | None = None
 
     model_config = {"extra": "ignore"}
 
@@ -193,21 +195,21 @@ class ModelVersionEntry(BaseModel):
     (decision, champion_accuracy, delta_pp) are None on pre-Phase-6 versions."""
     version_id: str
     path: str
-    promoted_at: Optional[str] = None
-    promoted_by: Optional[str] = None
-    trigger: Optional[str] = None
-    accuracy_before: Optional[float] = None
-    accuracy_after: Optional[float] = None
-    duration_seconds: Optional[float] = None
+    promoted_at: str | None = None
+    promoted_by: str | None = None
+    trigger: str | None = None
+    accuracy_before: float | None = None
+    accuracy_after: float | None = None
+    duration_seconds: float | None = None
     is_current: bool = False
-    decision: Optional[str] = None
-    champion_accuracy: Optional[float] = None
-    delta_pp: Optional[float] = None
+    decision: str | None = None
+    champion_accuracy: float | None = None
+    delta_pp: float | None = None
 
 
 class ModelVersionsResponse(BaseModel):
     total: int
-    current_version_id: Optional[str] = None
+    current_version_id: str | None = None
     versions: list[ModelVersionEntry] = Field(default_factory=list)
 
 
@@ -225,25 +227,25 @@ class RollbackResponse(BaseModel):
 
 class _AvailableEnvelope(BaseModel):
     available: bool
-    message: Optional[str] = None
+    message: str | None = None
 
 class VanLoadResponse(_AvailableEnvelope):
     """Per-item van composition for one (route, date)."""
-    route_code: Optional[str] = None
-    date: Optional[str] = None
-    source: Optional[str] = None    # "live" | "csv"
+    route_code: str | None = None
+    date: str | None = None
+    source: str | None = None    # "live" | "csv"
     items: list[dict[str, Any]] = Field(default_factory=list)
     totals: dict[str, Any] = Field(default_factory=dict)
-    fetched_at: Optional[str] = None
+    fetched_at: str | None = None
 
 class ReconciliationResponse(_AvailableEnvelope):
     """V5_b recommendations joined with the actual van composition."""
-    route_code: Optional[str] = None
-    date: Optional[str] = None
-    source: Optional[str] = None
+    route_code: str | None = None
+    date: str | None = None
+    source: str | None = None
     items: list[dict[str, Any]] = Field(default_factory=list)
     totals: dict[str, Any] = Field(default_factory=dict)
-    fetched_at: Optional[str] = None
+    fetched_at: str | None = None
 
 class PastPerformanceItem(BaseModel):
     """Per-(item, date) breakdown row; sums reconcile with ``totals`` within
@@ -275,12 +277,12 @@ class PastPerformanceItem(BaseModel):
 # extended with rep's actual loading from yf_sales_transactions.yaumi_*. Optional
 # because past dates / no-activity dates surface NULL.
 class VanLoadPageViewItem(PastPerformanceItem):
-    yaumi_opening_stock: Optional[float] = None
-    yaumi_fresh_load: Optional[float] = None
-    yaumi_total_van_load: Optional[float] = None
-    yaumi_leftover: Optional[float] = None
+    yaumi_opening_stock: float | None = None
+    yaumi_fresh_load: float | None = None
+    yaumi_total_van_load: float | None = None
+    yaumi_leftover: float | None = None
     # Dormancy flag from yf_sales_transactions.forecast_dormant; pre-existing rows surface NULL.
-    forecast_dormant: Optional[bool] = None
+    forecast_dormant: bool | None = None
 
 
 class PastPerformanceCategoryRow(BaseModel):
@@ -303,11 +305,11 @@ class PastPerformanceResponse(_AvailableEnvelope):
     categories: per-category rollup table.
     items: per-(item, date) breakdown table.
     """
-    route_code: Optional[str] = None
-    start_date: Optional[str] = None
-    end_date: Optional[str] = None
-    lookback_days: Optional[int] = None
-    active_days: Optional[int] = None
+    route_code: str | None = None
+    start_date: str | None = None
+    end_date: str | None = None
+    lookback_days: int | None = None
+    active_days: int | None = None
     daily: list[dict[str, Any]] = Field(default_factory=list)
     totals: dict[str, Any] = Field(default_factory=dict)
     categories: list[PastPerformanceCategoryRow] = Field(default_factory=list)
@@ -330,7 +332,7 @@ class VanLoadSummaryView(BaseModel):
     carried_items: int = 0
     issued_qty: float = 0.0
     issued_items: int = 0
-    revenue: Optional[float] = None
+    revenue: float | None = None
     has_revenue: bool = False
     at_risk: int = 0
 
@@ -355,10 +357,10 @@ class VanLoadTableRow(BaseModel):
     item_name: str
     units_to_load: float
     recommended_van_load: float
-    p_demand: Optional[float] = None
-    demand_class: Optional[str] = None
-    lower_bound: Optional[float] = None
-    upper_bound: Optional[float] = None
+    p_demand: float | None = None
+    demand_class: str | None = None
+    lower_bound: float | None = None
+    upper_bound: float | None = None
     has_real_confidence: bool = False
     explain: dict[str, Any] = Field(default_factory=dict)
 
@@ -369,7 +371,7 @@ class VanLoadPageView(BaseModel):
     """
     success: bool = True
     available: bool = True
-    message: Optional[str] = None
+    message: str | None = None
     route_code: str
     date: str
     reconciled: bool = True
@@ -393,8 +395,8 @@ class ForecastDrawerSummary(BaseModel):
     total_van_load: float = 0.0
     skus: int = 0
     avg_per_day: float = 0.0
-    window_start: Optional[str] = None
-    window_end: Optional[str] = None
+    window_start: str | None = None
+    window_end: str | None = None
     line_count: int = 0
 
 class ForecastDrawerChartPoint(BaseModel):
@@ -405,8 +407,8 @@ class ForecastDrawerChartPoint(BaseModel):
     """
     date: str
     predicted: float
-    q10: Optional[float] = None
-    q90: Optional[float] = None
+    q10: float | None = None
+    q90: float | None = None
 
 class ForecastDrawerTableRow(BaseModel):
     """One line, sorted asc by date then desc by units_to_load; same contract as
@@ -415,10 +417,10 @@ class ForecastDrawerTableRow(BaseModel):
     item_code: str
     item_name: str
     units_to_load: float
-    p_demand: Optional[float] = None
-    demand_class: Optional[str] = None
-    lower_bound: Optional[float] = None
-    upper_bound: Optional[float] = None
+    p_demand: float | None = None
+    demand_class: str | None = None
+    lower_bound: float | None = None
+    upper_bound: float | None = None
     has_real_confidence: bool = False
     explain: dict[str, Any] = Field(default_factory=dict)
 
@@ -426,8 +428,8 @@ class ForecastDrawerView(BaseModel):
     """Composite Upcoming-plan drawer payload: tiles, chart series, line-item table, show_band."""
     success: bool = True
     available: bool = True
-    message: Optional[str] = None
-    route_code: Optional[str] = None
+    message: str | None = None
+    route_code: str | None = None
     item_codes: list[str] = Field(default_factory=list)
     from_date: str
     show_band: bool = False

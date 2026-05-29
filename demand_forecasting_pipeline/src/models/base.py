@@ -3,7 +3,6 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 import numpy as np
-import pandas as pd
 
 
 class BaseForecaster(ABC):
@@ -33,7 +32,7 @@ class BaseForecaster(ABC):
     def get_params(self, deep: bool = True) -> dict:
         return dict(self.params)
 
-    def set_params(self, **params) -> "BaseForecaster":
+    def set_params(self, **params) -> BaseForecaster:
         self.params.update(params)
         return self
 

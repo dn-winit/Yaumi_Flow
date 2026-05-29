@@ -7,17 +7,14 @@ honoured); empty input degrades to ``(0.0, 0.0, None)``.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
-
 import pandas as pd
-
 
 # Wire column names imported from the canonical rename map so producer-side
 # column changes propagate here automatically (loud KeyError vs silent zeros).
 # Lives in ``common/`` so this module doesn't reach back into a service module.
 from common.wire_schemas import SALES_TRANSACTIONS_RENAME as _RENAME
 
-_SX_WIRE: Dict[str, str] = {v: k for k, v in _RENAME.items()}  # snake -> PascalCase
+_SX_WIRE: dict[str, str] = {v: k for k, v in _RENAME.items()}  # snake -> PascalCase
 
 _TRX_DATE_COL      = _SX_WIRE["trx_date"]
 _ROUTE_COL         = _SX_WIRE["route_code"]
@@ -27,14 +24,14 @@ _YAUMI_LEFTOVER_COL = _SX_WIRE["yaumi_leftover"]
 
 
 def lookup_prior_leftover(
-    sx_idx: Dict[Tuple[str, str, pd.Timestamp], Tuple[float, ...]],
+    sx_idx: dict[tuple[str, str, pd.Timestamp], tuple[float, ...]],
     route_code: str,
     item_code: str,
     target_date: pd.Timestamp,
     *,
     lookback_days: int = 14,
     leftover_pos: int = 0,
-) -> Tuple[float, Optional[pd.Timestamp]]:
+) -> tuple[float, pd.Timestamp | None]:
     """Walk back day-by-day in ``sx_idx`` up to ``lookback_days``, return
     ``(leftover, source_date)`` for the most-recent row strictly before
     ``target_date``. Returns ``(0.0, None)`` if no row exists in-window.
@@ -53,12 +50,12 @@ def lookup_prior_leftover(
 
 
 def build_yesterday_leftover_map(
-    sx_df: Optional[pd.DataFrame],
+    sx_df: pd.DataFrame | None,
     route_codes: list[str],
     target_date: pd.Timestamp,
     *,
     lookback_days: int = 14,
-) -> Dict[Tuple[str, str], Tuple[float, float, Optional[pd.Timestamp]]]:
+) -> dict[tuple[str, str], tuple[float, float, pd.Timestamp | None]]:
     """Vectorised batch version returning
     ``{(route, item): (engine_leftover, rep_leftover, source_date)}`` for
     every pair with at least one row in the prior ``lookback_days`` window.
@@ -100,7 +97,7 @@ def build_yesterday_leftover_map(
     idx = df.groupby([_ROUTE_COL, _ITEM_COL])[_TRX_DATE_COL].idxmax()
     latest = df.loc[idx]
 
-    out: Dict[Tuple[str, str], Tuple[float, float, Optional[pd.Timestamp]]] = {}
+    out: dict[tuple[str, str], tuple[float, float, pd.Timestamp | None]] = {}
     for _, r in latest.iterrows():
         engine_leftover = float(r[_LEFTOVER_NEXT_COL])
         rep_leftover_raw = r[_YAUMI_LEFTOVER_COL]

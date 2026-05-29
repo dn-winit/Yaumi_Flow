@@ -12,11 +12,12 @@ import logging
 import threading
 import time
 import traceback
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
-from enum import Enum
+from datetime import UTC, datetime
+from enum import StrEnum
 from types import MappingProxyType
-from typing import Any, Callable, Mapping, Optional
+from typing import Any
 
 import httpx
 
@@ -46,7 +47,7 @@ _PIPELINE_PREFLIGHT_ARTIFACTS: dict[str, tuple[str, ...]] = {
     "inference": ("pair_classes.csv",),
 }
 
-class PipelineStatus(str, Enum):
+class PipelineStatus(StrEnum):
     IDLE = "idle"
     RUNNING = "running"
     SUCCESS = "success"
@@ -56,12 +57,12 @@ class PipelineStatus(str, Enum):
 class PipelineRun:
     pipeline: str  # "train" or "inference"
     status: PipelineStatus = PipelineStatus.IDLE
-    started_at: Optional[str] = None
-    finished_at: Optional[str] = None
+    started_at: str | None = None
+    finished_at: str | None = None
     duration_seconds: float = 0.0
     # Duration of last successful run; UI uses it as ETA hint during in-flight runs.
-    last_success_duration_seconds: Optional[float] = None
-    error: Optional[str] = None
+    last_success_duration_seconds: float | None = None
+    error: str | None = None
     result: dict[str, Any] = field(default_factory=dict)
     steps: dict[str, str] = field(default_factory=dict)
     # Audit-hook inputs. Populated at trigger time so the post-success
@@ -76,7 +77,7 @@ class PipelineRun:
     # Standalone ``POST /pipeline/inference`` debug calls stay False and
     # the auto-cascade reconciliation hook NO-OPs on them.
     chained_from_train: bool = False
-    accuracy_before: Optional[float] = None
+    accuracy_before: float | None = None
 
 class PipelineService:
     """Manages background pipeline execution with status tracking.
@@ -100,7 +101,7 @@ class PipelineService:
     # Env-tunable bound; long enough for typical fits, short enough not to hang shutdown.
     _DEFAULT_SHUTDOWN_TIMEOUT_SECONDS = 30.0
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._lock = threading.Lock()
         self._runs: dict[str, PipelineRun] = {
@@ -112,14 +113,14 @@ class PipelineService:
             "train": threading.Event(),
             "inference": threading.Event(),
         }
-        self._threads: dict[str, Optional[threading.Thread]] = {
+        self._threads: dict[str, threading.Thread | None] = {
             "train": None, "inference": None,
         }
 
     def _cancel_requested(self, pipeline: str) -> bool:
         return self._cancel[pipeline].is_set()
 
-    def shutdown(self, timeout_seconds: Optional[float] = None) -> None:
+    def shutdown(self, timeout_seconds: float | None = None) -> None:
         """Cancel in-flight pipelines; per-pipeline join with bounded timeout."""
         wait = float(timeout_seconds or self._DEFAULT_SHUTDOWN_TIMEOUT_SECONDS)
         for name in ("train", "inference"):
@@ -172,10 +173,10 @@ class PipelineService:
 
     def run_training(
         self,
-        config_path: Optional[str] = None,
+        config_path: str | None = None,
         *,
         trigger: str = "manual",
-        accuracy_before: Optional[float] = None,
+        accuracy_before: float | None = None,
     ) -> dict[str, Any]:
         """Spawn a training run; ``trigger`` records origin (manual/schedule/drift)."""
         return self._run_pipeline(
@@ -185,7 +186,7 @@ class PipelineService:
 
     def run_inference(
         self,
-        config_path: Optional[str] = None,
+        config_path: str | None = None,
         *,
         chained_from_train: bool = False,
     ) -> dict[str, Any]:
@@ -202,7 +203,7 @@ class PipelineService:
 
     # Trigger-time guards (caller must hold self._lock).
 
-    def _check_run_guards(self, pipeline: str) -> Optional[str]:
+    def _check_run_guards(self, pipeline: str) -> str | None:
         """Reason pipeline can't start: self-running OR blocking dep is running."""
         run = self._runs.get(pipeline)
         if run and run.status == PipelineStatus.RUNNING:
@@ -213,7 +214,7 @@ class PipelineService:
                 return f"{dep} is in progress; wait for it to finish"
         return None
 
-    def _check_preflight(self, pipeline: str) -> Optional[str]:
+    def _check_preflight(self, pipeline: str) -> str | None:
         """Reason if precondition artifacts are missing under explainability_path."""
         for filename in _PIPELINE_PREFLIGHT_ARTIFACTS.get(pipeline, ()):
             if not self._s.explainability_path(filename).exists():
@@ -223,10 +224,10 @@ class PipelineService:
     def _run_pipeline(
         self,
         pipeline: str,
-        config_path: Optional[str] = None,
+        config_path: str | None = None,
         *,
         trigger: str = "manual",
-        accuracy_before: Optional[float] = None,
+        accuracy_before: float | None = None,
         chained_from_train: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
@@ -249,7 +250,7 @@ class PipelineService:
                 return {"success": False, "message": missing}
             run = self._runs[pipeline]
             run.status = PipelineStatus.RUNNING
-            run.started_at = datetime.now(timezone.utc).isoformat()
+            run.started_at = datetime.now(UTC).isoformat()
             run.finished_at = None
             run.error = None
             run.result = {}
@@ -330,7 +331,7 @@ class PipelineService:
             with self._lock:
                 run = self._runs[pipeline]
                 run.status = PipelineStatus.SUCCESS
-                run.finished_at = datetime.now(timezone.utc).isoformat()
+                run.finished_at = datetime.now(UTC).isoformat()
                 run.duration_seconds = duration
                 run.last_success_duration_seconds = duration
                 run.result = {"output_type": type(result).__name__} if result is not None else {}
@@ -367,7 +368,7 @@ class PipelineService:
             with self._lock:
                 run = self._runs[pipeline]
                 run.status = PipelineStatus.FAILED
-                run.finished_at = datetime.now(timezone.utc).isoformat()
+                run.finished_at = datetime.now(UTC).isoformat()
                 run.duration_seconds = duration
                 run.error = str(exc)
 
@@ -378,7 +379,8 @@ class PipelineService:
         """Best-effort audit trail entry via shared training_outcome helper."""
         try:
             from demand_forecasting_pipeline.api.dependencies import (
-                get_artifact_service, get_retrain_config,
+                get_artifact_service,
+                get_retrain_config,
             )
             from demand_forecasting_pipeline.services.training_outcome import (
                 record_training_outcome,

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 
 @dataclass
@@ -21,7 +21,7 @@ class CycleInfo:
 class TrendInfo:
     factor: float
     trend_type: str
-    metadata: Dict[str, Any] = field(default_factory=dict)
+    metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -55,7 +55,7 @@ class Candidate:
     trend_factor: float = 1.0
     churn_probability: float = 0.0
     # Explainability (Explanation is not serialisable -- we carry its outputs)
-    signals: List[Dict[str, Any]] = field(default_factory=list)
+    signals: list[dict[str, Any]] = field(default_factory=list)
     why_item: str = ""
     why_quantity: str = ""
     confidence: float = 0.0
@@ -82,13 +82,13 @@ class Recommendation:
     purchase_count: int
     trend_factor: float
     # Sprint-1 explainability fields
-    signals: List[Dict[str, Any]] = field(default_factory=list)
+    signals: list[dict[str, Any]] = field(default_factory=list)
     why_item: str = ""
     why_quantity: str = ""
     confidence: float = 0.0
     candidate_source: str = ""
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "TrxDate": self.trx_date,
             "RouteCode": self.route_code,

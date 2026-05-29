@@ -65,8 +65,9 @@ def test_delete_aware_merge_evicts_db_deleted_rows(tmp_path) -> None:
     Runs in-process (no DB/HTTP) so this stays in the non-``slow``
     tier and gates every CI build.
     """
-    import pandas as pd
     from unittest.mock import patch
+
+    import pandas as pd
 
     csv_path = tmp_path / "demand_forecast.csv"
     existing = pd.DataFrame([

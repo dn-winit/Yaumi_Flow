@@ -3,8 +3,9 @@ Entry point: ``python -m data_import``
 """
 
 from pathlib import Path
-from dotenv import load_dotenv
+
 import uvicorn
+from dotenv import load_dotenv
 
 # Load unified .env from project root before any settings import
 _ROOT_ENV = Path(__file__).resolve().parent.parent / ".env"

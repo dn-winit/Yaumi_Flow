@@ -14,8 +14,8 @@ from __future__ import annotations
 import threading
 from collections import deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from typing import Any, Deque, Dict, Iterable, List, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -43,13 +43,13 @@ class CostTracker:
 
     def __init__(self, *, max_entries: int) -> None:
         self._lock = threading.Lock()
-        self._buffer: Deque[CostEntry] = deque(maxlen=max_entries)
+        self._buffer: deque[CostEntry] = deque(maxlen=max_entries)
 
     def record(self, entry: CostEntry) -> None:
         with self._lock:
             self._buffer.append(entry)
 
-    def _snapshot(self) -> List[CostEntry]:
+    def _snapshot(self) -> list[CostEntry]:
         # Snapshot under lock, aggregate outside. Holds the lock only for
         # the deque copy (microseconds) so a concurrent ``record`` never waits.
         with self._lock:
@@ -62,9 +62,9 @@ class CostTracker:
         price_output_usd_per_million: float,
         display_currency: str,
         display_rate: float,
-        since: Optional[datetime] = None,
-        route_code: Optional[str] = None,
-    ) -> Dict[str, Any]:
+        since: datetime | None = None,
+        route_code: str | None = None,
+    ) -> dict[str, Any]:
         """Aggregate the buffer into a JSON-shaped report.
 
         ``since`` defaults to start-of-today (UTC) so the headline number
@@ -72,7 +72,7 @@ class CostTracker:
         route. Both unfiltered totals and per-artifact + per-outcome
         breakdowns are returned so the UI can drill in without re-querying.
         """
-        cutoff = since or datetime.now(timezone.utc).replace(
+        cutoff = since or datetime.now(UTC).replace(
             hour=0, minute=0, second=0, microsecond=0,
         )
         rows = [
@@ -93,8 +93,8 @@ class CostTracker:
           + total_output_tokens * price_output_usd_per_million / 1_000_000.0
         )
 
-        per_artifact: Dict[str, Dict[str, Any]] = {}
-        per_outcome:  Dict[str, int] = {}
+        per_artifact: dict[str, dict[str, Any]] = {}
+        per_outcome:  dict[str, int] = {}
         for e in rows:
             a = per_artifact.setdefault(e.artifact, {
                 "calls": 0, "input_tokens": 0, "output_tokens": 0,
@@ -132,7 +132,7 @@ class CostTracker:
 
 # Process-singleton instance, lazily sized on first import. The size is read
 # from settings at construction so an env override applies cleanly on restart.
-_INSTANCE: Optional[CostTracker] = None
+_INSTANCE: CostTracker | None = None
 _INIT_LOCK = threading.Lock()
 
 

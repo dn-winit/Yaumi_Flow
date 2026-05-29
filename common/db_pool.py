@@ -11,9 +11,10 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Callable, Iterator, Optional, TypeVar
+from typing import Any, TypeVar
 
 import pyodbc
 
@@ -80,7 +81,7 @@ class DbConnectionPool:
         is pre-applied; callers can override via ``conn.timeout = N``.
         """
         self._sem.acquire()
-        conn: Optional[pyodbc.Connection] = None
+        conn: pyodbc.Connection | None = None
         try:
             conn = pyodbc.connect(
                 self._conn_str,
@@ -145,7 +146,7 @@ def with_db_retry(
 
     @wraps(fn)
     def _wrapper(*args: Any, **kwargs: Any) -> T:
-        last_err: Optional[BaseException] = None
+        last_err: BaseException | None = None
         deadlock_seen = 0
         general_attempt = 0
         while True:

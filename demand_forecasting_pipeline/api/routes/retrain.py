@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from typing import Optional
-
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -32,9 +30,9 @@ router = APIRouter(prefix="/retrain", tags=["retrain"])
 
 
 class RetrainConfigUpdate(BaseModel):
-    enabled: Optional[bool] = None
-    frequency_days: Optional[int] = None
-    auto_inference_after_train: Optional[bool] = None
+    enabled: bool | None = None
+    frequency_days: int | None = None
+    auto_inference_after_train: bool | None = None
 
 
 @router.get("/config", response_model=RetrainConfigResponse)
@@ -106,18 +104,18 @@ def rollback(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
-        )
+        ) from exc
     except FileNotFoundError as exc:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=str(exc),
-        )
+        ) from exc
     except OSError as exc:
         # Snapshot found but restore copy failed; pointer untouched so previous version remains active.
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"rollback I/O failure: {exc}",
-        )
+        ) from exc
     # Hard cache reset; mtime-keyed cache would catch up but explicit invalidation guarantees next read serves restored files.
     artifact_svc.invalidate_cache()
     return RollbackResponse(

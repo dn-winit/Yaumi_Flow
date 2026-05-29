@@ -54,7 +54,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
 import sys
 import time
 from pathlib import Path
@@ -71,10 +70,11 @@ if str(_REPO_ROOT) not in sys.path:
 # os.environ, so they need the file resolved into the process environment.
 # Matches the pattern in data_import/__main__.py.
 from dotenv import load_dotenv  # noqa: E402
+
 load_dotenv(_REPO_ROOT / ".env")
 
 from data_import.config.settings import get_settings  # noqa: E402
-from data_import.core.importer import DataImporter   # noqa: E402
+from data_import.core.importer import DataImporter  # noqa: E402
 
 logging.basicConfig(
     level=logging.INFO,

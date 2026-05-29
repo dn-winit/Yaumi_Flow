@@ -14,8 +14,9 @@ import json
 import logging
 import os
 import subprocess
-from datetime import datetime, timezone
-from typing import Any, Iterable
+from collections.abc import Iterable
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -104,7 +105,7 @@ def build_training_metadata(
     """
     return {
         "schema_version": "1.0",
-        "trained_at": datetime.now(timezone.utc).isoformat(),
+        "trained_at": datetime.now(UTC).isoformat(),
         "git_sha": _git_sha(),
         "config_hash": config_hash(cfg),
         "feature_schema_hash": feature_schema_hash(feature_cols),

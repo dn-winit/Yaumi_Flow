@@ -7,8 +7,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
 
 import pandas as pd
@@ -31,13 +31,13 @@ class PlanningService:
         self._s = settings
         self._ttl = cache_ttl_seconds
         self._lock = threading.Lock()
-        self._cache: Dict[tuple, tuple[float, Dict[str, Any]]] = {}
+        self._cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
 
-    def get_upcoming(self, days: int = _DEFAULT_HORIZON_DAYS, route_code: Optional[str] = None) -> Dict[str, Any]:
+    def get_upcoming(self, days: int = _DEFAULT_HORIZON_DAYS, route_code: str | None = None) -> dict[str, Any]:
         days = max(1, min(days, _MAX_HORIZON_DAYS))
         today = self._today()
         key = (today, days, route_code or "")
@@ -63,9 +63,9 @@ class PlanningService:
         try:
             return datetime.now(ZoneInfo(tz_name)).strftime("%Y-%m-%d")
         except Exception:
-            return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            return datetime.now(UTC).strftime("%Y-%m-%d")
 
-    def _compute(self, today: str, days: int, route_code: Optional[str]) -> Dict[str, Any]:
+    def _compute(self, today: str, days: int, route_code: str | None) -> dict[str, Any]:
         horizon = [
             (datetime.strptime(today, "%Y-%m-%d").date() + timedelta(days=i)).isoformat()
             for i in range(days)
@@ -80,7 +80,7 @@ class PlanningService:
         load_col = "recommended_load" if "recommended_load" in demand.columns else "Predicted"
         prices = self._dm.get_item_prices()
 
-        daily: List[Dict[str, Any]] = []
+        daily: list[dict[str, Any]] = []
         for day in horizon:
             target = pd.to_datetime(day).normalize()
             jp = _slice_by_date(journey, ("JourneyDate", "TrxDate"), target)
@@ -125,7 +125,7 @@ class PlanningService:
         }
 
     @staticmethod
-    def _summary(daily: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def _summary(daily: list[dict[str, Any]]) -> dict[str, Any]:
         if not daily:
             return {
                 "total_visits": 0, "total_qty": 0.0, "total_revenue": 0.0,

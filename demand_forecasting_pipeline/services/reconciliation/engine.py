@@ -11,13 +11,13 @@ Two surfaces: recommend_one (dataclass, diagnostic) + recommend_batch (vectorise
 """
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
-from typing import Any, Dict, Optional, Sequence, Tuple
+from typing import Any
 
 import numpy as np
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
-
 
 # Decision-path labels for explainability; one set of strings for writer + UI reader.
 DECISION_SKIP            = "skip"             # forecast <= 0
@@ -32,22 +32,22 @@ class LoadRecommendation:
 
     item_code: str
     item_name: str = ""
-    demand_class: Optional[str] = None
+    demand_class: str | None = None
     forecast_raw: float = 0.0
     bias_pct: float = 0.0
     forecast_corrected: float = 0.0
     opening_stock: float = 0.0
     # V2 diagnostics populated only when corresponding inputs are supplied.
-    loading_quantile: Optional[float] = None
-    target_qty: Optional[float] = None
+    loading_quantile: float | None = None
+    target_qty: float | None = None
     recommended_load: float = 0.0
     carry_floor_applied: bool = False
     decision_path: str = DECISION_SKIP
-    typical_alloc: Optional[float] = None
-    decision_vs_typical: Optional[str] = None
+    typical_alloc: float | None = None
+    decision_vs_typical: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
-        out: Dict[str, Any] = {
+    def to_dict(self) -> dict[str, Any]:
+        out: dict[str, Any] = {
             "item_code": self.item_code,
             "item_name": self.item_name,
             "demand_class": self.demand_class,
@@ -100,31 +100,31 @@ class ReconciliationEngine:
         *,
         item_code: str,
         item_name: str = "",
-        demand_class: Optional[str] = None,
+        demand_class: str | None = None,
         forecast: float,
         bias_pct: float,
         opening_stock: float,
         # L4 inputs -- predictive interval bounds. Either both supplied
         # or both None; partial input degrades to V5_b cleanly.
-        forecast_q_low: Optional[float] = None,
-        forecast_q_high: Optional[float] = None,
+        forecast_q_low: float | None = None,
+        forecast_q_high: float | None = None,
         # The interval the q_low / q_high cover (default 10..90 percentile
         # band, matching the model's emitted ``q_10`` / ``q_90`` columns).
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
         # L1b sample size; None -> full correction (V5_b).
-        n_active_days: Optional[float] = None,
+        n_active_days: float | None = None,
         # Preferred adaptive ratio; None -> kernel falls back to bias_pct.
-        calibration_ratio: Optional[float] = None,
-        typical_alloc: Optional[float] = None,
+        calibration_ratio: float | None = None,
+        typical_alloc: float | None = None,
         # use_carry_floor=False matches every production caller.
         use_carry_floor: bool = False,
     ) -> LoadRecommendation:
         """Compute the fresh-issuance recommendation for one (item, day)."""
-        def _arr(v: Optional[float]) -> np.ndarray:
+        def _arr(v: float | None) -> np.ndarray:
             return np.array([np.nan if v is None else float(v)], dtype=float)
 
-        cls_arr: Optional[np.ndarray] = (
+        cls_arr: np.ndarray | None = (
             np.array([demand_class], dtype=object) if demand_class is not None else None
         )
 
@@ -166,14 +166,14 @@ class ReconciliationEngine:
         openings: np.ndarray,
         # use_carry_floor=False matches every production caller (see recommend_one).
         use_carry_floor: bool = False,
-        q_lows: Optional[np.ndarray] = None,
-        q_highs: Optional[np.ndarray] = None,
-        classes: Optional[Sequence[Any]] = None,
-        n_active_days: Optional[np.ndarray] = None,
-        calibration_ratios: Optional[np.ndarray] = None,
+        q_lows: np.ndarray | None = None,
+        q_highs: np.ndarray | None = None,
+        classes: Sequence[Any] | None = None,
+        n_active_days: np.ndarray | None = None,
+        calibration_ratios: np.ndarray | None = None,
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """Vectorised (item, day) batch.
 
         Required arrays (1-D equal-length): forecasts, bias_pcts, openings.
@@ -211,14 +211,14 @@ class ReconciliationEngine:
         bias_pcts: np.ndarray,
         openings: np.ndarray,
         use_carry_floor: bool,
-        q_lows: Optional[np.ndarray] = None,
-        q_highs: Optional[np.ndarray] = None,
-        classes: Optional[np.ndarray] = None,
-        n_active_days: Optional[np.ndarray] = None,
-        calibration_ratios: Optional[np.ndarray] = None,
+        q_lows: np.ndarray | None = None,
+        q_highs: np.ndarray | None = None,
+        classes: np.ndarray | None = None,
+        n_active_days: np.ndarray | None = None,
+        calibration_ratios: np.ndarray | None = None,
         q_low_pct: float = 0.10,
         q_high_pct: float = 0.90,
-    ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, Optional[Dict[str, np.ndarray]]]:
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, dict[str, np.ndarray] | None]:
         """Shared numpy kernel; NaN/inf/negative inputs all map to safe defaults
         so a bad row never poisons the batch."""
         if forecasts.shape != bias_pcts.shape or forecasts.shape != openings.shape:
@@ -412,7 +412,7 @@ class ReconciliationEngine:
     # than cached at construction so a settings reload (test override,
     # /reload endpoint) is picked up immediately.
 
-    def _decide(self, load: float, typical: Optional[float]) -> Optional[str]:
+    def _decide(self, load: float, typical: float | None) -> str | None:
         if typical is None:
             return None
         if typical == 0 and load == 0:

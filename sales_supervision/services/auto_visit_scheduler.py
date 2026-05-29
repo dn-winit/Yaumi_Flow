@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
 from zoneinfo import ZoneInfo
 
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -28,11 +27,11 @@ class AutoVisitScheduler:
         self,
         service: AutoVisitService,
         *,
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
     ) -> None:
         self._s = settings or get_settings()
         self._service = service
-        self._scheduler: Optional[BackgroundScheduler] = None
+        self._scheduler: BackgroundScheduler | None = None
 
     @property
     def running(self) -> bool:

@@ -22,7 +22,7 @@ def apply_van_load_constraints(df: pd.DataFrame) -> pd.DataFrame:
 
     result_rows: list[dict] = []
 
-    for item_code, item_data in df.groupby("ItemCode", sort=False):
+    for _item_code, item_data in df.groupby("ItemCode", sort=False):
         van_load = int(item_data["VanLoad"].iloc[0])
         total_req = item_data["RecommendedQuantity"].sum()
 

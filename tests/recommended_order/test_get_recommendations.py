@@ -150,11 +150,12 @@ def test_tier2_fallback_seeds_opening_from_yesterday_leftover(tmp_path) -> None:
 
     In-process, no DB/HTTP -- runs in every CI build.
     """
-    import math
-    import pandas as pd
     from unittest.mock import patch
-    from recommended_order.data.manager import DataManager
+
+    import pandas as pd
+
     from recommended_order.config.settings import Settings
+    from recommended_order.data.manager import DataManager
 
     # Tmp shared_data_dir with a sales_transactions.csv that has
     # YESTERDAY's row carrying a non-zero leftover, but no row for
@@ -223,10 +224,12 @@ def test_tier2_carry_seed_walks_back_across_non_trip_days(tmp_path) -> None:
     Mirrors the engine's own multi-date sim semantic (enrich.py:652-659
     iterates over valid_dates, so sim_leftover persists across gaps).
     """
-    import pandas as pd
     from unittest.mock import patch
-    from recommended_order.data.manager import DataManager
+
+    import pandas as pd
+
     from recommended_order.config.settings import Settings
+    from recommended_order.data.manager import DataManager
 
     shared = tmp_path
     saturday = pd.Timestamp("2026-05-30")  # arbitrary Saturday
@@ -270,10 +273,12 @@ def test_tier2_walk_back_respects_configurable_lookback_limit(tmp_path) -> None:
     revert to literal yesterday-only lookup. Setting to 0 must disable
     the carry seed entirely.
     """
-    import pandas as pd
     from unittest.mock import patch
-    from recommended_order.data.manager import DataManager
+
+    import pandas as pd
+
     from recommended_order.config.settings import Settings
+    from recommended_order.data.manager import DataManager
 
     shared = tmp_path
     target = pd.Timestamp("2026-05-30")
@@ -324,10 +329,12 @@ def test_tier2_carry_seed_honours_explicit_zero_leftover(tmp_path) -> None:
     a phantom-stock bug where we recommend less fresh allocation than
     needed.
     """
-    import pandas as pd
     from unittest.mock import patch
-    from recommended_order.data.manager import DataManager
+
+    import pandas as pd
+
     from recommended_order.config.settings import Settings
+    from recommended_order.data.manager import DataManager
 
     shared = tmp_path
     target = pd.Timestamp("2026-05-30")
@@ -388,10 +395,12 @@ def test_tier2_multi_item_no_unbound_or_key_leak(tmp_path) -> None:
     This test runs a mixed-opening scenario (one zero, two non-zero
     via reconcile_demand_frame mocking) to lock both holes shut.
     """
-    import pandas as pd
     from unittest.mock import patch
-    from recommended_order.data.manager import DataManager
+
+    import pandas as pd
+
     from recommended_order.config.settings import Settings
+    from recommended_order.data.manager import DataManager
 
     shared = tmp_path
     today = pd.Timestamp("2026-05-30")
@@ -463,8 +472,10 @@ def test_shared_carry_helper_invariants() -> None:
       4. Missing pair returns (0, None) without raising.
     """
     import pandas as pd
+
     from common.carry_lookup import (
-        lookup_prior_leftover, build_yesterday_leftover_map,
+        build_yesterday_leftover_map,
+        lookup_prior_leftover,
     )
 
     target = pd.Timestamp("2026-05-30")
@@ -524,12 +535,12 @@ def test_db_pusher_emits_serializable_and_lock_hints() -> None:
     isolation level and the lock-hint clause so a future settings or
     template edit can't silently weaken the contract.
     """
+    from recommended_order.config.settings import DatabaseSettings
     from recommended_order.services.db_pusher import (
         _DELETE_SQL_BASE,
         _ISOLATION_RE,
         _LOCK_HINTS_RE,
     )
-    from recommended_order.config.settings import DatabaseSettings
 
     # The DELETE template must contain the hint-clause placeholder so
     # the settings-driven lock hints can be interpolated at runtime.

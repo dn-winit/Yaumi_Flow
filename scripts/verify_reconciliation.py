@@ -34,9 +34,9 @@ import json
 import os
 import sys
 import urllib.request
+from collections.abc import Iterable
 from datetime import date, timedelta
 from pathlib import Path
-from typing import Iterable
 
 import pandas as pd
 import pyodbc
@@ -317,7 +317,7 @@ def main(argv: Iterable[str] | None = None) -> int:
     )
     parser.add_argument(
         "--routes", nargs="*", default=DEFAULT_ROUTES,
-        help=f"Routes to test (default: 12 live routes)",
+        help="Routes to test (default: 12 live routes)",
     )
     parser.add_argument(
         "--dates", nargs="*", default=None,

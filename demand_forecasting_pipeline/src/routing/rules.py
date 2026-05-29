@@ -24,9 +24,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import numpy as np
 import pandas as pd
-
 
 _OPERATORS = frozenset({
     "lt", "lte", "gt", "gte", "eq", "ne",
@@ -49,7 +47,7 @@ class Rule:
     hp_trials_multiplier: float = 1.0
 
     @classmethod
-    def from_dict(cls, d: dict) -> "Rule":
+    def from_dict(cls, d: dict) -> Rule:
         name = d.get("name")
         if not name or not isinstance(name, str):
             raise ValueError(f"Rule missing string 'name': {d!r}")

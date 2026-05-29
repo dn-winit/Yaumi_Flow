@@ -8,8 +8,8 @@ behaviour is identical regardless of trigger. Failures are logged + swallowed
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
-from typing import Any, Optional
+from datetime import UTC, datetime
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -21,10 +21,10 @@ def record_training_outcome(
     retrain_config: Any,
     settings: Any,
     trigger: str,
-    accuracy_before: Optional[float] = None,
-    started_at: Optional[str] = None,
-    duration_seconds: Optional[float] = None,
-) -> Optional[dict[str, Any]]:
+    accuracy_before: float | None = None,
+    started_at: str | None = None,
+    duration_seconds: float | None = None,
+) -> dict[str, Any] | None:
     """Post-process a successful training run; returns persisted entry or None on non-success.
 
     trigger: "manual" / "schedule" / "drift". accuracy_before optional (scheduler
@@ -46,7 +46,7 @@ def record_training_outcome(
     if started_at is None:
         started_at = (
             train_status.get("started_at")
-            or datetime.now(timezone.utc).isoformat()
+            or datetime.now(UTC).isoformat()
         )
 
     entry: dict[str, Any] = {
@@ -79,7 +79,8 @@ def record_training_outcome(
             get_model_registry,
         )
         from demand_forecasting_pipeline.services.retrain_scheduler import (
-            PromotionDecision, evaluate_challenger,
+            PromotionDecision,
+            evaluate_challenger,
         )
         registry = get_model_registry()
 

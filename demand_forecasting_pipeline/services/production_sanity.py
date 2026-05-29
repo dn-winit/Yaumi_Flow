@@ -8,10 +8,10 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import dataclass, asdict
-from datetime import datetime, timezone
+from dataclasses import asdict, dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -58,7 +58,7 @@ def _snapshot_path(settings: Settings) -> Path:
     return Path(settings.artifacts_dir) / "production_sanity.json"
 
 
-def take_snapshot(settings: Settings) -> Optional[SanitySnapshot]:
+def take_snapshot(settings: Settings) -> SanitySnapshot | None:
     """Capture per-route totals over next HORIZON_WINDOW_DAYS; None on cold start."""
     forecast_csv = Path(settings.predictions_path(settings.future_forecast_file))
     if not forecast_csv.exists():
@@ -82,7 +82,7 @@ def take_snapshot(settings: Settings) -> Optional[SanitySnapshot]:
         .drop_duplicates().shape[0]
     )
     return SanitySnapshot(
-        snapshot_at=datetime.now(timezone.utc).isoformat(),
+        snapshot_at=datetime.now(UTC).isoformat(),
         horizon_start=today.date().isoformat(),
         horizon_end=horizon_end.date().isoformat(),
         per_route_totals={str(k): float(v) for k, v in per_route.items()},

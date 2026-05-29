@@ -9,7 +9,7 @@ import logging
 import threading
 import time
 from datetime import datetime, timedelta
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -39,7 +39,7 @@ class AdoptionService:
         self._dm = dm
         self._ttl = cache_ttl_seconds
         self._lock = threading.Lock()
-        self._cache: Dict[tuple, tuple[float, Dict[str, Any]]] = {}
+        self._cache: dict[tuple, tuple[float, dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public
@@ -49,10 +49,10 @@ class AdoptionService:
         self,
         start_date: str,
         end_date: str,
-        route_code: Optional[str] = None,
-        category_codes: Optional[List[str]] = None,
-        item_codes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        route_code: str | None = None,
+        category_codes: list[str] | None = None,
+        item_codes: list[str] | None = None,
+    ) -> dict[str, Any]:
         # Sorted-tuple key so reordered selections share a slot.
         cats = tuple(sorted(set(map(str, category_codes or []))))
         items = tuple(sorted(set(map(str, item_codes or []))))
@@ -76,10 +76,10 @@ class AdoptionService:
         self,
         start_date: str,
         end_date: str,
-        route_code: Optional[str],
+        route_code: str | None,
         category_codes: tuple = (),
         item_codes: tuple = (),
-    ) -> Dict[str, Any]:
+    ) -> dict[str, Any]:
         # Translate (category_codes ∪ item_codes) into a flat set of items
         # that recs and sales should be filtered to. Both empty -> None
         # (no filter). Done once per request -- the result is reused by
@@ -132,15 +132,15 @@ class AdoptionService:
         self,
         category_codes: tuple,
         item_codes: tuple,
-        route_code: Optional[str] = None,
-    ) -> Optional[set]:
+        route_code: str | None = None,
+    ) -> set | None:
         """Resolve (categories, items) to a flat ItemCode set.
         None = no filter; empty set = filter resolves to zero items
         (caller should short-circuit); otherwise the explicit set."""
         if not category_codes and not item_codes:
             return None
 
-        explicit_items: Optional[set] = set(map(str, item_codes)) if item_codes else None
+        explicit_items: set | None = set(map(str, item_codes)) if item_codes else None
 
         if category_codes:
             cats = set(map(str, category_codes))
@@ -163,12 +163,12 @@ class AdoptionService:
         self,
         start_date: str,
         end_date: str,
-        route_code: Optional[str],
-        item_filter: Optional[set] = None,
+        route_code: str | None,
+        item_filter: set | None = None,
     ) -> pd.DataFrame:
         """Read per-day recommendations from the store and concat."""
         days = _daterange(start_date, end_date)
-        frames: List[pd.DataFrame] = []
+        frames: list[pd.DataFrame] = []
         for day in days:
             df = self._store.get(day, route_code)
             if df.empty:
@@ -206,9 +206,9 @@ class AdoptionService:
         self,
         start_date: str,
         end_date: str,
-        route_code: Optional[str],
+        route_code: str | None,
         recs: pd.DataFrame,
-        item_filter: Optional[set] = None,
+        item_filter: set | None = None,
     ) -> pd.DataFrame:
         """Customer-level sales from ``data/customer_data.csv`` via DataManager."""
         df = self._dm.get_customer_data(route_code)
@@ -253,7 +253,7 @@ class AdoptionService:
         return merged
 
     @staticmethod
-    def _summary(merged: pd.DataFrame) -> Dict[str, Any]:
+    def _summary(merged: pd.DataFrame) -> dict[str, Any]:
         """Business summary preserving the identity
         ``driven_* + unsold_* = recommended_*`` (per SKU and aggregate):
         driven = sum(min(rec, actual)); unsold = sum(max(0, rec - actual))."""
@@ -285,9 +285,9 @@ class AdoptionService:
 
         if prices_available:
             price = recommended_rows["unit_price"]
-            driven_revenue: Optional[float] = float((driven_q * price).sum())
-            unsold_revenue: Optional[float] = float((unsold_q * price).sum())
-            recommended_revenue: Optional[float] = float((rec_q * price).sum())
+            driven_revenue: float | None = float((driven_q * price).sum())
+            unsold_revenue: float | None = float((unsold_q * price).sum())
+            recommended_revenue: float | None = float((rec_q * price).sum())
         else:
             driven_revenue = None
             unsold_revenue = None
@@ -336,7 +336,7 @@ class AdoptionService:
         }
 
     @staticmethod
-    def _active_dates(merged: pd.DataFrame, sales: pd.DataFrame) -> List[str]:
+    def _active_dates(merged: pd.DataFrame, sales: pd.DataFrame) -> list[str]:
         """Union of dates with either recs or sales activity in scope."""
         seen: set[str] = set()
         for frame in (merged, sales):
@@ -348,13 +348,13 @@ class AdoptionService:
 
     @staticmethod
     def _daily_padded(
-        merged: pd.DataFrame, active_dates: List[str]
-    ) -> List[Dict[str, Any]]:
+        merged: pd.DataFrame, active_dates: list[str]
+    ) -> list[dict[str, Any]]:
         """Daily adoption rate padded over every active date; no-rec days
         emit adoption_pct=None (chart break); honest zero plots as 0.0."""
         if not active_dates and merged.empty:
             return []
-        by_date: Dict[str, Dict[str, Any]] = {}
+        by_date: dict[str, dict[str, Any]] = {}
         if not merged.empty:
             for day, g in merged.groupby("trx_date"):
                 if pd.isna(day):
@@ -372,7 +372,7 @@ class AdoptionService:
                     "adopted": adopted,
                     "adoption_pct": rate,
                 }
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for d in active_dates:
             if d in by_date:
                 rows.append(by_date[d])
@@ -389,22 +389,22 @@ class AdoptionService:
 
     @staticmethod
     def _derived_metrics(
-        summary: Dict[str, Any],
-        daily: List[Dict[str, Any]],
-        active_dates: List[str],
-    ) -> Dict[str, Any]:
+        summary: dict[str, Any],
+        daily: list[dict[str, Any]],
+        active_dates: list[str],
+    ) -> dict[str, Any]:
         """Derived values (pick accuracy, perfect-pick rate, days-with-recs,
         best day); None when source counts can't yield a meaningful number."""
         skus_recommended = int(summary.get("skus_recommended") or 0)
         skus_adopted = int(summary.get("skus_adopted") or 0)
         skus_perfect = int(summary.get("skus_perfect") or 0)
 
-        pick_accuracy_pct: Optional[float] = (
+        pick_accuracy_pct: float | None = (
             round(skus_adopted / skus_recommended * 100.0, 1)
             if skus_recommended > 0
             else None
         )
-        perfect_pick_pct: Optional[float] = (
+        perfect_pick_pct: float | None = (
             round(skus_perfect / skus_adopted * 100.0, 1)
             if skus_adopted > 0
             else None
@@ -413,7 +413,7 @@ class AdoptionService:
         days_with_recs = sum(1 for d in daily if (d.get("recommended") or 0) > 0)
         active_days = len(active_dates)
 
-        best_day: Optional[Dict[str, Any]] = None
+        best_day: dict[str, Any] | None = None
         for d in daily:
             rec = int(d.get("recommended") or 0)
             pct = d.get("adoption_pct")
@@ -431,7 +431,7 @@ class AdoptionService:
         }
 
     @staticmethod
-    def _top_items(merged: pd.DataFrame, *, which: str, limit: int) -> List[Dict[str, Any]]:
+    def _top_items(merged: pd.DataFrame, *, which: str, limit: int) -> list[dict[str, Any]]:
         """Top N items by either over-recommended or missed rows."""
         if merged.empty:
             return []
@@ -457,12 +457,12 @@ class AdoptionService:
         ]
 
     @staticmethod
-    def _by_tier(merged: pd.DataFrame) -> List[Dict[str, Any]]:
+    def _by_tier(merged: pd.DataFrame) -> list[dict[str, Any]]:
         """Adoption rate split by tier -- did MUST_STOCK really sell?"""
         recommended = merged[merged["_merge"].isin(["left_only", "both"])]
         if recommended.empty or "tier" not in recommended.columns:
             return []
-        rows: List[Dict[str, Any]] = []
+        rows: list[dict[str, Any]] = []
         for tier, g in recommended.groupby("tier"):
             if not tier:
                 continue
@@ -473,7 +473,7 @@ class AdoptionService:
         rows.sort(key=lambda r: r["recommended"], reverse=True)
         return rows
 
-    def _empty_response(self, start_date: str, end_date: str, *, reason: str) -> Dict[str, Any]:
+    def _empty_response(self, start_date: str, end_date: str, *, reason: str) -> dict[str, Any]:
         return {
             "available": False,
             "start_date": start_date,
@@ -487,10 +487,10 @@ class AdoptionService:
         }
 
 
-def _daterange(start_date: str, end_date: str) -> List[str]:
+def _daterange(start_date: str, end_date: str) -> list[str]:
     start = datetime.strptime(start_date, "%Y-%m-%d").date()
     end = datetime.strptime(end_date, "%Y-%m-%d").date()
-    days: List[str] = []
+    days: list[str] = []
     d = start
     while d <= end:
         days.append(d.isoformat())

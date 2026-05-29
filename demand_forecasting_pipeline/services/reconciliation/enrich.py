@@ -20,7 +20,7 @@ from __future__ import annotations
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -206,14 +206,14 @@ def enrich_with_load(
     predicted_col: str = "Predicted",
     output_col: str = "recommended_load",
     with_diagnostics: bool = True,
-    settings: Optional[Settings] = None,
+    settings: Settings | None = None,
     # V2 column hints. ``None`` => the helper introspects the frame for
     # the standard names (``q_10`` / ``q_90`` / ``class`` / ``DemandClass``)
     # and silently disables the layer when neither is present. Callers
     # can pin a specific column to override.
-    q_low_col: Optional[str] = None,
-    q_high_col: Optional[str] = None,
-    class_col: Optional[str] = None,
+    q_low_col: str | None = None,
+    q_high_col: str | None = None,
+    class_col: str | None = None,
     # Actuals override for the leftover simulation. When provided, the
     # carry-chain walk uses this dict instead of re-parsing
     # sales_recent.csv -- callers (e.g. reconciliation_refresh) that
@@ -224,8 +224,8 @@ def enrich_with_load(
     # the day's total units sold. ``actuals_latest_date`` is the max
     # trx_date the override covers; rows past that fall back to the
     # forecast for the simulation, same contract as the CSV path.
-    actuals_override: Optional[dict[tuple[str, str, "pd.Timestamp"], float]] = None,
-    actuals_latest_date: Optional["pd.Timestamp"] = None,
+    actuals_override: dict[tuple[str, str, pd.Timestamp], float] | None = None,
+    actuals_latest_date: pd.Timestamp | None = None,
 ) -> pd.DataFrame:
     """Add the reconciled van load (and, by default, diagnostic columns).
 
@@ -459,7 +459,7 @@ def enrich_with_load(
     # so the engine kernel falls back to bias_pct for them.
     calib_table = bias.get_calibration_table()
     if calib_table:
-        calibration_arr: Optional[np.ndarray] = np.fromiter(
+        calibration_arr: np.ndarray | None = np.fromiter(
             (
                 calib_table.get((str(rc_arr[i]), str(ic_arr[i])), float("nan"))
                 for i in range(n)
@@ -929,12 +929,12 @@ def enrich_with_load(
 # ----------------------------------------------------------------------
 
 _ACTUAL_LOCK = threading.Lock()
-_ACTUAL_CACHE: "dict[tuple[str, int, int], tuple[dict[tuple[str, str, pd.Timestamp], float], Optional[pd.Timestamp]]]" = {}
+_ACTUAL_CACHE: dict[tuple[str, int, int], tuple[dict[tuple[str, str, pd.Timestamp], float], pd.Timestamp | None]] = {}
 
 
 def _actual_sold_index(
     sales_path: Path,
-) -> tuple[dict[tuple[str, str, pd.Timestamp], float], Optional[pd.Timestamp]]:
+) -> tuple[dict[tuple[str, str, pd.Timestamp], float], pd.Timestamp | None]:
     """Per-(route, item, date) actuals lookup plus the max trx date.
 
     Mtime-keyed on ``sales_recent.csv`` so the CSV is parsed once per
@@ -1000,7 +1000,7 @@ def _actual_sold_index(
 
 _RECENT_STATS_LOCK = threading.Lock()
 # (path, mtime, size, window) -> {(route, item): (mean, std, active_days)}
-_RECENT_STATS_CACHE: "dict[tuple[str, int, int, int], dict[tuple[str, str], tuple[float, float, int]]]" = {}
+_RECENT_STATS_CACHE: dict[tuple[str, int, int, int], dict[tuple[str, str], tuple[float, float, int]]] = {}
 
 
 def _recent_stats_per_selling_day_index(
@@ -1090,7 +1090,7 @@ def _recent_stats_per_selling_day_index(
 # ----------------------------------------------------------------------
 
 _ACTIVE_LOCK = threading.Lock()
-_ACTIVE_CACHE: "dict[tuple[str, int, int, int], dict[tuple[str, str], int]]" = {}
+_ACTIVE_CACHE: dict[tuple[str, int, int, int], dict[tuple[str, str], int]] = {}
 
 def _pair_active_days_index(
     sales_path: Path, *, bias_lookback_days: int,
@@ -1135,9 +1135,9 @@ def _pair_active_days_index(
 # ----------------------------------------------------------------------
 
 _CONC_LOCK = threading.Lock()
-_CONC_CACHE: "dict[tuple, dict[tuple[str, str], frozenset[str]]]" = {}
+_CONC_CACHE: dict[tuple, dict[tuple[str, str], frozenset[str]]] = {}
 _JOURNEY_LOCK = threading.Lock()
-_JOURNEY_CACHE: "dict[tuple, dict[str, dict[str, frozenset[str]]]]" = {}
+_JOURNEY_CACHE: dict[tuple, dict[str, dict[str, frozenset[str]]]] = {}
 
 
 def _concentrated_buyers_index(
@@ -1226,7 +1226,7 @@ def _concentrated_buyers_index(
 _DORMANT_LOCK = threading.Lock()
 # (sales_path, sales_mtime, sales_size, journey_path, journey_mtime,
 #  journey_size, threshold) -> frozenset[(route, item)]
-_DORMANT_CACHE: "dict[tuple, frozenset[tuple[str, str]]]" = {}
+_DORMANT_CACHE: dict[tuple, frozenset[tuple[str, str]]] = {}
 
 
 def _dormant_pairs_index(
@@ -1320,7 +1320,7 @@ def _dormant_pairs_index(
             zip(
                 positive["RouteCode"].tolist(),
                 positive["ItemCode"].tolist(),
-                positive["TrxDate"].tolist(),
+                positive["TrxDate"].tolist(), strict=False,
             )
         )
         # Per-(route, item) "ever seen in sales_recent" catalogue. Items
@@ -1328,7 +1328,7 @@ def _dormant_pairs_index(
         # frame, so we only need to flag pairs that DID appear at some
         # point and have since gone cold.
         items_by_route: dict[str, set[str]] = {}
-        for r, i in zip(s_df["RouteCode"].tolist(), s_df["ItemCode"].tolist()):
+        for r, i in zip(s_df["RouteCode"].tolist(), s_df["ItemCode"].tolist(), strict=False):
             items_by_route.setdefault(str(r), set()).add(str(i))
 
         # 3. For each route with enough trip-day history, walk its last

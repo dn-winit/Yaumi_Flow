@@ -9,14 +9,11 @@ into a service module was a latent circular-dep risk).
 
 from __future__ import annotations
 
-from typing import Dict
-
-
 # yf_sales_transactions CSV mirror schema. The reconciliation engine emits
 # PascalCase rows via the data_import cascade; everyone downstream
 # (recommended_order, supervision, common.carry_lookup) renames to snake_case
 # via this map. Producer-side SQL aliases validated against it at import.
-SALES_TRANSACTIONS_RENAME: Dict[str, str] = {
+SALES_TRANSACTIONS_RENAME: dict[str, str] = {
     "TrxDate":                "trx_date",
     "RouteCode":              "route_code",
     "ItemCode":               "item_code",

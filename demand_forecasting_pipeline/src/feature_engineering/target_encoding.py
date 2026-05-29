@@ -265,7 +265,7 @@ def load_target_encoding(
     rename doesn't silently apply the wrong encoding.
     """
     p = Path(path)
-    with open(p, "r", encoding="utf-8") as fh:
+    with open(p, encoding="utf-8") as fh:
         payload = json.load(fh)
     saved_keys = list(payload.get("group_keys") or [])
     if saved_keys != list(expected_group_keys):

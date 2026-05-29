@@ -7,8 +7,6 @@ Customer Score: (coverage x 0.4) + (accuracy x 0.6)
 
 from __future__ import annotations
 
-from typing import Optional
-
 from sales_supervision.config.constants import SupervisionConstants
 from sales_supervision.models.schemas import ScoreResult, SessionCustomer
 
@@ -16,7 +14,7 @@ from sales_supervision.models.schemas import ScoreResult, SessionCustomer
 class ScoringEngine:
     """Stateless scoring calculator."""
 
-    def __init__(self, constants: Optional[SupervisionConstants] = None) -> None:
+    def __init__(self, constants: SupervisionConstants | None = None) -> None:
         self._c = constants or SupervisionConstants()
         self._az = self._c.accuracy
         self._sw = self._c.scoring

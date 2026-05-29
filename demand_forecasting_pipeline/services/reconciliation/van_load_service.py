@@ -9,9 +9,10 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from datetime import date as _date_cls, datetime
+from datetime import date as _date_cls
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 import httpx
 import pandas as pd
@@ -33,7 +34,7 @@ ITEM_FIELDS: tuple[str, ...] = (
 class VanLoadService:
     """Single shape for van composition. CSVs for historical, HTTP for live."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         # Settings-driven cache TTLs; live changes require a process restart to apply.
         self._max_cache_entries: int = int(self._s.van_load_max_cache_entries)

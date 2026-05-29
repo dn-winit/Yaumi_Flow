@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any
 
 import yaml
 
@@ -18,15 +18,15 @@ logger = logging.getLogger(__name__)
 class PromptLoader:
     """Loads YAML prompt templates and renders them with data."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._dir = Path((settings or get_settings()).prompts_dir)
-        self._templates: Dict[str, Dict[str, str]] = {}
+        self._templates: dict[str, dict[str, str]] = {}
         self._load_all()
 
     def _load_all(self) -> None:
         for path in self._dir.glob("*.yaml"):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     self._templates[path.stem] = yaml.safe_load(f)
                 logger.info("Loaded prompt: %s", path.stem)
             except Exception as exc:

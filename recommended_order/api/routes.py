@@ -6,7 +6,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -20,9 +20,6 @@ from recommended_order.api.dependencies import (
     get_planning_service,
     get_store,
 )
-from recommended_order.services.adoption_service import AdoptionService
-from recommended_order.services.planning_service import PlanningService
-from recommended_order.services.db_pusher import DbPusher
 from recommended_order.api.schemas import (
     AdoptionResponse,
     EmptyRouteCustomer,
@@ -39,13 +36,18 @@ from recommended_order.api.schemas import (
 from recommended_order.config.constants import SafetyClamps
 from recommended_order.config.settings import get_settings
 from recommended_order.core.calibration import (
-    calibrate,
     cache_size as calibration_cache_size,
+)
+from recommended_order.core.calibration import (
+    calibrate,
 )
 from recommended_order.core.engine import RecommendationEngine
 from recommended_order.core.feedback import compute_feedback_adjustments
 from recommended_order.core.metrics import get_last_generation_tracker
 from recommended_order.data.manager import DataManager
+from recommended_order.services.adoption_service import AdoptionService
+from recommended_order.services.db_pusher import DbPusher
+from recommended_order.services.planning_service import PlanningService
 from recommended_order.services.storage.store import RecommendationStore
 
 logger = logging.getLogger(__name__)
@@ -127,13 +129,13 @@ def health(
 
 @router.get("/filter-options", response_model=FilterOptionsResponse)
 def filter_options(
-    date: Optional[str] = Query(None, description="Date to check journey counts for"),
+    date: str | None = Query(None, description="Date to check journey counts for"),
     dm: DataManager = Depends(get_fresh_data_manager),
     store: RecommendationStore = Depends(get_store),
 ):
     routes = dm.get_route_codes()
-    journey_counts: Dict[str, int] = {}
-    route_diagnoses: Dict[str, EmptyRouteDiagnosis] = {}
+    journey_counts: dict[str, int] = {}
+    route_diagnoses: dict[str, EmptyRouteDiagnosis] = {}
 
     if date:
         # Single-pass groupby vs N filters across the picker grid.
@@ -165,8 +167,8 @@ def filter_options(
 
 
 def _corpus_median_active_customers(
-    dm: DataManager, route_codes: List[str],
-) -> Optional[float]:
+    dm: DataManager, route_codes: list[str],
+) -> float | None:
     """Median active-customer count across the configured fleet; used by
     calibration to soften filters on sparse routes."""
     counts = []
@@ -181,15 +183,15 @@ def _corpus_median_active_customers(
 
 
 def _corpus_field_distributions(
-    dm: DataManager, route_codes: List[str], clamps: SafetyClamps,
-) -> Dict[str, List[float]]:
+    dm: DataManager, route_codes: list[str], clamps: SafetyClamps,
+) -> dict[str, list[float]]:
     """Corpus distributions per calibration field for the anti-overfit
     clamp; base-pass with ``corpus_field_values=None`` to avoid recursion."""
     field_names = (
         "frequency_floor", "dormancy_days", "qty_benchmark",
         "completion_gate", "basket_min_confidence", "recency_half_life_days",
     )
-    values: Dict[str, List[float]] = {k: [] for k in field_names}
+    values: dict[str, list[float]] = {k: [] for k in field_names}
     for rc in route_codes:
         df = dm.get_customer_data(rc)
         if df.empty:
@@ -213,7 +215,7 @@ def _corpus_field_distributions(
 
 def _load_feedback_adjustments(
     dm: DataManager, clamps: SafetyClamps,
-) -> tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """Sprint-4: read stored recs + supervision visits in the rolling
     window, compute per-(route, source) shrinkage multipliers + confidence,
     EMA-smooth against the persisted file, and return both.
@@ -294,7 +296,7 @@ def _diagnose_empty_route(
         )
 
     # Known customers exist -- check which have van overlap and which don't.
-    mismatch: List[EmptyRouteCustomer] = []
+    mismatch: list[EmptyRouteCustomer] = []
     for cust in known:
         cust_mask = norm_cust == cust
         if not cust_mask.any():
@@ -389,7 +391,8 @@ def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
     with the minimal horizon covering ``target_date``. ``today`` uses the
     scheduler TZ so a UTC-deployed server doesn't misclassify Dubai-today."""
     s = get_settings()
-    from datetime import date as _date, datetime
+    from datetime import date as _date
+    from datetime import datetime
     from zoneinfo import ZoneInfo
     today_d = datetime.now(ZoneInfo(s.scheduler.timezone)).date()
     if target_date > today_d.strftime("%Y-%m-%d"):
@@ -428,7 +431,7 @@ def _ensure_carry_chain_present(target_date: str, dm: DataManager) -> None:
 
 def _generate_routes(
     target_date: str,
-    route_codes: List[str],
+    route_codes: list[str],
     *,
     dm: DataManager,
     engine: RecommendationEngine,
@@ -436,7 +439,7 @@ def _generate_routes(
     pusher: DbPusher,
     skip_existing: bool = True,
     skip_carry_chain_heal: bool = False,
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Generate + save + DB-push recommendations for a set of routes.
     Shared by POST /generate and POST /get (lazy path); skips routes that
     already have data when ``skip_existing`` is True.
@@ -501,7 +504,7 @@ def _generate_routes(
     # since numpy/pandas releases the GIL.
     workers = max(1, int(get_settings().generation_concurrency))
 
-    def _one(rc: str) -> Dict[str, Any]:
+    def _one(rc: str) -> dict[str, Any]:
         try:
             van_items = dm.get_van_items(rc, target_date)
             journey_custs = dm.get_journey_customers(rc, target_date)
@@ -546,7 +549,7 @@ def _generate_routes(
             logger.error("Failed to generate for route %s: %s", rc, exc, exc_info=True)
             return {"route": rc, "status": "error", "error": str(exc), "records": 0}
 
-    details: List[Dict[str, Any]] = []
+    details: list[dict[str, Any]] = []
     if workers <= 1 or len(to_generate) <= 1:
         details = [_one(rc) for rc in to_generate]
     else:
@@ -740,9 +743,9 @@ def get_recommendations(
 def adoption(
     start_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
     end_date: str = Query(..., pattern=r"^\d{4}-\d{2}-\d{2}$"),
-    route_code: Optional[str] = Query(default=None),
-    category_codes: List[str] = Query(default=[], alias="category_codes"),
-    item_codes: List[str] = Query(default=[], alias="item_codes"),
+    route_code: str | None = Query(default=None),
+    category_codes: list[str] = Query(default=[], alias="category_codes"),
+    item_codes: list[str] = Query(default=[], alias="item_codes"),
     svc: AdoptionService = Depends(get_adoption_service),
 ):
     """Did recommendations convert? Read-only join of stored recs vs sales,
@@ -753,7 +756,7 @@ def adoption(
 @router.get("/analytics/upcoming", response_model=UpcomingPlanResponse)
 def upcoming_plan(
     days: int = Query(default=7, ge=1, le=30),
-    route_code: Optional[str] = Query(default=None),
+    route_code: str | None = Query(default=None),
     svc: PlanningService = Depends(get_planning_service),
 ):
     """Daily plan for the next ``days`` days (journey + forecast + prices)."""

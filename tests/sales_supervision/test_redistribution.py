@@ -21,7 +21,7 @@ def test_redistribution_unknown_customer_no_5xx(
         f"{base_urls['sales_supervision']}/session/redistribution/"
         f"{primary_route}/{today}/00000000"
     )
-    assert_not_5xx(resp, f"redistribution unknown customer")
+    assert_not_5xx(resp, "redistribution unknown customer")
 
 
 def test_redistribution_real_customer_when_present(

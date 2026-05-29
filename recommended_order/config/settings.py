@@ -10,7 +10,8 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from common.route_registry import get_route_codes as _get_route_codes
-from common.settings_base import data_root as _shared_data_root, read_allow_origins as _read_allow_origins
+from common.settings_base import data_root as _shared_data_root
+from common.settings_base import read_allow_origins as _read_allow_origins
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 

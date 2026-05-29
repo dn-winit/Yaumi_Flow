@@ -10,7 +10,7 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 import pandas as pd
 
@@ -50,7 +50,7 @@ class DataImporter:
     _CONN_PROBE_TTL_OK_SECONDS = 30
     _CONN_PROBE_TTL_FAIL_SECONDS = 10
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._db = DatabaseClient(self._s)
         self._qb = QueryBuilder(self._s)
@@ -62,7 +62,7 @@ class DataImporter:
         self._conn_probe_lock = threading.Lock()
         self._conn_probe_inflight = False
         # dataset -> ((path, mtime_ns, size), status_entry)
-        self._status_cache: Dict[str, tuple[tuple[str, int, int], Dict[str, Any]]] = {}
+        self._status_cache: dict[str, tuple[tuple[str, int, int], dict[str, Any]]] = {}
 
     # ------------------------------------------------------------------
     # Public API
@@ -83,9 +83,9 @@ class DataImporter:
         self,
         dataset: str,
         mode: str = "incremental",
-        lookback_days: Optional[int] = None,
-        routes: Optional[List[str]] = None,
-    ) -> Dict[str, Any]:
+        lookback_days: int | None = None,
+        routes: list[str] | None = None,
+    ) -> dict[str, Any]:
         """Import a single dataset.
 
         ``mode``: ``"incremental"`` (append) or ``"full"`` (replace).
@@ -105,7 +105,7 @@ class DataImporter:
         #   full -> replace CSV; incremental+lookback_days -> refresh window;
         #   incremental+CSV -> append since max(date); incremental+no-CSV -> default.
         query_fn = getattr(self._qb, query_method)
-        since_date: Optional[str] = None
+        since_date: str | None = None
         existing_rows = 0
         merge_with_existing = False
 
@@ -170,7 +170,7 @@ class DataImporter:
             # full-history materialisation that an unfiltered ``read_csv``
             # would force. Falls back to the legacy concat+dedup when the
             # date column is missing on either side.
-            window_min: Optional[pd.Timestamp] = None
+            window_min: pd.Timestamp | None = None
             if not new_df.empty and date_col in new_df.columns:
                 new_dates = pd.to_datetime(new_df[date_col], errors="coerce")
                 wm = new_dates.min()
@@ -285,9 +285,9 @@ class DataImporter:
     def import_all(
         self,
         mode: str = "incremental",
-        lookback_days: Optional[int] = None,
-        dataset_lookback_overrides: Optional[Dict[str, int]] = None,
-    ) -> Dict[str, Any]:
+        lookback_days: int | None = None,
+        dataset_lookback_overrides: dict[str, int] | None = None,
+    ) -> dict[str, Any]:
         """Import all datasets in parallel (thread pool sized by
         ``import_concurrency``). Per-dataset failures are captured into
         the result map without blocking the rest.
@@ -295,7 +295,7 @@ class DataImporter:
         datasets (e.g. sales_recent for late-arriving return netting).
         """
         overrides = dataset_lookback_overrides or {}
-        def resolve_lookback(dataset: str) -> Optional[int]:
+        def resolve_lookback(dataset: str) -> int | None:
             override = overrides.get(dataset)
             return override if override and override > 0 else lookback_days
 
@@ -306,7 +306,7 @@ class DataImporter:
                 for dataset in _DATASETS
             }
 
-        results: Dict[str, Any] = {}
+        results: dict[str, Any] = {}
         with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="di-import") as pool:
             future_to_dataset = {
                 pool.submit(self.import_dataset, dataset, mode, resolve_lookback(dataset)): dataset
@@ -327,10 +327,10 @@ class DataImporter:
         # Preserve registry order so the response shape matches the serial path.
         return {dataset: results[dataset] for dataset in _DATASETS if dataset in results}
 
-    def status(self) -> Dict[str, Any]:
+    def status(self) -> dict[str, Any]:
         """Return current state of all local data files. Memoised on
         (path, mtime, size) so a stable endpoint is O(1) once warm."""
-        info: Dict[str, Any] = {}
+        info: dict[str, Any] = {}
         cache = self._status_cache
         for dataset, (file_attr, date_col, _, _, _, _) in _DATASETS.items():
             file_path = self._s.data_path(getattr(self._s, file_attr))
@@ -361,14 +361,14 @@ class DataImporter:
             info[dataset] = entry
         return info
 
-    def status_quick(self) -> Dict[str, Any]:
+    def status_quick(self) -> dict[str, Any]:
         """Fast file-existence summary for ``/health``. Skips the
         ``pd.read_csv`` row-count step that ``status()`` runs on cold
         cache; the per-dataset count of a 5y CSV is irrelevant to the
         binary "is the mirror present?" question health asks. O(N_datasets)
         ``Path.exists()`` calls only.
         """
-        info: Dict[str, Any] = {}
+        info: dict[str, Any] = {}
         for dataset, (file_attr, _, _, _, _, _) in _DATASETS.items():
             file_path = self._s.data_path(getattr(self._s, file_attr))
             info[dataset] = {"exists": file_path.exists()}
@@ -437,7 +437,7 @@ class DataImporter:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _detect_last_date(file_path: Path, date_col: str) -> tuple[Optional[str], int]:
+    def _detect_last_date(file_path: Path, date_col: str) -> tuple[str | None, int]:
         """Read CSV and return (max_date_str, row_count). Returns (None, 0) if empty."""
         try:
             df = pd.read_csv(file_path, usecols=[date_col], low_memory=False)

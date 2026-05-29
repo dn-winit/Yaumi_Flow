@@ -31,7 +31,7 @@ def _validate(cfg: dict) -> dict:
     if os.getenv("DF_VALIDATE_CONFIG", "1") == "0":
         return cfg
     try:
-        from demand_forecasting_pipeline.config.schema import validate_config, ConfigError
+        from demand_forecasting_pipeline.config.schema import ConfigError, validate_config
     except Exception as exc:  # pragma: no cover -- schema module missing
         logger.warning("config schema validation skipped: %s", exc)
         return cfg
@@ -48,7 +48,7 @@ def _validate(cfg: dict) -> dict:
 
 def load_config(path: str) -> dict:
     """Parse the YAML config at ``path`` into a plain dict, validated."""
-    with open(path, "r", encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         raw = yaml.safe_load(f) or {}
     return _validate(raw)
 

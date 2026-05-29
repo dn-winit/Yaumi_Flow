@@ -7,7 +7,7 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import httpx
 
@@ -19,17 +19,17 @@ logger = logging.getLogger(__name__)
 class RecommendedOrderClient:
     """Pulls today's per-customer recommendations for one (route, date)."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._lock = threading.Lock()
         # (route, date) -> (fetched_at_epoch, recs_list)
-        self._cache: Dict[Tuple[str, str], Tuple[float, List[Dict[str, Any]]]] = {}
+        self._cache: dict[tuple[str, str], tuple[float, list[dict[str, Any]]]] = {}
 
     @property
     def base_url(self) -> str:
         return f"{self._s.recommended_order_url.rstrip('/')}/api/v1/recommended-order"
 
-    def get_recommendations(self, route_code: str, date: str) -> List[Dict[str, Any]]:
+    def get_recommendations(self, route_code: str, date: str) -> list[dict[str, Any]]:
         """Return per-(customer, item) recommendation rows; cached for recommendation_cache_seconds."""
         key = (str(route_code), str(date))
         ttl = float(self._s.recommendation_cache_seconds)
@@ -45,7 +45,7 @@ class RecommendedOrderClient:
                 self._cache[key] = (now, recs)
         return recs
 
-    def _fetch(self, route_code: str, date: str) -> List[Dict[str, Any]]:
+    def _fetch(self, route_code: str, date: str) -> list[dict[str, Any]]:
         url = f"{self.base_url}/get"
         body = {
             "date": date,

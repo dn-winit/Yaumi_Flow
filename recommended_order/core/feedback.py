@@ -14,9 +14,9 @@ import logging
 import os
 import tempfile
 import threading
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 import pandas as pd
@@ -42,7 +42,7 @@ def _persist_path(shared_data_dir: str, clamps: SafetyClamps) -> Path:
 
 def load_persisted_multipliers(
     shared_data_dir: str, clamps: SafetyClamps,
-) -> Dict[str, Dict[str, Dict[str, float]]]:
+) -> dict[str, dict[str, dict[str, float]]]:
     """Load ``feedback_multipliers.json`` ({route: {source: {multiplier,
     n, confidence}}}); missing/unreadable -> empty dict (cold start)."""
     path = _persist_path(shared_data_dir, clamps)
@@ -60,7 +60,7 @@ def load_persisted_multipliers(
 
 
 def save_persisted_multipliers(
-    data: Dict[str, Dict[str, Dict[str, float]]],
+    data: dict[str, dict[str, dict[str, float]]],
     shared_data_dir: str,
     clamps: SafetyClamps,
 ) -> None:
@@ -86,7 +86,7 @@ def save_persisted_multipliers(
 # Load: recommendations + sessions, together, for attribution
 # ===========================================================================
 
-def _iter_dates_in_window(today: datetime, window_days: int) -> List[str]:
+def _iter_dates_in_window(today: datetime, window_days: int) -> list[str]:
     start = today.date() - timedelta(days=int(window_days))
     return [
         (start + timedelta(days=i)).strftime("%Y-%m-%d")
@@ -102,7 +102,7 @@ def _load_recs_in_window(
     if not file_storage_dir.exists():
         return pd.DataFrame()
     dates = set(_iter_dates_in_window(today, window_days))
-    frames: List[pd.DataFrame] = []
+    frames: list[pd.DataFrame] = []
     # File name pattern: recommendations_YYYY-MM-DD_<route>.csv
     for f in file_storage_dir.glob("recommendations_*_*.csv"):
         # Parse date out of the filename (no need to open the CSV to filter).
@@ -127,7 +127,7 @@ def _load_recs_in_window(
 
 
 def _load_sessions_in_window(
-    db_loader: Optional["SessionDbLoader"], window_days: int, today: datetime,
+    db_loader: SessionDbLoader | None, window_days: int, today: datetime,
 ) -> pd.DataFrame:
     """Per-item visit outcomes from supervision tables (DB-canonical).
     Unreachable DB / cold start -> empty frame with expected columns."""
@@ -253,8 +253,8 @@ def _filter_adversarial_sessions(
     ).reset_index()
     sess["reject_rate"] = 1.0 - (sess["bought"] / sess["total"].clip(lower=1))
 
-    drop_keys: List[Tuple[str, str]] = []
-    for route, g in sess.groupby("route_code"):
+    drop_keys: list[tuple[str, str]] = []
+    for _route, g in sess.groupby("route_code"):
         if len(g) < 3:
             continue  # not enough sessions to estimate distribution
         mean = float(g["reject_rate"].mean())
@@ -283,10 +283,10 @@ def _filter_adversarial_sessions(
 
 def _shrinkage_multipliers(
     attr: pd.DataFrame,
-    previous: Dict[str, Dict[str, Dict[str, float]]],
+    previous: dict[str, dict[str, dict[str, float]]],
     clamps: SafetyClamps,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]],
-           Dict[str, Dict[str, Dict[str, float]]]]:
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]],
+           dict[str, dict[str, dict[str, float]]]]:
     """Return ``(adjustments, confidence, persist_payload)``: multipliers
     clamped to [mult_min, mult_max]; confidence = min(1, n/k); payload
     is the JSON-serialisable persistence dict."""
@@ -294,9 +294,9 @@ def _shrinkage_multipliers(
     mult_lo = float(clamps.feedback_multiplier_min)
     mult_hi = float(clamps.feedback_multiplier_max)
 
-    adjustments: Dict[str, Dict[str, float]] = {}
-    confidence: Dict[str, Dict[str, float]] = {}
-    payload: Dict[str, Dict[str, Dict[str, float]]] = {}
+    adjustments: dict[str, dict[str, float]] = {}
+    confidence: dict[str, dict[str, float]] = {}
+    payload: dict[str, dict[str, dict[str, float]]] = {}
 
     # Carry previous entries forward; EMA decay only fires on new observations.
     for route, per_source in previous.items():
@@ -323,10 +323,10 @@ def _shrinkage_multipliers(
         qty_acc=("qty_accuracy", "mean"),
     )
     corp["hit_rate"] = corp["hits"] / corp["n"].clip(lower=1)
-    corpus_hit: Dict[str, float] = {
+    corpus_hit: dict[str, float] = {
         str(s): float(corp.at[s, "hit_rate"]) for s in corp.index
     }
-    corpus_qty: Dict[str, float] = {
+    {
         str(s): float(corp.at[s, "qty_acc"]) for s in corp.index
     }
 
@@ -387,17 +387,17 @@ def _shrinkage_multipliers(
 def compute_feedback_adjustments(
     *,
     file_storage_dir: str,
-    db_loader: Optional["SessionDbLoader"],
+    db_loader: SessionDbLoader | None,
     clamps: SafetyClamps,
-    today: Optional[datetime] = None,
-) -> Tuple[Dict[str, Dict[str, float]], Dict[str, Dict[str, float]]]:
+    today: datetime | None = None,
+) -> tuple[dict[str, dict[str, float]], dict[str, dict[str, float]]]:
     """Full pipeline: read recs + supervision visits, attribute, filter
     adversarial, shrinkage-compute multipliers, EMA-smooth, persist.
     Returns ``(adjustments, confidence)`` keyed [route][source]; empty on
     cold start.
     """
     # Naive UTC: matches the timestamps callers compare against.
-    today_dt = today or datetime.now(timezone.utc).replace(tzinfo=None)
+    today_dt = today or datetime.now(UTC).replace(tzinfo=None)
     window = max(
         clamps.feedback_window_min_days,
         min(clamps.feedback_window_max_days, int(clamps.feedback_window_days)),
@@ -431,18 +431,19 @@ def compute_feedback_adjustments(
 # Score adjustment (applied at merge time in the engine).
 
 def apply_adjustments_to_candidates(
-    candidates: List[Any],
-    adjustments: Dict[str, float],
+    candidates: list[Any],
+    adjustments: dict[str, float],
     *,
-    confidence: Optional[Dict[str, float]] = None,
-) -> List[Any]:
+    confidence: dict[str, float] | None = None,
+) -> list[Any]:
     """Multiply each candidate's ``priority_score`` by its source multiplier
     and append a ``feedback_adjusted`` explanation signal. Mutates in place."""
     if not adjustments:
         return candidates
     # Local import: circular with explain <- generators <- calibration.
     from recommended_order.core.explain import (
-        KIND_FEEDBACK_ADJUSTED, Signal, detail_feedback_adjusted,
+        KIND_FEEDBACK_ADJUSTED,
+        detail_feedback_adjusted,
     )
     for cand in candidates:
         src = getattr(cand, "source", "")

@@ -9,18 +9,16 @@ from __future__ import annotations
 
 import logging
 import threading
-import time
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
-from datetime import date as _date_cls, datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from zoneinfo import ZoneInfo
-from typing import Any, Dict, List, Optional, Set, Tuple
 
 # Phase concurrency caps live in Settings; see config/settings.py.
-
-from common.numeric import safe_float, safe_int
+from common.numeric import safe_float
 from sales_supervision.config.settings import Settings, get_settings
-from sales_supervision.core.constants import TIER_UNPLANNED, is_unplanned_customer
+from sales_supervision.core.constants import TIER_UNPLANNED
 from sales_supervision.core.session import SessionManager
 from sales_supervision.models.schemas import (
     ScoreResult,
@@ -35,7 +33,7 @@ from sales_supervision.services.recommended_order_client import RecommendedOrder
 logger = logging.getLogger(__name__)
 
 
-def _session_item_from_rec(rec: dict) -> "SessionItem":
+def _session_item_from_rec(rec: dict) -> SessionItem:
     """Build a SessionItem from one yf_recommended_orders row.
 
     Single source of truth for the rec -> SessionItem mapping so the "new
@@ -65,9 +63,9 @@ class TickReport:
     date: str
     planned_visits: int = 0
     unplanned_visits: int = 0
-    error: Optional[str] = None
+    error: str | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "route_code": self.route_code,
             "date": self.date,
@@ -81,9 +79,9 @@ class TickReport:
 class _SessionCacheEntry:
     session: Session
     # Last route-header signature persisted by the cron; None forces re-stamp on restart.
-    last_header_signature: Optional[Tuple[Any, ...]] = None
+    last_header_signature: tuple[Any, ...] | None = None
     # Wall-clock of the last tick; drives TTL eviction so _sessions stays bounded.
-    last_seen_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    last_seen_at: datetime = field(default_factory=lambda: datetime.now(UTC))
     # Serialises in-memory mutation across the worker pool (process_visit, _register_unplanned).
     lock: threading.Lock = field(default_factory=threading.Lock)
 
@@ -94,14 +92,14 @@ class AutoVisitService:
     def __init__(
         self,
         *,
-        settings: Optional[Settings] = None,
+        settings: Settings | None = None,
         session_manager: SessionManager,
         live_actuals: LiveActualsClient,
         recommended_order: RecommendedOrderClient,
         db_saver: DbSaver,
     ) -> None:
         self._s = settings or get_settings()
-        self._sessions: Dict[str, _SessionCacheEntry] = {}  # session_id -> entry
+        self._sessions: dict[str, _SessionCacheEntry] = {}  # session_id -> entry
         # Reentrant lock so a tick's resolve -> upsert chain can re-enter without deadlocking.
         self._sessions_lock = threading.RLock()
         self._mgr = session_manager
@@ -109,17 +107,17 @@ class AutoVisitService:
         self._recs = recommended_order
         self._db = db_saver
         # Read by /health for data freshness; atomic reference assignment in CPython.
-        self._last_reconcile_at: Optional[datetime] = None
+        self._last_reconcile_at: datetime | None = None
 
     @property
-    def last_reconcile_at(self) -> Optional[datetime]:
+    def last_reconcile_at(self) -> datetime | None:
         return self._last_reconcile_at
 
     # ------------------------------------------------------------------
     # Public entry points
     # ------------------------------------------------------------------
 
-    def reconcile_all(self) -> List[Dict[str, Any]]:
+    def reconcile_all(self) -> list[dict[str, Any]]:
         """Run one full reconciliation pass across every configured route.
 
         Date is computed in the configured business timezone (default Asia/Dubai)
@@ -130,10 +128,10 @@ class AutoVisitService:
         tz = ZoneInfo(self._s.auto_visit_timezone)
         date = datetime.now(tz).date().strftime("%Y-%m-%d")
         # Heartbeat at tick start so /health flips out of reconcile_stale immediately.
-        self._last_reconcile_at = datetime.now(timezone.utc)
+        self._last_reconcile_at = datetime.now(UTC)
         # TTL-evict idle (route, date) cache entries each tick.
         self._evict_stale_sessions()
-        out: List[Dict[str, Any]] = []
+        out: list[dict[str, Any]] = []
         for route in self._configured_routes():
             try:
                 rep = self.reconcile_route(route, date)
@@ -142,7 +140,7 @@ class AutoVisitService:
                 rep = TickReport(route_code=route, date=date, error=str(exc))
             out.append(rep.to_dict())
             # Per-route heartbeat keeps lag below the 2x-poll health threshold during long ticks.
-            self._last_reconcile_at = datetime.now(timezone.utc)
+            self._last_reconcile_at = datetime.now(UTC)
         if any(r.get("planned_visits") or r.get("unplanned_visits") for r in out):
             logger.info("Auto-visit tick summary: %s", out)
         else:
@@ -159,7 +157,7 @@ class AutoVisitService:
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _route_header_signature(snapshot: Dict[str, Any]) -> Tuple[Any, ...]:
+    def _route_header_signature(snapshot: dict[str, Any]) -> tuple[Any, ...]:
         """Stable tuple over fields persisted by _upsert_route_header; equal tuples skip the MERGE.
 
         IMPORTANT: keep in sync with the UPDATE column set in DbSaver._upsert_route_header.
@@ -181,7 +179,7 @@ class AutoVisitService:
         ttl = int(self._s.auto_visit_session_ttl_seconds)
         if ttl <= 0:
             return
-        cutoff = datetime.now(timezone.utc) - timedelta(seconds=ttl)
+        cutoff = datetime.now(UTC) - timedelta(seconds=ttl)
         with self._sessions_lock:
             stale = [
                 sid for sid, cache in self._sessions.items()
@@ -235,7 +233,7 @@ class AutoVisitService:
                 cache_for_sig = self._sessions.get(session.session_id)
                 if cache_for_sig is not None:
                     cache_for_sig.last_header_signature = sig
-                    cache_for_sig.last_seen_at = datetime.now(timezone.utc)
+                    cache_for_sig.last_seen_at = datetime.now(UTC)
 
         # ---- Phase 1: Data sync (parallel, cap=auto_visit_data_phase_workers) ----
         invoiced = self._live.get_route_sales(route_code, date) or []
@@ -256,8 +254,8 @@ class AutoVisitService:
     def _sync_visits_parallel(
         self,
         session: Session,
-        invoiced: List[Dict[str, Any]],
-    ) -> Tuple[int, int]:
+        invoiced: list[dict[str, Any]],
+    ) -> tuple[int, int]:
         """Upsert every invoiced customer in parallel so returns/voids propagate within one tick.
 
         process_visit / upsert_visit are idempotent on (route, date, customer);
@@ -267,13 +265,13 @@ class AutoVisitService:
             cache = self._sessions[session.session_id]
         lock = cache.lock
 
-        targets: List[Tuple[str, str, Dict[str, int]]] = []
+        targets: list[tuple[str, str, dict[str, int]]] = []
         for visitor in invoiced:
             code = str(visitor.get("customer_code") or "").strip()
             if not code:
                 continue
             cust_name = str(visitor.get("customer_name") or "").strip()
-            actuals: Dict[str, int] = {}
+            actuals: dict[str, int] = {}
             for it in visitor.get("items") or []:
                 ic = str(it.get("item_code") or "").strip()
                 if not ic:
@@ -287,7 +285,7 @@ class AutoVisitService:
         if not targets:
             return 0, 0
 
-        def _process(target: Tuple[str, str, Dict[str, int]]) -> str:
+        def _process(target: tuple[str, str, dict[str, int]]) -> str:
             code, cust_name, actuals = target
             # Mutate the in-memory session under ``lock`` (short critical
             # section) and snapshot it; release the lock BEFORE the DB write
@@ -379,14 +377,14 @@ class AutoVisitService:
     # Session resolution
     # ------------------------------------------------------------------
 
-    def _resolve_session(self, route_code: str, date: str) -> Optional[Session]:
+    def _resolve_session(self, route_code: str, date: str) -> Session | None:
         """Return a session for (route, date) across ticks and restarts.
 
         Order: in-process cache, then DB rebuild (keeps original session_id for LLM idempotency),
         then fresh creation from recommended_order.
         """
         # 1. In-process cache; stamp last_seen_at so the TTL sweep can't drop active entries.
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         with self._sessions_lock:
             for cache in self._sessions.values():
                 if cache.session.route_code == str(route_code) and cache.session.date == str(date):
@@ -435,8 +433,8 @@ class AutoVisitService:
         accumulates all N rec rows (a naive in-place check would drop items
         2..N from a NEW customer being built up across multiple recs).
         """
-        from sales_supervision.models.schemas import SessionCustomer, SessionItem
-        pre_existing: Set[str] = set(session.customers.keys())
+        from sales_supervision.models.schemas import SessionCustomer
+        pre_existing: set[str] = set(session.customers.keys())
         for rec in recs:
             ccode = str(rec.get("CustomerCode", ""))
             if not ccode:
@@ -498,7 +496,7 @@ class AutoVisitService:
         session: Session,
         customer_code: str,
         customer_name: str,
-        actual_sales: Dict[str, int],
+        actual_sales: dict[str, int],
     ) -> None:
         """Register/refresh a drop-in customer; preserves the original visit_sequence on re-touch."""
         items = [
@@ -535,7 +533,7 @@ class AutoVisitService:
     # ------------------------------------------------------------------
 
 
-    def _configured_routes(self) -> List[str]:
+    def _configured_routes(self) -> list[str]:
         """Routes to monitor per tick; falls back to demand-forecasting's live_route_codes."""
         explicit = list(self._s.auto_visit_route_codes or [])
         if explicit:

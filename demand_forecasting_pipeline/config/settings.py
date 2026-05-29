@@ -10,7 +10,8 @@ from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings
 
 from common.sales_vocab import SALES_VOCAB as _VOCAB
-from common.settings_base import data_root as _shared_data_root, read_allow_origins as _read_allow_origins
+from common.settings_base import data_root as _shared_data_root
+from common.settings_base import read_allow_origins as _read_allow_origins
 
 _PIPELINE_ROOT = Path(__file__).resolve().parent.parent
 _PROJECT_ROOT = _PIPELINE_ROOT.parent

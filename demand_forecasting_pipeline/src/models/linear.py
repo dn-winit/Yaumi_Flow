@@ -1,8 +1,7 @@
 import numpy as np
-
 from sklearn.linear_model import Ridge
-from sklearn.preprocessing import StandardScaler
 from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import StandardScaler
 
 from .base import BaseForecaster
 

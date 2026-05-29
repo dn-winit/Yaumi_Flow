@@ -8,11 +8,13 @@ from __future__ import annotations
 
 import logging
 import math
-from typing import Any, Optional
+from typing import Any
 
 import pandas as pd
 from fastapi import APIRouter, Depends, Query
 
+from common.db_pool import get_pool
+from common.numeric import safe_float as _to_float
 from demand_forecasting_pipeline.api.dependencies import (
     get_artifact_service,
     get_van_load_service,
@@ -31,8 +33,6 @@ from demand_forecasting_pipeline.api.schemas import (
 )
 from demand_forecasting_pipeline.config.settings import get_settings
 from demand_forecasting_pipeline.services.artifact_service import ArtifactService
-from common.db_pool import get_pool
-from common.numeric import safe_float as _to_float
 from demand_forecasting_pipeline.services.reconciliation.enrich import (
     _concentrated_buyers_index,
     _journey_index,
@@ -83,7 +83,7 @@ def _guard_masked_items(route_code: str, date: str) -> frozenset[str]:
 # Helpers (route-local; page-view-shaping concerns only).
 
 
-def _opt_float(x: object) -> Optional[float]:
+def _opt_float(x: object) -> float | None:
     """Coerce to float; preserve None for genuinely missing values."""
     if x is None:
         return None
@@ -96,13 +96,13 @@ def _opt_float(x: object) -> Optional[float]:
     return v
 
 
-def _has_real_confidence(cls: Optional[str]) -> bool:
+def _has_real_confidence(cls: str | None) -> bool:
     if not cls:
         return False
     return str(cls).strip().lower() in REAL_PROBABILITY_CLASSES
 
 
-def _first_present(df: pd.DataFrame, names: tuple[str, ...]) -> Optional[str]:
+def _first_present(df: pd.DataFrame, names: tuple[str, ...]) -> str | None:
     for n in names:
         if n in df.columns:
             return n
@@ -118,7 +118,7 @@ def _count_csv_rows_on_date(csv_path, column: str, target: str) -> int:
     the dominant cost on miss-path requests.
     """
     import csv as _csv
-    with open(csv_path, "r", encoding="utf-8", newline="") as fh:
+    with open(csv_path, encoding="utf-8", newline="") as fh:
         reader = _csv.reader(fh)
         try:
             header = next(reader)
@@ -578,7 +578,7 @@ def van_load_page_view(
             else None
         )
         # Minimal explain dict; ExplainabilityModal renders each field verbatim.
-        def _opt_bool(v: Any) -> Optional[bool]:
+        def _opt_bool(v: Any) -> bool | None:
             if v is None:
                 return None
             try:
@@ -658,7 +658,7 @@ def van_load_page_view(
         # forecast_dormant: CSV surfaces 0/1/NaN; NaN/missing -> None.
         _dormant_raw = r["forecast_dormant"]
         if _dormant_raw is None:
-            forecast_dormant_val: Optional[bool] = None
+            forecast_dormant_val: bool | None = None
         else:
             try:
                 if isinstance(_dormant_raw, float) and math.isnan(_dormant_raw):
@@ -739,15 +739,15 @@ def _today_iso() -> str:
 
 @router.get("/forecast-drawer", response_model=ForecastDrawerView)
 def forecast_drawer_page_view(
-    route_code: Optional[str] = Query(None, description="Route filter"),
-    item_codes: Optional[list[str]] = Query(
+    route_code: str | None = Query(None, description="Route filter"),
+    item_codes: list[str] | None = Query(
         None,
         description=(
             "Optional item filter. Repeat for multiple items "
             "(``?item_codes=A&item_codes=B``)."
         ),
     ),
-    from_date: Optional[str] = Query(
+    from_date: str | None = Query(
         None,
         description="YYYY-MM-DD; defaults to today (forward-looking only).",
     ),

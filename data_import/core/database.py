@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional, Tuple
 
 import pandas as pd
 import pyodbc
@@ -28,7 +27,7 @@ class DatabaseClient:
     """DB client with retry + cursor-based DataFrame build. Selects Live
     OLTP (default) or AIML results DB via the ``db`` kwarg."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         s = settings or get_settings()
         self._live = s.db
         self._aiml = s.aiml_db
@@ -47,7 +46,7 @@ class DatabaseClient:
     def execute_query(
         self,
         sql: str,
-        params: Tuple = (),
+        params: tuple = (),
         db: str = "live",
         *,
         live_query: bool = False,
@@ -55,7 +54,7 @@ class DatabaseClient:
         """Execute query with retry. ``db`` selects YaumiLive/YaumiAIML;
         ``live_query=True`` applies the short cursor timeout."""
         cfg = self._aiml if db == "aiml" else self._live
-        last_err: Optional[BaseException] = None
+        last_err: BaseException | None = None
         for attempt in range(1, cfg.retry_attempts + 1):
             try:
                 conn = self._connect(db, live_query=live_query)
@@ -85,7 +84,7 @@ class DatabaseClient:
             raise last_err
         raise RuntimeError(f"DB query failed on {db} with no captured error")
 
-    def test_connection(self, db: str = "live") -> Tuple[bool, str]:
+    def test_connection(self, db: str = "live") -> tuple[bool, str]:
         """Liveness probe -- returns ``(ok, reason)`` so health endpoints
         can distinguish unreachable from credentials-wrong.
 

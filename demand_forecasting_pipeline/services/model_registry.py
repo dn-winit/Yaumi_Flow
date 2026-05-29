@@ -18,13 +18,13 @@ import logging
 import os
 import re
 import shutil
-import tempfile
 import threading
 import time
+from collections.abc import Iterator
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Dict, Iterator, List, Optional
+from typing import Any
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 
@@ -74,18 +74,18 @@ class VersionInfo:
     """
     version_id: str
     path: Path
-    promoted_at: Optional[str]
-    promoted_by: Optional[str]
-    trigger: Optional[str]
-    accuracy_before: Optional[float]
-    accuracy_after: Optional[float]
-    duration_seconds: Optional[float]
+    promoted_at: str | None
+    promoted_by: str | None
+    trigger: str | None
+    accuracy_before: float | None
+    accuracy_after: float | None
+    duration_seconds: float | None
     is_current: bool
-    decision: Optional[str] = None
-    champion_accuracy: Optional[float] = None
-    delta_pp: Optional[float] = None
+    decision: str | None = None
+    champion_accuracy: float | None = None
+    delta_pp: float | None = None
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "version_id":        self.version_id,
             "path":              str(self.path),
@@ -117,7 +117,7 @@ class ModelRegistry:
     prune(max_versions)              -> delete oldest beyond cap (called automatically after record)
     """
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._root = Path(self._s.artifacts_dir)
         self._versions_root = self._root / _VERSIONS_SUBDIR
@@ -133,7 +133,7 @@ class ModelRegistry:
 
     # ------------------------------------------------------------- pointer
 
-    def current_version_id(self) -> Optional[str]:
+    def current_version_id(self) -> str | None:
         """Read ``current.json`` and return the active version id, or
         ``None`` when no pointer exists yet (legacy / first-run state).
         """
@@ -167,7 +167,7 @@ class ModelRegistry:
 
     # ------------------------------------------------------------- queries
 
-    def current_version(self) -> Optional[VersionInfo]:
+    def current_version(self) -> VersionInfo | None:
         vid = self.current_version_id()
         if not vid:
             return None
@@ -180,7 +180,7 @@ class ModelRegistry:
             return None
         return _info_from_manifest(path, vid, is_current=True)
 
-    def list_versions(self) -> List[VersionInfo]:
+    def list_versions(self) -> list[VersionInfo]:
         """All retained versions: current first, then newest->oldest.
 
         Folder names are ISO timestamps (see ``_mint_version_id``) so a
@@ -190,7 +190,7 @@ class ModelRegistry:
         if not self._versions_root.exists():
             return []
         current = self.current_version_id()
-        out: List[VersionInfo] = []
+        out: list[VersionInfo] = []
         # Single pass + single sort. iterdir yields in OS-specific order;
         # we sort once at the end so we don't pay for a wasted in-place
         # sort that the final split-and-concat would discard.
@@ -212,14 +212,14 @@ class ModelRegistry:
 
     def record_version(
         self,
-        entry: Dict[str, Any],
+        entry: dict[str, Any],
         *,
-        trigger: Optional[str] = None,
+        trigger: str | None = None,
         promoted_by: str = "auto-retrain",
         update_pointer: bool = True,
-        decision: Optional[str] = None,
-        champion_accuracy: Optional[float] = None,
-        delta_pp: Optional[float] = None,
+        decision: str | None = None,
+        champion_accuracy: float | None = None,
+        delta_pp: float | None = None,
     ) -> str:
         """Snapshot the live ``artifacts_dir`` into a new version
         folder, write the manifest, optionally update ``current.json``,
@@ -341,9 +341,9 @@ class ModelRegistry:
         self,
         version_id: str,
         *,
-        expected_current: Optional[str],
+        expected_current: str | None,
         promoted_by: str = "rollback",
-    ) -> Optional[VersionInfo]:
+    ) -> VersionInfo | None:
         """Conditional rollback: restore ``version_id`` ONLY if the
         registry's current pointer still matches ``expected_current``.
 
@@ -433,7 +433,7 @@ class ModelRegistry:
 
     # ---------------------------------------------------------- maintenance
 
-    def prune(self, max_versions: Optional[int] = None) -> int:
+    def prune(self, max_versions: int | None = None) -> int:
         """Delete the oldest versions beyond the retention cap.
         Returns the number deleted. Safe to call any time; the
         current version is always preserved regardless of age."""
@@ -442,7 +442,7 @@ class ModelRegistry:
 
     # ----------------------------------------------------------- internals
 
-    def _prune_locked(self, max_versions: Optional[int] = None) -> int:
+    def _prune_locked(self, max_versions: int | None = None) -> int:
         """Inner prune logic. Caller MUST hold ``_REGISTRY_LOCK``."""
         cap = int(max_versions or getattr(
             self._s, "model_retention_max_versions", 10,
@@ -498,18 +498,18 @@ def _utcnow_iso() -> str:
     """ISO-8601 UTC with seconds resolution. Centralised so the
     timestamp format is identical everywhere the registry writes one
     (manifest.promoted_at, current.json.promoted_at, version_id)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _mint_version_id() -> str:
     """Generate a version id of the form ``v_<UTC-iso>`` with
     millisecond resolution to avoid collisions when two promotions
     land in the same second."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return "v_" + now.strftime("%Y-%m-%dT%H-%M-%S-") + f"{now.microsecond // 1000:03d}Z"
 
 
-def _write_json_atomic(path: Path, payload: Dict[str, Any]) -> None:
+def _write_json_atomic(path: Path, payload: dict[str, Any]) -> None:
     """Atomic JSON write. Thin wrapper around ``io_utils.save_json`` so
     the rest of this module reads a Path-typed helper. The canonical
     tmp+os.replace implementation lives in io_utils -- one home for the
@@ -525,7 +525,7 @@ def _info_from_manifest(
     version_id: str,
     *,
     is_current: bool,
-) -> Optional[VersionInfo]:
+) -> VersionInfo | None:
     """Read ``manifest.json`` from ``version_path`` and produce the
     wire-shape. Returns ``None`` if the manifest is missing or
     unreadable -- a folder without a manifest isn't a valid version,
@@ -739,7 +739,7 @@ def _walk_files(root: Path) -> Iterator[Path]:
             yield from _walk_files(child)
 
 
-def _coerce_float(v: Any) -> Optional[float]:
+def _coerce_float(v: Any) -> float | None:
     if v is None:
         return None
     try:
@@ -751,7 +751,7 @@ def _coerce_float(v: Any) -> Optional[float]:
 # Module-level singleton for callers that don't want to thread a
 # Settings instance through. The retain_scheduler and API routes both
 # use this so they share state automatically.
-_default_registry: Optional[ModelRegistry] = None
+_default_registry: ModelRegistry | None = None
 _default_lock = threading.Lock()
 
 

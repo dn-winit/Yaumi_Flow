@@ -10,7 +10,7 @@ import logging
 import threading
 import time
 from collections import OrderedDict
-from typing import Any, Dict, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -36,13 +36,13 @@ from sales_supervision.api.schemas import (
     VisitScore,
 )
 from sales_supervision.core.constants import TIER_UNPLANNED
-from sales_supervision.models.schemas import SessionItem
 from sales_supervision.core.redistribution import (
     compute_buffer_ledger,
     compute_redistribution_for_unplanned,
     shape_redistribution_view,
 )
 from sales_supervision.core.session import SessionManager
+from sales_supervision.models.schemas import SessionItem
 from sales_supervision.services.db_saver import DbSaver
 from sales_supervision.services.live_actuals import LiveActualsClient
 
@@ -59,9 +59,9 @@ class _SessionRegistry:
     def __init__(self, maxsize: int, ttl_seconds: int) -> None:
         self._maxsize = maxsize
         self._ttl = ttl_seconds
-        self._items: "OrderedDict[str, tuple[float, object]]" = OrderedDict()
+        self._items: OrderedDict[str, tuple[float, object]] = OrderedDict()
         # Locks track session lifetime; outer mutex serialises dict allocate/pop.
-        self._locks: Dict[str, threading.Lock] = {}
+        self._locks: dict[str, threading.Lock] = {}
         self._locks_mutex = threading.Lock()
 
     def _sweep(self) -> None:
@@ -112,10 +112,10 @@ class _SessionRegistry:
 # silently ignored. ``get_settings()`` is ``@lru_cache``-d so this resolves to
 # the same instance every call after first construction.
 _REGISTRY_LOCK = threading.Lock()
-_sessions_singleton: Optional["_SessionRegistry"] = None
+_sessions_singleton: _SessionRegistry | None = None
 
 
-def _sessions_registry() -> "_SessionRegistry":
+def _sessions_registry() -> _SessionRegistry:
     global _sessions_singleton
     if _sessions_singleton is not None:
         return _sessions_singleton
@@ -162,7 +162,7 @@ def initialize_session(
     if not recs and auto_visit_svc is not None:
         recs = auto_visit_svc._recs.get_recommendations(req.route_code, req.date) or []
     session = mgr.create_session(req.route_code, req.date, recs)
-    saved: Optional[Dict[str, Any]] = None
+    saved: dict[str, Any] | None = None
     if db_saver.available:
         # Hydration only consumes actualSales + score; redistributions are loaded on drill-in.
         saved = db_saver.load_session_visits(
@@ -188,7 +188,7 @@ def internal_invalidate_day(
     background_tasks: BackgroundTasks,
     auto_visit_svc=Depends(get_auto_visit_service),
     db_saver: DbSaver = Depends(get_db_saver),
-) -> Dict[str, Any]:
+) -> dict[str, Any]:
     """Drop AutoVisitService's cached sessions for ``date`` AND repair stale rows.
 
     Called by the demand_forecasting retrain cascade after fresh recs land in
@@ -400,7 +400,7 @@ def get_unplanned_visits(
     planned_visited: list[str] = []
     unplanned: list[dict] = []
     # Collect by customer_code so all redistribution views compute in one shaper pass at the end.
-    dropin_items_per_customer: Dict[str, list[Dict[str, Any]]] = {}
+    dropin_items_per_customer: dict[str, list[dict[str, Any]]] = {}
     for v in visitors:
         code = str(v.get("customer_code", "")).strip()
         if not code:

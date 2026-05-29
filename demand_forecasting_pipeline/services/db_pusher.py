@@ -11,21 +11,21 @@ import logging
 import random
 import re
 import time
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 import pandas as pd
 
+from common.db_pool import (
+    FATAL_DB_ERRORS,
+    get_pool,
+)
 from demand_forecasting_pipeline.config.settings import (
     DEFAULT_STR_LIMITS,
     Settings,
     get_settings,
 )
 from demand_forecasting_pipeline.observability import DB_PUSH_ROWS
-from common.db_pool import (
-    FATAL_DB_ERRORS,
-    get_pool,
-)
 from demand_forecasting_pipeline.src.utils.config_loader import load_config
 
 logger = logging.getLogger(__name__)
@@ -112,7 +112,7 @@ def _dataframe_to_records(df: pd.DataFrame, cols: list[str]) -> list[tuple]:
 class DbPusher:
     """Pushes prediction CSVs to yf_demand_forecast."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
         self._db = self._s.db
         self._pool = (
@@ -127,8 +127,8 @@ class DbPusher:
             else None
         )
         # Schema guard runs lazily on first push; None = unchecked.
-        self._schema_ok: Optional[bool] = None
-        self._schema_error: Optional[str] = None
+        self._schema_ok: bool | None = None
+        self._schema_error: str | None = None
 
         # Source-side column names from pipeline config.
         try:
@@ -392,7 +392,7 @@ class DbPusher:
         merge_sql = self._build_merge_sql(table, lock_hints=lock_hints)
         split_label = datasplit.capitalize()
 
-        last_error: Optional[str] = None
+        last_error: str | None = None
         for attempt in range(1, self._db.retry_attempts + 1):
             t0 = time.time()
             try:

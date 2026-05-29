@@ -10,7 +10,7 @@ shaper call accounts for every earlier visit's deposits and withdrawals.
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any
 
 from sales_supervision.core.constants import (
     TIER_UNPLANNED,
@@ -47,9 +47,9 @@ def _is_planned_customer(c: SessionCustomer) -> bool:
     return not is_unplanned_customer(c)
 
 
-def _item_name_lookup(session: Session) -> Dict[str, str]:
+def _item_name_lookup(session: Session) -> dict[str, str]:
     """First-wins ``item_code -> item_name`` map across the session."""
-    out: Dict[str, str] = {}
+    out: dict[str, str] = {}
     for cust in session.customers.values():
         for it in cust.items:
             if it.item_code and it.item_code not in out and it.item_name:
@@ -59,9 +59,9 @@ def _item_name_lookup(session: Session) -> Dict[str, str]:
 
 def _customer_item_contributions(
     cust: SessionCustomer, *, is_drop_in: bool,
-) -> Dict[str, int]:
+) -> dict[str, int]:
     """Signed per-item contribution: positive = surplus into buffer, negative = excess demand."""
-    out: Dict[str, int] = {}
+    out: dict[str, int] = {}
     if is_drop_in:
         for it in cust.items:
             qty = max(0, int(it.actual_qty or 0))
@@ -87,10 +87,10 @@ def _customer_item_contributions(
 
 def _compute_van_load_and_planned(
     session: Session,
-) -> tuple[Dict[str, int], Dict[str, int]]:
+) -> tuple[dict[str, int], dict[str, int]]:
     """Pre-compute van_load[i] (MAX across rows to absorb drift) and total_planned[i] for planned customers."""
-    van_load: Dict[str, int] = {}
-    total_planned: Dict[str, int] = {}
+    van_load: dict[str, int] = {}
+    total_planned: dict[str, int] = {}
     for cust in session.customers.values():
         if not _is_planned_customer(cust):
             continue
@@ -112,13 +112,13 @@ def _compute_van_load_and_planned(
 
 def _eligible_recipients(
     session: Session,
-    source: Optional[SessionCustomer],
+    source: SessionCustomer | None,
     item_code: str,
-) -> List[tuple[int, str, SessionCustomer, SessionItem]]:
+) -> list[tuple[int, str, SessionCustomer, SessionItem]]:
     """Planned downstream candidates for item_code (tier != UNPLANNED, rec > 0, seq=0 or seq > source)."""
     src_seq = int(source.visit_sequence) if source is not None else 0
     src_code = source.customer_code if source is not None else ""
-    out: List[tuple[int, str, SessionCustomer, SessionItem]] = []
+    out: list[tuple[int, str, SessionCustomer, SessionItem]] = []
     for code, cust in session.customers.items():
         if code == src_code:
             continue
@@ -144,7 +144,7 @@ def _recipient_absorb_capacity(item: SessionItem) -> int:
     return max(0, rec - act)
 
 
-def _clean_name(name: Optional[str]) -> str:
+def _clean_name(name: str | None) -> str:
     """Trim padded whitespace off DB-sourced customer names."""
     return (name or "").strip()
 
@@ -152,7 +152,7 @@ def _clean_name(name: Optional[str]) -> str:
 # Cumulative buffer ledger: walks session in (seq ASC, code ASC) tracking per-item spare van-load.
 
 
-def _visited_walk_order(session: Session) -> List[SessionCustomer]:
+def _visited_walk_order(session: Session) -> list[SessionCustomer]:
     """Visited customers in canonical ledger order."""
     visited = [c for c in session.customers.values() if c.visited]
     visited.sort(key=lambda c: (int(c.visit_sequence or 0), c.customer_code))
@@ -161,12 +161,12 @@ def _visited_walk_order(session: Session) -> List[SessionCustomer]:
 
 def compute_buffer_ledger(
     session: Session,
-) -> Dict[Tuple[str, str], Tuple[int, int]]:
+) -> dict[tuple[str, str], tuple[int, int]]:
     """Per-(cust,item) signed (buffer_before, buffer_after) across visited customers in route order. Pure."""
-    ledger: Dict[Tuple[str, str], Tuple[int, int]] = {}
+    ledger: dict[tuple[str, str], tuple[int, int]] = {}
     van_load, total_planned = _compute_van_load_and_planned(session)
 
-    running: Dict[str, int] = {}
+    running: dict[str, int] = {}
     all_item_codes: set[str] = set(van_load.keys()) | set(total_planned.keys())
     for cust in session.customers.values():
         for it in cust.items:
@@ -201,11 +201,11 @@ def shape_redistribution_view(
     source_customer_code: str,
     *,
     is_drop_in: bool,
-    buffer_ledger: Optional[Dict[Tuple[str, str], Tuple[int, int]]] = None,
-    van_load: Optional[Dict[str, int]] = None,
-    total_planned: Optional[Dict[str, int]] = None,
-    item_names: Optional[Dict[str, str]] = None,
-) -> "RedistributionView":
+    buffer_ledger: dict[tuple[str, str], tuple[int, int]] | None = None,
+    van_load: dict[str, int] | None = None,
+    total_planned: dict[str, int] | None = None,
+    item_names: dict[str, str] | None = None,
+) -> RedistributionView:
     """Pure shaper -- emits one customer's RedistributionView.
 
     Initial buffer per item is ``van_load[i] - total_planned[i]``; when ``buffer_ledger``
@@ -216,6 +216,8 @@ def shape_redistribution_view(
     """
     from sales_supervision.api.schemas import (
         RedistributionEntry as WireRedistributionEntry,
+    )
+    from sales_supervision.api.schemas import (
         RedistributionGroup,
         RedistributionView,
     )
@@ -237,7 +239,7 @@ def shape_redistribution_view(
             movements.items(), key=lambda kv: (-abs(kv[1]), kv[0]),
         )
 
-        groups: List[RedistributionGroup] = []
+        groups: list[RedistributionGroup] = []
 
         for item_code, signed in item_iter:
             if signed == 0 or not item_code:
@@ -255,7 +257,7 @@ def shape_redistribution_view(
             else:
                 buffer_i = vl - tp
 
-            entries: List[WireRedistributionEntry] = []
+            entries: list[WireRedistributionEntry] = []
             # Splits into distributed downstream vs kept on truck; only meaningful for ADD direction.
             surplus_total = 0
 
@@ -351,13 +353,13 @@ def shape_redistribution_view(
 
 def compute_redistributions_for_saved_visits(
     session: Session,
-    visited_codes_in_order: List[str],
-) -> Dict[str, "RedistributionView"]:
+    visited_codes_in_order: list[str],
+) -> dict[str, RedistributionView]:
     """Replay redistribution for every visited customer in O(session) by sharing the ledger/maps."""
     ledger = compute_buffer_ledger(session)
     van_load, total_planned = _compute_van_load_and_planned(session)
     names = _item_name_lookup(session)
-    out: Dict[str, "RedistributionView"] = {}
+    out: dict[str, RedistributionView] = {}
     for code in visited_codes_in_order:
         out[code] = shape_redistribution_view(
             session, code,
@@ -372,8 +374,8 @@ def compute_redistributions_for_saved_visits(
 
 def compute_redistribution_for_unplanned(
     session: Session,
-    dropin_items_per_customer: Dict[str, List[Dict[str, Any]]],
-) -> Dict[str, "RedistributionView"]:
+    dropin_items_per_customer: dict[str, list[dict[str, Any]]],
+) -> dict[str, RedistributionView]:
     """Shape redistribution per drop-in via a synthetic tier=UNPLANNED row on a session copy."""
     if not dropin_items_per_customer:
         return {}
@@ -386,12 +388,12 @@ def compute_redistribution_for_unplanned(
         if cust.visited:
             next_seq = max(next_seq, int(cust.visit_sequence or 0))
 
-    synth_by_code: Dict[str, SessionCustomer] = {}
+    synth_by_code: dict[str, SessionCustomer] = {}
     for code, items in dropin_items_per_customer.items():
         ccode = str(code).strip()
         if not ccode:
             continue
-        synth_items: List[SessionItem] = []
+        synth_items: list[SessionItem] = []
         for row in items or []:
             ic = str(row.get("item_code") or "").strip()
             if not ic:
@@ -435,7 +437,7 @@ def compute_redistribution_for_unplanned(
     van_load, total_planned = _compute_van_load_and_planned(scratch_session)
     names = _item_name_lookup(scratch_session)
 
-    out: Dict[str, "RedistributionView"] = {}
+    out: dict[str, RedistributionView] = {}
     for ccode in synth_by_code:
         out[ccode] = shape_redistribution_view(
             scratch_session, ccode,

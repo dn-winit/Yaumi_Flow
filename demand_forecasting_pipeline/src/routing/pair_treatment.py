@@ -18,11 +18,8 @@ no thresholds or window lengths are hardcoded in callers.
 
 from __future__ import annotations
 
-from typing import Iterable
-
 import numpy as np
 import pandas as pd
-
 
 # ---------------------------------------------------------------------------
 # Routing signals: trend, seasonality, near-boundary
@@ -102,7 +99,7 @@ def compute_pattern_signals(
         row: dict = {}
         if not isinstance(keys, tuple):
             keys = (keys,)
-        for k, v in zip(group_keys, keys):
+        for k, v in zip(group_keys, keys, strict=False):
             row[k] = v
         row["trend_slope"] = slope
         row["trend_direction"] = direction
@@ -126,7 +123,7 @@ def compute_pattern_signals(
         row = {}
         if not isinstance(keys, tuple):
             keys = (keys,)
-        for k, v in zip(group_keys, keys):
+        for k, v in zip(group_keys, keys, strict=False):
             row[k] = v
         row["seasonal_strength"] = strength
         seasonal_rows.append(row)
@@ -225,13 +222,12 @@ def warm_start_unseen_pairs(
             still_cold.append(cold_pair)
             continue
         # Per-date median across siblings -- robust to outlier siblings.
-        agg_cols = [date_col]
         median = (
             sibling_forecast.groupby(date_col, sort=False)["prediction"]
             .median().rename("prediction").reset_index()
         )
         # Stamp the cold pair's identity into the warm-start rows.
-        for k, v in zip(group_keys, cold_pair):
+        for k, v in zip(group_keys, cold_pair, strict=False):
             median[k] = v
         # Conservative defaults: no probabilistic / quantile model exists
         # for an unseen pair, so we mark it explicitly.

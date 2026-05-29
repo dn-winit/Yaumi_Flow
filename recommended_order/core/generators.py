@@ -6,7 +6,7 @@ Engine de-dupes and ranks across lanes.
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 import numpy as np
 import pandas as pd
@@ -15,13 +15,13 @@ from recommended_order.config.constants import SafetyClamps, UniversalFilters
 from recommended_order.core.calibration import RouteCalibration
 from recommended_order.core.cycle import CycleCalculator
 from recommended_order.core.explain import (
-    Explanation,
     KIND_BASKET_COMPLEMENT,
     KIND_FIRST_VISIT,
     KIND_LOOKALIKE_PEER,
     KIND_REACTIVATION,
     KIND_TRENDING_DOWN,
     KIND_TRENDING_UP,
+    Explanation,
     Signal,
     detail_basket_complement,
     detail_first_visit,
@@ -52,8 +52,8 @@ def _finalize(cand: Candidate, expl: Explanation) -> Candidate:
 def gen_history(
     customer: str,
     cust_history: pd.DataFrame,
-    item_dict: Dict[str, pd.DataFrame],
-    van_items: Dict[str, int],
+    item_dict: dict[str, pd.DataFrame],
+    van_items: dict[str, int],
     target_dt: pd.Timestamp,
     *,
     calibration: RouteCalibration,
@@ -63,9 +63,9 @@ def gen_history(
     priority_calc: PriorityCalculator,
     quantity_calc: QuantityCalculator,
     trend_calc: TrendCalculator,
-    profile: Optional[Dict[str, Any]] = None,
-) -> List[Candidate]:
-    out: List[Candidate] = []
+    profile: dict[str, Any] | None = None,
+) -> list[Candidate]:
+    out: list[Candidate] = []
     total_visits = int(cust_history["TrxDate"].nunique()) if not cust_history.empty else 0
     if total_visits == 0:
         return out
@@ -187,17 +187,17 @@ def gen_history(
 
 def gen_peer_cross_sell(
     customer: str,
-    item_dict: Dict[str, pd.DataFrame],
-    van_items: Dict[str, int],
+    item_dict: dict[str, pd.DataFrame],
+    van_items: dict[str, int],
     *,
-    lookalike_ctx: Dict[str, Any],
+    lookalike_ctx: dict[str, Any],
     calibration: RouteCalibration,
     clamps: SafetyClamps,
-    target_dt: Optional[pd.Timestamp] = None,
-    cycle_calc: Optional[CycleCalculator] = None,
-) -> List[Candidate]:
-    cust_idx_map: Dict[str, int] = lookalike_ctx.get("cust_idx", {})
-    item_idx_map: Dict[str, int] = lookalike_ctx.get("item_idx", {})
+    target_dt: pd.Timestamp | None = None,
+    cycle_calc: CycleCalculator | None = None,
+) -> list[Candidate]:
+    cust_idx_map: dict[str, int] = lookalike_ctx.get("cust_idx", {})
+    item_idx_map: dict[str, int] = lookalike_ctx.get("item_idx", {})
     if customer not in cust_idx_map or not item_idx_map:
         return []
 
@@ -234,7 +234,7 @@ def gen_peer_cross_sell(
 
     # Restrict to van items that exist in the matrix
     van_mask = np.zeros_like(scores, dtype=bool)
-    van_col_to_code: Dict[int, str] = {}
+    van_col_to_code: dict[int, str] = {}
     for item_code, van_qty in van_items.items():
         if int(van_qty or 0) <= 0:
             continue
@@ -264,7 +264,7 @@ def gen_peer_cross_sell(
     eligible_cols = sorted(eligible_cols, key=lambda c: -float(scores[c]))
     eligible_cols = eligible_cols[: int(calibration.peer_max_per_customer)]
 
-    out: List[Candidate] = []
+    out: list[Candidate] = []
     for j in eligible_cols:
         item = van_col_to_code[int(j)]
         van_qty = int(van_items.get(item, 0))
@@ -367,22 +367,22 @@ def _weighted_median(values: np.ndarray, weights: np.ndarray) -> float:
 # gen_basket_complement: items that co-purchase with history picks.
 
 def gen_basket_complement(
-    history_picks: List[Candidate],
-    van_items: Dict[str, int],
+    history_picks: list[Candidate],
+    van_items: dict[str, int],
     already_selected: set[str],
     *,
-    co_occurrence: Dict[str, Dict[str, float]],   # anchor -> {item: P(item|anchor)}
-    co_median_qty: Dict[str, Dict[str, float]],   # anchor -> {item: median qty when co-bought}
+    co_occurrence: dict[str, dict[str, float]],   # anchor -> {item: P(item|anchor)}
+    co_median_qty: dict[str, dict[str, float]],   # anchor -> {item: median qty when co-bought}
     calibration: RouteCalibration,
     clamps: SafetyClamps,
-    item_names: Dict[str, str],
-) -> List[Candidate]:
+    item_names: dict[str, str],
+) -> list[Candidate]:
     if not history_picks:
         return []
     min_conf = calibration.basket_min_confidence
 
     # Best (anchor, confidence) per candidate item
-    best: Dict[str, Tuple[str, float]] = {}
+    best: dict[str, tuple[str, float]] = {}
     for anchor in history_picks:
         lookup = co_occurrence.get(anchor.item_code, {})
         for item, conf in lookup.items():
@@ -399,7 +399,7 @@ def gen_basket_complement(
     # Keep top-K by confidence
     ranked = sorted(best.items(), key=lambda kv: -kv[1][1])[: clamps.basket_complement_top_k]
 
-    out: List[Candidate] = []
+    out: list[Candidate] = []
     for item, (anchor_code, conf) in ranked:
         median_qty = float(
             co_median_qty.get(anchor_code, {}).get(item, 1.0)
@@ -454,12 +454,12 @@ def gen_basket_complement(
 def gen_reactivation(
     customer: str,
     cust_history: pd.DataFrame,
-    top_van_items: List[Tuple[str, int]],
+    top_van_items: list[tuple[str, int]],
     target_dt: pd.Timestamp,
     *,
     calibration: RouteCalibration,
     clamps: SafetyClamps,
-) -> List[Candidate]:
+) -> list[Candidate]:
     if cust_history is None or cust_history.empty:
         return []
     last = cust_history["TrxDate"].max()
@@ -472,7 +472,7 @@ def gen_reactivation(
     if days_since_any <= calibration.dormancy_days:
         return []
 
-    out: List[Candidate] = []
+    out: list[Candidate] = []
     seed_qty = clamps.seed_qty
     for item, van_qty in top_van_items[: clamps.seed_top_k]:
         if van_qty <= 0:
@@ -515,12 +515,12 @@ def gen_reactivation(
 
 def gen_seed(
     customer: str,
-    top_van_items: List[Tuple[str, int]],
+    top_van_items: list[tuple[str, int]],
     *,
     calibration: RouteCalibration,
     clamps: SafetyClamps,
-) -> List[Candidate]:
-    out: List[Candidate] = []
+) -> list[Candidate]:
+    out: list[Candidate] = []
     seed_qty = clamps.seed_qty
     for item, van_qty in top_van_items[: clamps.seed_top_k]:
         if van_qty <= 0:
@@ -561,11 +561,11 @@ def gen_seed(
 
 # merge_and_rank.
 
-def merge_and_rank(candidates: List[Candidate]) -> List[Candidate]:
+def merge_and_rank(candidates: list[Candidate]) -> list[Candidate]:
     """De-dupe by item_code (keep highest priority; merge signal lists;
     promote real metric values from loser when winner has 0 placeholders)
     then sort by priority desc."""
-    by_item: Dict[str, Candidate] = {}
+    by_item: dict[str, Candidate] = {}
     for cand in candidates:
         prev = by_item.get(cand.item_code)
         if prev is None or cand.priority_score > prev.priority_score:
@@ -579,7 +579,7 @@ def merge_and_rank(candidates: List[Candidate]) -> List[Candidate]:
 
 # History-derived metric fields that non-history generators emit as 0
 # placeholders; merge promotes the loser's value when it's informative.
-_HISTORY_METRIC_FIELDS: Tuple[str, ...] = (
+_HISTORY_METRIC_FIELDS: tuple[str, ...] = (
     "days_since", "cycle_days", "frequency_pct", "pattern_quality",
     "purchase_count", "trend_factor", "avg_qty", "churn_probability",
 )

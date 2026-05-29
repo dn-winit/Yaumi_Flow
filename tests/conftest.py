@@ -25,7 +25,6 @@ load_dotenv(_REPO_ROOT / ".env")
 
 from common.route_registry import get_route_codes  # noqa: E402
 
-
 # ---------------------------------------------------------------------------
 # Service base URLs
 # ---------------------------------------------------------------------------
@@ -164,6 +163,7 @@ def db_conn():
     if not _has_db_creds():
         pytest.skip("AIML DB credentials not set; SS_DB_HOST/SS_DB_USERNAME missing")
     import pyodbc
+
     from sales_supervision.config.settings import get_settings
     s = get_settings()
     conn = pyodbc.connect(s.db.connection_string(), timeout=15)
@@ -178,12 +178,48 @@ def db_conn():
 # ---------------------------------------------------------------------------
 
 
+def _any_server_reachable() -> bool:
+    """Probe one canonical endpoint to decide whether the live-server
+    suite can run. Returns False on CI / dev machines without the
+    backends running so the hermetic suite still completes cleanly.
+    """
+    try:
+        with httpx.Client(timeout=2.0) as probe:
+            probe.get(BASE_URLS["data_import"] + "/health")
+        return True
+    except Exception:
+        return False
+
+
+# Test modules that historically expected a live server -- carry the
+# ``requires_live_server`` marker for the whole module so a hermetic
+# CI run skips them automatically without requiring per-test markers.
+_LIVE_SERVER_PATHS = (
+    "tests/data_import/",
+    "tests/demand_forecasting/",
+    "tests/recommended_order/",
+    "tests/sales_supervision/",
+    "tests/llm_analytics/",
+)
+
+
 def pytest_collection_modifyitems(config, items):
-    """Honour ``requires_db`` / ``requires_live_data`` markers without
-    forcing every test author to repeat the ``pytest.skip`` boilerplate.
+    """Honour ``requires_db`` / ``requires_live_data`` /
+    ``requires_live_server`` markers without forcing every test author
+    to repeat the ``pytest.skip`` boilerplate. Auto-tags the per-service
+    integration suites with ``requires_live_server`` so a hermetic CI
+    run only executes the ``tests/common/`` ASGI-transport coverage.
     """
     skip_db = pytest.mark.skip(reason="AIML DB creds missing (SS_DB_HOST/SS_DB_USERNAME)")
+    skip_live = pytest.mark.skip(reason="No live backend reachable; hermetic run only")
     has_db = _has_db_creds()
+    has_live = _any_server_reachable()
     for item in items:
+        # Auto-mark by path so historical tests don't need bulk edits.
+        rel = str(item.path).replace("\\", "/")
+        if any(rel.endswith(p[:-1]) or f"/{p}" in rel for p in _LIVE_SERVER_PATHS):
+            item.add_marker(pytest.mark.requires_live_server)
         if "requires_db" in item.keywords and not has_db:
             item.add_marker(skip_db)
+        if "requires_live_server" in item.keywords and not has_live:
+            item.add_marker(skip_live)

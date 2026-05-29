@@ -10,17 +10,18 @@ import logging
 import threading
 import time
 import uuid
-from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Dict, Iterable, Optional
+from collections.abc import Callable
+from datetime import UTC, datetime, timedelta
+from typing import Any
 
 import pandas as pd
 import pyodbc
 import structlog
 
-from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import FATAL_DB_ERRORS, get_pool, with_db_retry
 from common.numeric import safe_float
 from common.sql_fragments import NET_SOLD_CASE_SQL, RETURNS_SUBQUERY_BODY_SQL
+from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from demand_forecasting_pipeline.services.cache_invalidation import (
     invalidate_van_load_cache,
 )
@@ -39,11 +40,11 @@ _REFRESH_LOCK = threading.Lock()
 # Last successful refresh (UTC); cron short-circuits when within the dedup
 # window (settings.reconciliation_cron_dedup_window_seconds). Manual /refresh
 # calls bypass via force=True.
-_LAST_REFRESH_AT: Optional[datetime] = None
+_LAST_REFRESH_AT: datetime | None = None
 
 
 # Engine col -> yf_sales_transactions col; single source of truth for renaming.
-_RECON_COL_MAP: Dict[str, str] = {
+_RECON_COL_MAP: dict[str, str] = {
     "opening_stock":               "opening_stock",
     "recommended_load":            "fresh_load",
     "leftover_to_next_day":        "leftover_to_next_day",
@@ -89,11 +90,11 @@ _REP_SIDE_COLS = frozenset({
 def refresh_reconciliation(
     *,
     horizon_days_behind: int = 0,
-    settings: Optional[Settings] = None,
-    today: Optional[datetime] = None,
+    settings: Settings | None = None,
+    today: datetime | None = None,
     force: bool = True,
-    run_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Recompute the carry chain + diagnostics for ``[today-behind, today]``
     and UPSERT into yf_sales_transactions.
 
@@ -138,6 +139,8 @@ def refresh_reconciliation(
     if not run_id:
         run_id = uuid.uuid4().hex
     structlog.contextvars.bind_contextvars(run_id=run_id)
+
+    now = today or datetime.now(UTC)
     today_dt = now.date()
     start = (now - timedelta(days=max(0, int(horizon_days_behind)))).date()
     end = today_dt  # never write future
@@ -152,7 +155,7 @@ def refresh_reconciliation(
         with _REFRESH_LOCK:
             last = _LAST_REFRESH_AT
         if last is not None:
-            elapsed = (datetime.now(timezone.utc) - last).total_seconds()
+            elapsed = (datetime.now(UTC) - last).total_seconds()
             dedup_window = int(getattr(s, "reconciliation_cron_dedup_window_seconds", 1800))
             if elapsed < dedup_window:
                 logger.info(
@@ -262,8 +265,8 @@ def refresh_reconciliation(
         #    sales view by even a few rows.
         actuals_min_date = df_past["TrxDate"].min().date() if not df_past.empty else start
         engine_actuals_df = _fetch_actual_sold(s, actuals_min_date, end)
-        engine_actuals: dict[tuple[str, str, "pd.Timestamp"], float] = {}
-        engine_latest_actual: Optional["pd.Timestamp"] = None
+        engine_actuals: dict[tuple[str, str, pd.Timestamp], float] = {}
+        engine_latest_actual: pd.Timestamp | None = None
         if not engine_actuals_df.empty:
             for r in engine_actuals_df.itertuples(index=False):
                 key = (str(r.route_code), str(r.item_code),
@@ -524,7 +527,7 @@ def refresh_reconciliation(
             recommended_order_cascade.get("reason") or "unknown",
         )
     full_success = cascade_ok and ro_ok
-    payload: Dict[str, Any] = {
+    payload: dict[str, Any] = {
         "success": full_success,
         "rows_updated": int(rows_updated),
         "window": window,
@@ -555,11 +558,11 @@ def refresh_reconciliation(
     if full_success:
         # ``global`` already declared at the top of the function.
         with _REFRESH_LOCK:
-            _LAST_REFRESH_AT = datetime.now(timezone.utc)  # noqa: F841
+            _LAST_REFRESH_AT = datetime.now(UTC)  # noqa: F841
     return payload
 
 
-def _cron_propagation_headers(run_id: Optional[str]) -> Dict[str, str]:
+def _cron_propagation_headers(run_id: str | None) -> dict[str, str]:
     """Headers every cross-service cascade call must carry so the receiving
     backend's ``common.api_middleware`` binds the same ``request_id`` into
     its structured logs. The cron's run_id therefore correlates every hop
@@ -571,8 +574,8 @@ def _cron_propagation_headers(run_id: Optional[str]) -> Dict[str, str]:
 
 
 def _cascade_recommended_order_generate(
-    s: Settings, *, window: tuple[str, str], run_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    s: Settings, *, window: tuple[str, str], run_id: str | None = None,
+) -> dict[str, Any]:
     """POST recommended_order /generate?force=true per date in window."""
     url_base = (getattr(s, "recommended_order_url", "") or "").strip().rstrip("/")
     if not url_base:
@@ -585,7 +588,7 @@ def _cascade_recommended_order_generate(
         getattr(s, "recommended_order_generate_timeout_seconds", 600.0)
     )
 
-    def _post_once(d: str) -> Dict[str, Any]:
+    def _post_once(d: str) -> dict[str, Any]:
         with httpx.Client(timeout=timeout) as client:
             # Re-entrancy header: we ARE the reconciliation_refresh that
             # populates yf_sales_transactions; if RO's auto-heal called back
@@ -610,7 +613,7 @@ def _cascade_recommended_order_generate(
             "duration_seconds": float(body.get("duration_seconds") or 0.0),
         }
 
-    results: list[Dict[str, Any]] = []
+    results: list[dict[str, Any]] = []
     overall_success = True
     for d in dates:
         # One retry on transient HTTP / 5xx failure -- mirrors
@@ -647,8 +650,8 @@ def _cascade_recommended_order_generate(
 
 
 def _cascade_supervision_invalidate(
-    s: Settings, *, date: str, run_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    s: Settings, *, date: str, run_id: str | None = None,
+) -> dict[str, Any]:
     """POST sales_supervision /session/internal/invalidate-day so cached
     sessions drop their stale rec snapshot. Best-effort: a supervision
     outage must not poison the reconciler's own success contract -- by
@@ -1073,7 +1076,7 @@ def _upsert_sales_transactions(
                     None if pd.isna(v) else float(v) for v in numeric
                 ])
         # zip(*lists) emits one tuple per row, matching the previous shape.
-        records = list(zip(*col_lists))
+        records = list(zip(*col_lists, strict=False))
 
     pool = get_pool(
         s.db.connection_string(),
@@ -1233,15 +1236,15 @@ def _post_cascade_once(
     s: Settings,
     *,
     dataset: str,
-    lookback_days: Optional[int],
-    run_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    lookback_days: int | None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """Single HTTP attempt. Returns the data_import payload on success,
     a ``{"success": False, "error": ...}`` dict on any failure (network,
     timeout, non-2xx, JSON parse). The caller decides whether to retry."""
     import httpx
     base = (getattr(s, "data_import_url", None) or "").rstrip("/")
-    body: Dict[str, Any] = {"dataset": dataset, "mode": "incremental"}
+    body: dict[str, Any] = {"dataset": dataset, "mode": "incremental"}
     if lookback_days is not None:
         body["lookback_days"] = int(lookback_days)
     try:
@@ -1266,9 +1269,9 @@ def _cascade_data_import_refresh(
     s: Settings,
     *,
     dataset: str,
-    lookback_days: Optional[int] = None,
-    run_id: Optional[str] = None,
-) -> Dict[str, Any]:
+    lookback_days: int | None = None,
+    run_id: str | None = None,
+) -> dict[str, Any]:
     """POST data_import to re-mirror the named dataset (sales_transactions
     after this refactor; demand_forecast for legacy back-compat).
 
@@ -1319,10 +1322,10 @@ def _cascade_data_import_refresh(
 
 def start_reconciliation_scheduler(
     *,
-    settings: Optional[Settings] = None,
-    job: Optional[Callable[[], Any]] = None,
-    logger: Optional[Any] = None,
-) -> Optional[Any]:
+    settings: Settings | None = None,
+    job: Callable[[], Any] | None = None,
+    logger: Any | None = None,
+) -> Any | None:
     """Daily 03:30 Dubai cron. Refreshes today + yesterday by default;
     callers can opt into a wider behind-window via direct API call."""
     s = settings or get_settings()
@@ -1418,7 +1421,7 @@ def start_reconciliation_scheduler(
     return scheduler
 
 
-def stop_reconciliation_scheduler(scheduler: Optional[Any]) -> None:
+def stop_reconciliation_scheduler(scheduler: Any | None) -> None:
     if scheduler is None:
         return
     try:

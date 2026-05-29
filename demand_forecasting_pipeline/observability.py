@@ -12,9 +12,10 @@ historical names so existing imports keep working without churn.
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 import structlog
 from prometheus_client import Counter, Gauge
@@ -26,8 +27,10 @@ from common.observability import (
     HTTP_REQUESTS,
     INFO_GAUGE,
     PIPELINE_STEP_DURATION,
-    configure_logging as _common_configure_logging,
     get_logger,
+)
+from common.observability import (
+    configure_logging as _common_configure_logging,
 )
 from common.observability import step_timer as _common_step_timer
 

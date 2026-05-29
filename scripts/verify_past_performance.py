@@ -38,7 +38,6 @@ from demand_forecasting_pipeline.api.routes.reconciliation import (  # noqa: E40
     past_performance,
 )
 
-
 ROUTE = "9108"
 START = "2026-05-06"
 END = "2026-05-12"

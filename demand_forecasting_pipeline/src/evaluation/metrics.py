@@ -6,9 +6,16 @@ class-aware headline accuracy every UI tile reads.
 
 from __future__ import annotations
 
-from typing import Iterable, Optional, Sequence
+from collections.abc import Iterable, Sequence
+from typing import TYPE_CHECKING
 
 import numpy as np
+
+if TYPE_CHECKING:
+    # pandas is a heavy import; reserve it for the type annotation only.
+    # Runtime callers always pass DataFrames; the function never imports
+    # pandas itself.
+    import pandas as pd  # noqa: F401
 
 _EPS = 1e-9
 
@@ -157,7 +164,7 @@ def mase(
     y_true: np.ndarray,
     y_pred: np.ndarray,
     *,
-    y_train: Optional[np.ndarray] = None,
+    y_train: np.ndarray | None = None,
     seasonal_period: int = 1,
     eps: float = _EPS,
 ) -> float | None:
@@ -221,11 +228,11 @@ def mase(
 
 
 def resolve_class_array(
-    df: "pd.DataFrame",
+    df: pd.DataFrame,
     *,
     column: str = "class",
     fallback_column: str = "demand_class",
-) -> Optional[np.ndarray]:
+) -> np.ndarray | None:
     """Return the per-row class array used by ``composite_summary`` or
     ``None`` if the dataframe carries no class column.
 
@@ -246,7 +253,6 @@ def resolve_class_array(
     # Lazy local import: this module is otherwise pandas-free, and
     # importing pandas at module-load time would slow `import metrics`
     # on cold paths (Prometheus collectors, CLI scoring tools).
-    import pandas as pd  # noqa: PLC0415  (intentional lazy import)
 
     for col in (column, fallback_column):
         if col and col in df.columns:
@@ -257,10 +263,10 @@ def resolve_class_array(
 def composite_summary(
     actual: np.ndarray,
     predicted: np.ndarray,
-    demand_class: Optional[Sequence[str]] = None,
+    demand_class: Sequence[str] | None = None,
     *,
-    tolerance_by_class: Optional[dict[str, float]] = None,
-    default_tolerance: Optional[float] = None,
+    tolerance_by_class: dict[str, float] | None = None,
+    default_tolerance: float | None = None,
 ) -> dict:
     """Class-aware accuracy -- the headline business metric.
 

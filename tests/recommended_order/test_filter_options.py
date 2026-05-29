@@ -3,7 +3,6 @@ adoption/upcoming drawers."""
 from __future__ import annotations
 
 import httpx
-import pytest
 
 from tests.common.helpers import assert_not_5xx, assert_ok
 

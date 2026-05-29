@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
 
 import pandas as pd
 
@@ -16,7 +15,7 @@ logger = logging.getLogger(__name__)
 class SessionDbLoader:
     """One row per (session, customer, item) from yf_supervision_* for the feedback loop."""
 
-    def __init__(self, settings: Optional[Settings] = None) -> None:
+    def __init__(self, settings: Settings | None = None) -> None:
         self._s = settings or get_settings()
 
     @property

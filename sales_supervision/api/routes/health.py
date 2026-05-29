@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends
 
@@ -26,8 +26,8 @@ def health(db_saver: DbSaver = Depends(get_db_saver)) -> HealthResponse:
     if s.auto_visit_enabled:
         last_at = get_auto_visit_service().last_reconcile_at
         if last_at is not None:
-            last_epoch = last_at.replace(tzinfo=timezone.utc).timestamp()
-            lag = (datetime.now(timezone.utc) - last_at).total_seconds()
+            last_epoch = last_at.replace(tzinfo=UTC).timestamp()
+            lag = (datetime.now(UTC) - last_at).total_seconds()
             stale = lag > 2 * s.auto_visit_poll_seconds
         else:
             # Reconciler enabled but no tick yet -- mark stale so the

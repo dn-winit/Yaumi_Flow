@@ -7,9 +7,8 @@ handle empty windows.
 from __future__ import annotations
 
 import httpx
-import pytest
 
-from tests.common.helpers import assert_not_5xx, assert_ok
+from tests.common.helpers import assert_not_5xx
 
 
 class TestVanLoadPageView:
