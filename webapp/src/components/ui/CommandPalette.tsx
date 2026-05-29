@@ -11,7 +11,11 @@ interface Command {
 const COMMANDS: Command[] = [
   { label: "Dashboard", path: "/", keywords: "home overview kpi" },
   { label: "Forecasting Pipeline", path: "/pipeline", keywords: "train retrain model" },
-  { label: "Plan — Van load & visit", path: "/workflow/plan", keywords: "van load forecast plan visit recommend customer supervision live session" },
+  {
+    label: "Plan — Van load & visit",
+    path: "/workflow/plan",
+    keywords: "van load forecast plan visit recommend customer supervision live session",
+  },
   { label: "Data Admin", path: "/admin/data", keywords: "import refresh" },
   { label: "Cache Admin", path: "/admin/cache", keywords: "clear cache" },
 ];
@@ -102,9 +106,7 @@ export default function CommandPalette({ open, onClose }: CommandPaletteProps) {
         {/* Results */}
         <div className="max-h-64 overflow-y-auto py-1">
           {filtered.length === 0 ? (
-            <div className="px-4 py-6 text-center text-body text-neutral-400">
-              No results found
-            </div>
+            <div className="px-4 py-6 text-center text-body text-neutral-400">No results found</div>
           ) : (
             filtered.map((cmd, i) => (
               <button

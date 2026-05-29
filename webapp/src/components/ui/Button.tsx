@@ -15,8 +15,7 @@ interface ButtonProps {
 }
 
 const variantClasses: Record<ButtonVariant, string> = {
-  primary:
-    "bg-brand-600 text-inverse hover:bg-brand-700 active:bg-brand-700 focus:ring-brand-500",
+  primary: "bg-brand-600 text-inverse hover:bg-brand-700 active:bg-brand-700 focus:ring-brand-500",
   secondary:
     "bg-surface-raised text-text-secondary border border-default hover:bg-surface-sunken active:bg-surface-sunken focus:ring-brand-500",
   danger:
@@ -39,14 +38,7 @@ const Spinner = () => (
     fill="none"
     viewBox="0 0 24 24"
   >
-    <circle
-      className="opacity-25"
-      cx="12"
-      cy="12"
-      r="10"
-      stroke="currentColor"
-      strokeWidth="4"
-    />
+    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
     <path
       className="opacity-75"
       fill="currentColor"

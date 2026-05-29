@@ -101,9 +101,9 @@ export default function ExplainabilityModal({ open, onClose, row }: Props) {
         {/* Guard banner: journey-aware concentration mask zeroed this row (else 0 looks like a miss). */}
         {guardSkipped && (
           <div className="rounded-lg border border-warning-200 bg-warning-50 px-4 py-3 text-body text-warning-800">
-            <strong>Skipped today:</strong> the customer who buys nearly all of this item isn&apos;t on
-            today&apos;s journey plan, so the recommendation is held at zero. The truck rolls without
-            phantom inventory.
+            <strong>Skipped today:</strong> the customer who buys nearly all of this item isn&apos;t
+            on today&apos;s journey plan, so the recommendation is held at zero. The truck rolls
+            without phantom inventory.
           </div>
         )}
 

@@ -1,8 +1,5 @@
 import { useState } from "react";
-import type {
-  RedistributionGroup,
-  RedistributionView,
-} from "@/types/supervision";
+import type { RedistributionGroup, RedistributionView } from "@/types/supervision";
 
 /** Inline "Items redistributed" disclosure; green = gained, amber = reduced.
  *  keptOnTruck>0 appends an italic surplus line so it's never silently dropped. */
@@ -16,7 +13,7 @@ export interface RedistributionSectionProps {
 
 /** Pluraliser shared with LiveSessionTab; "1 unit" / "2 units" without an i18n dep. */
 export function pluralise(n: number, singular: string, plural?: string): string {
-  return `${n} ${n === 1 ? singular : plural ?? `${singular}s`}`;
+  return `${n} ${n === 1 ? singular : (plural ?? `${singular}s`)}`;
 }
 
 export default function RedistributionSection({
@@ -54,12 +51,7 @@ export default function RedistributionSection({
           viewBox="0 0 24 24"
           aria-hidden="true"
         >
-          <path
-            strokeLinecap="round"
-            strokeLinejoin="round"
-            strokeWidth={2}
-            d="M19 9l-7 7-7-7"
-          />
+          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
         </svg>
       </button>
 
@@ -69,9 +61,7 @@ export default function RedistributionSection({
           className="mt-3 rounded-md border border-subtle bg-surface-raised p-4 transition-all"
         >
           {total === 0 ? (
-            <p className="text-body text-text-tertiary">
-              No items redistributed for this visit.
-            </p>
+            <p className="text-body text-text-tertiary">No items redistributed for this visit.</p>
           ) : (
             <div className="space-y-5">
               <h4 className="text-caption font-semibold uppercase tracking-wider text-text-secondary">
@@ -82,9 +72,7 @@ export default function RedistributionSection({
                   <li key={g.itemCode} className="space-y-1">
                     <div className="text-body font-medium text-text-primary">
                       {g.itemName}
-                      <span className="ml-2 text-caption text-text-tertiary">
-                        {g.itemCode}
-                      </span>
+                      <span className="ml-2 text-caption text-text-tertiary">{g.itemCode}</span>
                     </div>
                     <ul className="space-y-0.5 pl-2">
                       {g.entries.map((e) => (

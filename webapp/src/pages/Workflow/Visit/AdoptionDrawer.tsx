@@ -15,13 +15,7 @@ import DashboardFilterBar from "@/pages/Dashboard/DashboardFilterBar";
 import { useAdoption } from "@/hooks/useRecommendedOrder";
 import { useLastActiveDate } from "@/hooks/useDataImport";
 import { addDays, fmtDate, fmtDateRange, todayIso } from "@/lib/date";
-import {
-  fmtNum,
-  fmtCurrency,
-  fmtPct,
-  fmtBps,
-  DELIVERY_GOOD,
-} from "@/lib/format";
+import { fmtNum, fmtCurrency, fmtPct, fmtBps, DELIVERY_GOOD } from "@/lib/format";
 import type { DashboardFilters, ReportingPeriod } from "@/types/data-import";
 import { EMPTY_FILTERS } from "@/types/data-import";
 
@@ -67,15 +61,11 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
         ? {
             start_date: period.start_date,
             end_date: period.end_date,
-            ...(filters.route_codes.length === 1
-              ? { route_code: filters.route_codes[0] }
-              : {}),
+            ...(filters.route_codes.length === 1 ? { route_code: filters.route_codes[0] } : {}),
             ...(filters.category_codes.length > 0
               ? { category_codes: filters.category_codes }
               : {}),
-            ...(filters.item_codes.length > 0
-              ? { item_codes: filters.item_codes }
-              : {}),
+            ...(filters.item_codes.length > 0 ? { item_codes: filters.item_codes } : {}),
           }
         : null,
     [period, filters],
@@ -89,9 +79,7 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
 
   // Server-aligned daily series (adoption_pct=null on no-rec days → chart shows a break).
   const windowLabel =
-    data?.start_date && data?.end_date
-      ? fmtDateRange(data.start_date, data.end_date)
-      : MISSING;
+    data?.start_date && data?.end_date ? fmtDateRange(data.start_date, data.end_date) : MISSING;
   const dailyPadded = data?.daily ?? [];
   const daysWithRecs = s?.days_with_recs ?? 0;
   const activeDays = s?.active_days ?? 0;
@@ -119,22 +107,19 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
   const revenueArrow: "up" | "down" | undefined =
     s?.driven_revenue != null && s.driven_revenue > 0 ? "up" : undefined;
   const accuracyArrow: "up" | "down" | undefined =
-    s?.pick_accuracy_pct == null
-      ? undefined
-      : s.pick_accuracy_pct >= DELIVERY_GOOD
-      ? "up"
-      : "down";
+    s?.pick_accuracy_pct == null ? undefined : s.pick_accuracy_pct >= DELIVERY_GOOD ? "up" : "down";
   const perfectPickArrow: "up" | "down" | undefined =
-    s?.perfect_pick_pct == null
-      ? undefined
-      : s.perfect_pick_pct >= DELIVERY_GOOD
-      ? "up"
-      : "down";
+    s?.perfect_pick_pct == null ? undefined : s.perfect_pick_pct >= DELIVERY_GOOD ? "up" : "down";
 
   const singleDay = period != null && period.start_date === period.end_date;
 
   return (
-    <Drawer open={open} onClose={onClose} title="Past performance - what customers actually bought" width="xl">
+    <Drawer
+      open={open}
+      onClose={onClose}
+      title="Past performance - what customers actually bought"
+      width="xl"
+    >
       <div className="space-y-6">
         {period == null ? (
           <Loading message="Finding the latest day with activity..." />
@@ -168,179 +153,213 @@ export default function AdoptionDrawer({ open, onClose, routeCode }: Props) {
                 }
               />
             ) : (
-          <>
-            <SectionLabel>How customers responded to our recommendations</SectionLabel>
-            <KpiRow>
-              <MetricCard
-                label="Revenue from our suggestions"
-                value={
-                  s?.driven_revenue != null && s.driven_revenue > 0
-                    ? fmtCurrency(s.driven_revenue)
-                    : s?.driven_volume
-                    ? `${fmtNum(s.driven_volume)} units`
-                    : "-"
-                }
-                subtitle={
-                  !s || s.recommended_volume <= 0
-                    ? "No recommendations bought yet"
-                    : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units actually sold - ${fmtNum(s.skus_adopted)} items`
-                }
-                trend={revenueArrow}
-                info={
-                  <InfoBubble
-                    title="Revenue from our suggestions"
-                    body={
-                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                        <p>AED of customer purchases that came from items we recommended to that customer.</p>
-                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                          driven_revenue = Σ (qty_bought × unit_price)<br />
-                          where (customer, item, day) appears in BOTH:<br />
-                          &nbsp;&nbsp;recommended_orders.csv  AND<br />
-                          &nbsp;&nbsp;VW_GET_SALES_DETAILS (TrxType=&apos;SalesInvoice&apos;)
-                        </p>
-                        <p>This isolates the revenue our recommendations <em>actually</em> drove - not just total revenue, but the slice attributable to suggestions the rep made.</p>
-                      </div>
+              <>
+                <SectionLabel>How customers responded to our recommendations</SectionLabel>
+                <KpiRow>
+                  <MetricCard
+                    label="Revenue from our suggestions"
+                    value={
+                      s?.driven_revenue != null && s.driven_revenue > 0
+                        ? fmtCurrency(s.driven_revenue)
+                        : s?.driven_volume
+                          ? `${fmtNum(s.driven_volume)} units`
+                          : "-"
                     }
-                  />
-                }
-                className="!border-l-success-600"
-              />
-              <MetricCard
-                label="Items the customer took"
-                value={
-                  s?.pick_accuracy_pct != null
-                    ? fmtPct(s.pick_accuracy_pct)
-                    : "-"
-                }
-                subtitle={
-                  s && s.skus_recommended > 0
-                    ? `${fmtNum(s.skus_adopted)} of ${fmtNum(s.skus_recommended)} suggested items were bought`
-                    : "No recommendations to score"
-                }
-                trend={accuracyArrow}
-                info={
-                  <InfoBubble
-                    title="Items the customer took"
-                    body={
-                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                        <p>The percentage of items we recommended that the customer actually bought.</p>
-                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                          pick_accuracy = items_adopted ÷ items_recommended × 100
-                        </p>
-                        <p>Counts each (customer, item, day) once. A high number means the rep&apos;s recommendation list was on-target with what the customer wanted.</p>
-                      </div>
+                    subtitle={
+                      !s || s.recommended_volume <= 0
+                        ? "No recommendations bought yet"
+                        : `${fmtNum(s.driven_volume)} of ${fmtNum(s.recommended_volume)} suggested units actually sold - ${fmtNum(s.skus_adopted)} items`
                     }
-                  />
-                }
-                className="!border-l-brand-600"
-              />
-              <MetricCard
-                label="Right quantity, right item"
-                value={
-                  s?.perfect_pick_pct != null
-                    ? fmtPct(s.perfect_pick_pct)
-                    : "-"
-                }
-                subtitle={
-                  s && s.skus_adopted > 0
-                    ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within +/-${fmtBps(s.perfect_pick_tolerance)} of suggested`
-                    : "No adopted items to score"
-                }
-                trend={perfectPickArrow}
-                info={
-                  <InfoBubble
-                    title="Right quantity, right item"
-                    body={
-                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                        <p>Of the items the customer bought from our recommendations, the percentage where the bought quantity was within +/-{s ? fmtBps(s.perfect_pick_tolerance) : "20%"} of the recommended quantity.</p>
-                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                          perfect_pick = items_within_tolerance ÷ items_adopted × 100
-                        </p>
-                        <p>Tighter than &quot;Items the customer took&quot; - this checks both the item choice and the volume. The tolerance is set per-deployment in the recommendation engine config.</p>
-                      </div>
+                    trend={revenueArrow}
+                    info={
+                      <InfoBubble
+                        title="Revenue from our suggestions"
+                        body={
+                          <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                            <p>
+                              AED of customer purchases that came from items we recommended to that
+                              customer.
+                            </p>
+                            <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                              driven_revenue = Σ (qty_bought × unit_price)
+                              <br />
+                              where (customer, item, day) appears in BOTH:
+                              <br />
+                              &nbsp;&nbsp;recommended_orders.csv AND
+                              <br />
+                              &nbsp;&nbsp;VW_GET_SALES_DETAILS (TrxType=&apos;SalesInvoice&apos;)
+                            </p>
+                            <p>
+                              This isolates the revenue our recommendations <em>actually</em> drove
+                              - not just total revenue, but the slice attributable to suggestions
+                              the rep made.
+                            </p>
+                          </div>
+                        }
+                      />
                     }
+                    className="!border-l-success-600"
                   />
-                }
-                className="!border-l-brand-600"
-              />
-              <MetricCard
-                label="Sales opportunity flagged"
-                value={
-                  s?.unsold_revenue != null && s.unsold_revenue > 0
-                    ? fmtCurrency(s.unsold_revenue)
-                    : s?.unsold_volume
-                    ? `${fmtNum(s.unsold_volume)} units`
-                    : "0"
-                }
-                subtitle={
-                  !s || s.unsold_volume === 0
-                    ? "Every recommended unit was bought"
-                    : `${fmtNum(s.unsold_volume)} units across ${fmtNum(s.unsold_sku_count)} items where customers didn't buy what we suggested - opportunity to re-pitch next visit`
-                }
-                trend={s?.unsold_volume != null && s.unsold_volume > 0 ? "up" : undefined}
-                info={
-                  <InfoBubble
-                    title="Sales opportunity flagged"
-                    body={
-                      <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                        <p>The AED value of items we recommended to customers that <strong>they didn&apos;t buy</strong> on this visit.</p>
-                        <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                          unsold_per_(customer,item,day) = max(recommended_qty − bought_qty, 0)<br />
-                          unsold_revenue = Σ unsold × avg_unit_price
-                        </p>
-                        <p><strong>Read it as opportunity, not error.</strong> A high number means the recommendations identified demand the customer hasn&apos;t yet acted on - items the team can re-pitch on the next visit, or that signal a stocking / pricing barrier.</p>
-                        <p>This number sits alongside Dashboard&apos;s &quot;Sales opportunity flagged&quot; tile - same opportunity-positive framing, scoped here to recommendation-vs-purchase per customer rather than forecast-vs-sales per route.</p>
-                      </div>
+                  <MetricCard
+                    label="Items the customer took"
+                    value={s?.pick_accuracy_pct != null ? fmtPct(s.pick_accuracy_pct) : "-"}
+                    subtitle={
+                      s && s.skus_recommended > 0
+                        ? `${fmtNum(s.skus_adopted)} of ${fmtNum(s.skus_recommended)} suggested items were bought`
+                        : "No recommendations to score"
                     }
+                    trend={accuracyArrow}
+                    info={
+                      <InfoBubble
+                        title="Items the customer took"
+                        body={
+                          <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                            <p>
+                              The percentage of items we recommended that the customer actually
+                              bought.
+                            </p>
+                            <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                              pick_accuracy = items_adopted ÷ items_recommended × 100
+                            </p>
+                            <p>
+                              Counts each (customer, item, day) once. A high number means the
+                              rep&apos;s recommendation list was on-target with what the customer
+                              wanted.
+                            </p>
+                          </div>
+                        }
+                      />
+                    }
+                    className="!border-l-brand-600"
                   />
-                }
-                className="!border-l-brand-600"
-              />
-            </KpiRow>
+                  <MetricCard
+                    label="Right quantity, right item"
+                    value={s?.perfect_pick_pct != null ? fmtPct(s.perfect_pick_pct) : "-"}
+                    subtitle={
+                      s && s.skus_adopted > 0
+                        ? `${fmtNum(s.skus_perfect)} of ${fmtNum(s.skus_adopted)} bought within +/-${fmtBps(s.perfect_pick_tolerance)} of suggested`
+                        : "No adopted items to score"
+                    }
+                    trend={perfectPickArrow}
+                    info={
+                      <InfoBubble
+                        title="Right quantity, right item"
+                        body={
+                          <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                            <p>
+                              Of the items the customer bought from our recommendations, the
+                              percentage where the bought quantity was within +/-
+                              {s ? fmtBps(s.perfect_pick_tolerance) : "20%"} of the recommended
+                              quantity.
+                            </p>
+                            <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                              perfect_pick = items_within_tolerance ÷ items_adopted × 100
+                            </p>
+                            <p>
+                              Tighter than &quot;Items the customer took&quot; - this checks both
+                              the item choice and the volume. The tolerance is set per-deployment in
+                              the recommendation engine config.
+                            </p>
+                          </div>
+                        }
+                      />
+                    }
+                    className="!border-l-brand-600"
+                  />
+                  <MetricCard
+                    label="Sales opportunity flagged"
+                    value={
+                      s?.unsold_revenue != null && s.unsold_revenue > 0
+                        ? fmtCurrency(s.unsold_revenue)
+                        : s?.unsold_volume
+                          ? `${fmtNum(s.unsold_volume)} units`
+                          : "0"
+                    }
+                    subtitle={
+                      !s || s.unsold_volume === 0
+                        ? "Every recommended unit was bought"
+                        : `${fmtNum(s.unsold_volume)} units across ${fmtNum(s.unsold_sku_count)} items where customers didn't buy what we suggested - opportunity to re-pitch next visit`
+                    }
+                    trend={s?.unsold_volume != null && s.unsold_volume > 0 ? "up" : undefined}
+                    info={
+                      <InfoBubble
+                        title="Sales opportunity flagged"
+                        body={
+                          <div className="space-y-3 text-body text-text-secondary leading-relaxed">
+                            <p>
+                              The AED value of items we recommended to customers that{" "}
+                              <strong>they didn&apos;t buy</strong> on this visit.
+                            </p>
+                            <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
+                              unsold_per_(customer,item,day) = max(recommended_qty − bought_qty, 0)
+                              <br />
+                              unsold_revenue = Σ unsold × avg_unit_price
+                            </p>
+                            <p>
+                              <strong>Read it as opportunity, not error.</strong> A high number
+                              means the recommendations identified demand the customer hasn&apos;t
+                              yet acted on - items the team can re-pitch on the next visit, or that
+                              signal a stocking / pricing barrier.
+                            </p>
+                            <p>
+                              This number sits alongside Dashboard&apos;s &quot;Sales opportunity
+                              flagged&quot; tile - same opportunity-positive framing, scoped here to
+                              recommendation-vs-purchase per customer rather than forecast-vs-sales
+                              per route.
+                            </p>
+                          </div>
+                        }
+                      />
+                    }
+                    className="!border-l-brand-600"
+                  />
+                </KpiRow>
 
-            <HighlightsStrip items={highlights} />
+                <HighlightsStrip items={highlights} />
 
-            <div className="space-y-6">
-              {dailyPadded.length > 0 && (
-                <LineChart
-                  title="Daily share of suggestions that sold"
-                  subtitle={
-                    daysWithRecs > 0 && daysWithRecs < activeDays
-                      ? `Recommendations stored for ${daysWithRecs} of ${activeDays} days in this window - gaps in the line mean no recommendations were generated that day.`
-                      : undefined
-                  }
-                  data={dailyPadded as unknown as Record<string, unknown>[]}
-                  xKey="date"
-                  series={[{ key: "adoption_pct", label: "% sold", color: CHART_COLOR.success }]}
-                  height={260}
-                />
-              )}
+                <div className="space-y-6">
+                  {dailyPadded.length > 0 && (
+                    <LineChart
+                      title="Daily share of suggestions that sold"
+                      subtitle={
+                        daysWithRecs > 0 && daysWithRecs < activeDays
+                          ? `Recommendations stored for ${daysWithRecs} of ${activeDays} days in this window - gaps in the line mean no recommendations were generated that day.`
+                          : undefined
+                      }
+                      data={dailyPadded as unknown as Record<string, unknown>[]}
+                      xKey="date"
+                      series={[
+                        { key: "adoption_pct", label: "% sold", color: CHART_COLOR.success },
+                      ]}
+                      height={260}
+                    />
+                  )}
 
-              <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {data.top_over_recommended.length > 0 && (
-                  <BarChart
-                    title="Suggesting too much (free up van space)"
-                    data={data.top_over_recommended as unknown as Record<string, unknown>[]}
-                    xKey="item_code"
-                    yKey="rows"
-                    color={CHART_COLOR.warning}
-                    height={240}
-                  />
-                )}
-                {data.top_missed.length > 0 && (
-                  <BarChart
-                    title="Customers buying without us suggesting"
-                    data={data.top_missed as unknown as Record<string, unknown>[]}
-                    xKey="item_code"
-                    yKey="rows"
-                    color={CHART_COLOR.success}
-                    height={240}
-                  />
-                )}
-              </div>
-            </div>
-          </>
-        )}
+                  <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+                    {data.top_over_recommended.length > 0 && (
+                      <BarChart
+                        title="Suggesting too much (free up van space)"
+                        data={data.top_over_recommended as unknown as Record<string, unknown>[]}
+                        xKey="item_code"
+                        yKey="rows"
+                        color={CHART_COLOR.warning}
+                        height={240}
+                      />
+                    )}
+                    {data.top_missed.length > 0 && (
+                      <BarChart
+                        title="Customers buying without us suggesting"
+                        data={data.top_missed as unknown as Record<string, unknown>[]}
+                        xKey="item_code"
+                        yKey="rows"
+                        color={CHART_COLOR.success}
+                        height={240}
+                      />
+                    )}
+                  </div>
+                </div>
+              </>
+            )}
           </>
         )}
       </div>

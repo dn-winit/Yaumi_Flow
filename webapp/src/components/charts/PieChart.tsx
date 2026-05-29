@@ -7,11 +7,7 @@ import {
   ResponsiveContainer,
 } from "recharts";
 import EmptyState from "@/components/ui/EmptyState";
-import {
-  CHART_PALETTE,
-  DEFAULT_CHART_HEIGHT,
-  TOOLTIP_PROPS,
-} from "./theme";
+import { CHART_PALETTE, DEFAULT_CHART_HEIGHT, TOOLTIP_PROPS } from "./theme";
 
 interface PieChartProps {
   data: Record<string, unknown>[];
@@ -38,9 +34,7 @@ export default function PieChart({
   if (loading) {
     return (
       <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
-        {title && (
-          <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
-        )}
+        {title && <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>}
         <div className="animate-pulse bg-surface-sunken rounded-lg" style={{ height }} />
       </div>
     );
@@ -48,9 +42,7 @@ export default function PieChart({
 
   return (
     <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">
-      {title && (
-        <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>
-      )}
+      {title && <h3 className="text-title font-semibold text-text-primary mb-4">{title}</h3>}
       {data.length === 0 ? (
         <EmptyState title={emptyMessage} />
       ) : (
@@ -71,11 +63,7 @@ export default function PieChart({
               ))}
             </Pie>
             <Tooltip {...TOOLTIP_PROPS} />
-            <Legend
-              iconType="circle"
-              iconSize={8}
-              wrapperStyle={{ fontSize: "0.875rem" }}
-            />
+            <Legend iconType="circle" iconSize={8} wrapperStyle={{ fontSize: "0.875rem" }} />
           </RechartsPieChart>
         </ResponsiveContainer>
       )}

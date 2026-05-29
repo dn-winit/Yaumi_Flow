@@ -1,0 +1,14 @@
+#!/usr/bin/env sh
+
+# Repo-root pre-commit hook -- runs lint-staged from the webapp directory
+# so staged TS/TSX files get ESLint + Prettier before they land in a
+# commit. lint-staged inspects the index and only touches staged files,
+# keeping the gate fast regardless of repo size.
+#
+# Hook lives at <repo-root>/.husky/pre-commit because husky v9 sets
+# ``core.hooksPath`` to wherever ``.husky/`` was discovered during
+# ``husky`` init; running ``npm install`` from the repo root (which
+# triggers the root ``prepare`` script) wires this in.
+
+cd "$(git rev-parse --show-toplevel)/webapp"
+npx lint-staged

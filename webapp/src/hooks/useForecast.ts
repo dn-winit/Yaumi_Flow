@@ -48,14 +48,8 @@ export function useForecastDrawerPageView(
   const ready = enabled && Boolean(routeCode) && Boolean(fromDate);
   const itemKey = (itemCodes ?? []).slice().sort().join("|");
   const { data, isLoading, error, refetch } = useQuery({
-    queryKey: [
-      "forecast-drawer-page-view",
-      routeCode ?? "",
-      fromDate ?? "",
-      itemKey,
-    ],
-    queryFn: () =>
-      forecastApi.getForecastDrawerPageView(routeCode, itemCodes, fromDate),
+    queryKey: ["forecast-drawer-page-view", routeCode ?? "", fromDate ?? "", itemKey],
+    queryFn: () => forecastApi.getForecastDrawerPageView(routeCode, itemCodes, fromDate),
     enabled: ready,
     ...tier("windowed"),
   });
@@ -140,8 +134,7 @@ let _postRunWatcherHandle: number | null = null;
 export function useTriggerPipeline() {
   const qc = useQueryClient();
   // Refresh the Pipeline strip the moment a run starts.
-  const onTriggerSuccess = () =>
-    qc.invalidateQueries({ queryKey: ["pipeline-resolved-status"] });
+  const onTriggerSuccess = () => qc.invalidateQueries({ queryKey: ["pipeline-resolved-status"] });
 
   // After the run completes, invalidate downstream queries that read freshly-written
   // artifacts (accuracy tiles, history, config) so dashboard lag drops from ~5min to ~0.
@@ -166,9 +159,7 @@ export function useTriggerPipeline() {
     const STABLE_FALSE_MS = 6_000;
     const start = Date.now();
     const handle = window.setInterval(() => {
-      const data = qc.getQueryData<{ any_running?: boolean }>([
-        "pipeline-resolved-status",
-      ]);
+      const data = qc.getQueryData<{ any_running?: boolean }>(["pipeline-resolved-status"]);
       const running = Boolean(data?.any_running);
 
       if (running) {

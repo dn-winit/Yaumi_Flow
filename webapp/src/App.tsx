@@ -21,9 +21,7 @@ const CacheAdminPage = React.lazy(() => import("@/pages/Admin/CacheAdminPage"));
 function RouteShell({ scope, children }: { scope: string; children: React.ReactNode }) {
   return (
     <ErrorBoundary scope={scope}>
-      <Suspense fallback={<Skeleton className="m-6 h-48 w-full max-w-3xl" />}>
-        {children}
-      </Suspense>
+      <Suspense fallback={<Skeleton className="m-6 h-48 w-full max-w-3xl" />}>{children}</Suspense>
     </ErrorBoundary>
   );
 }
@@ -34,30 +32,47 @@ export default function App() {
       <Route element={<AppLayout />}>
         <Route
           path={ROUTES.dashboard}
-          element={<RouteShell scope="dashboard"><DashboardPage /></RouteShell>}
+          element={
+            <RouteShell scope="dashboard">
+              <DashboardPage />
+            </RouteShell>
+          }
         />
         <Route
           path={ROUTES.pipeline}
-          element={<RouteShell scope="pipeline"><PipelinePage /></RouteShell>}
+          element={
+            <RouteShell scope="pipeline">
+              <PipelinePage />
+            </RouteShell>
+          }
         />
         <Route
           path={`${ROUTES.workflow}/*`}
-          element={<RouteShell scope="workflow"><WorkflowPage /></RouteShell>}
+          element={
+            <RouteShell scope="workflow">
+              <WorkflowPage />
+            </RouteShell>
+          }
         />
         <Route path="*" element={<Navigate to={ROUTES.dashboard} replace />} />
       </Route>
       <Route element={<AdminLayout />}>
         <Route
           path={ROUTES.adminData}
-          element={<RouteShell scope="admin-data"><DataAdminPage /></RouteShell>}
+          element={
+            <RouteShell scope="admin-data">
+              <DataAdminPage />
+            </RouteShell>
+          }
         />
-        <Route
-          path={ROUTES.adminPipeline}
-          element={<Navigate to={ROUTES.pipeline} replace />}
-        />
+        <Route path={ROUTES.adminPipeline} element={<Navigate to={ROUTES.pipeline} replace />} />
         <Route
           path={ROUTES.adminCache}
-          element={<RouteShell scope="admin-cache"><CacheAdminPage /></RouteShell>}
+          element={
+            <RouteShell scope="admin-cache">
+              <CacheAdminPage />
+            </RouteShell>
+          }
         />
       </Route>
     </Routes>

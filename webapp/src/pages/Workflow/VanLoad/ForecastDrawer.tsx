@@ -40,12 +40,7 @@ function toLegacyRow(r: ForecastDrawerTableRow, routeCode: string | undefined): 
 }
 
 export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: Props) {
-  const { data: view, loading } = useForecastDrawerPageView(
-    routeCode,
-    itemCodes,
-    todayIso(),
-    open,
-  );
+  const { data: view, loading } = useForecastDrawerPageView(routeCode, itemCodes, todayIso(), open);
 
   const showBand = Boolean(view?.show_band);
 
@@ -64,20 +59,14 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
       key: "Predicted",
       label: "Units to load",
       render: (r: ForecastDrawerTableRow) => (
-        <PredictedValue
-          row={toLegacyRow(r, routeCode)}
-          value={r.units_to_load}
-        />
+        <PredictedValue row={toLegacyRow(r, routeCode)} value={r.units_to_load} />
       ),
     },
     {
       key: "Confidence",
       label: "Chance of selling",
       render: (r: ForecastDrawerTableRow) => (
-        <ConfidenceBadge
-          value={r.p_demand}
-          demandClass={r.demand_class ?? undefined}
-        />
+        <ConfidenceBadge value={r.p_demand} demandClass={r.demand_class ?? undefined} />
       ),
     },
     {
@@ -118,8 +107,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
           <EmptyState
             title="Nothing scheduled"
             message={
-              view?.message ||
-              "No upcoming load from today onwards for this route/item selection."
+              view?.message || "No upcoming load from today onwards for this route/item selection."
             }
             icon="trend"
           />
@@ -162,9 +150,7 @@ export default function ForecastDrawer({ open, onClose, routeCode, itemCodes }: 
             <Card
               title="Line-item detail"
               actions={
-                <span className="text-body text-text-tertiary">
-                  {view.table_rows.length} rows
-                </span>
+                <span className="text-body text-text-tertiary">{view.table_rows.length} rows</span>
               }
             >
               <Table

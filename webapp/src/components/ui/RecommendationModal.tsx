@@ -33,14 +33,17 @@ function cycleHint(cycle: number | null, daysSince: number | null): string {
   return `Next purchase expected in ${Math.round(Math.abs(overdue))} days`;
 }
 
-function sourceLabel(source: string): { label: string; tone: "info" | "success" | "warning" | "neutral" } {
+function sourceLabel(source: string): {
+  label: string;
+  tone: "info" | "success" | "warning" | "neutral";
+} {
   // Maps the canonical strings from core/explain.py to plain English.
   const s = source.toLowerCase();
-  if (s === "history")      return { label: "From this customer's history",          tone: "success" };
-  if (s === "peer")         return { label: "From similar customers' purchases",     tone: "info" };
-  if (s === "basket")       return { label: "Often bought with another item ordered", tone: "info" };
-  if (s === "reactivation") return { label: "Customer hasn't ordered recently",       tone: "warning" };
-  if (s === "seed")         return { label: "First-visit suggestion — popular item",  tone: "neutral" };
+  if (s === "history") return { label: "From this customer's history", tone: "success" };
+  if (s === "peer") return { label: "From similar customers' purchases", tone: "info" };
+  if (s === "basket") return { label: "Often bought with another item ordered", tone: "info" };
+  if (s === "reactivation") return { label: "Customer hasn't ordered recently", tone: "warning" };
+  if (s === "seed") return { label: "First-visit suggestion — popular item", tone: "neutral" };
   return { label: source, tone: "neutral" };
 }
 
@@ -122,16 +125,8 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
                 value="—"
                 hint="First-time suggestion (no past purchase)"
               />
-              <Stat
-                label="Buying cycle"
-                value="—"
-                hint="No personal cycle established yet"
-              />
-              <Stat
-                label="Last purchased"
-                value="Never"
-                hint="See ‘Why we suggested it’ below"
-              />
+              <Stat label="Buying cycle" value="—" hint="No personal cycle established yet" />
+              <Stat label="Last purchased" value="Never" hint="See ‘Why we suggested it’ below" />
             </div>
           ) : (
             <div className={GRID_3}>
@@ -142,7 +137,9 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
               />
               <Stat
                 label="Buying cycle"
-                value={cycleDays != null && cycleDays > 0 ? `Every ${cycleDays.toFixed(0)} days` : "-"}
+                value={
+                  cycleDays != null && cycleDays > 0 ? `Every ${cycleDays.toFixed(0)} days` : "-"
+                }
                 hint="Typical gap between purchases of this item"
               />
               <Stat
@@ -160,9 +157,7 @@ export default function RecommendationModal({ open, onClose, row }: Props) {
             <SectionTitle>Why we suggested it</SectionTitle>
             <div className={GRID_3}>
               <Stat label="Why this item" value={reasonText || "—"} prose />
-              {sizingText && (
-                <Stat label="How we sized it" value={sizingText} prose />
-              )}
+              {sizingText && <Stat label="How we sized it" value={sizingText} prose />}
             </div>
           </div>
         )}

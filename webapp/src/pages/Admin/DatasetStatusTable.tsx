@@ -8,9 +8,7 @@ interface DatasetStatusTableProps {
   datasets: Record<string, DatasetInfo>;
 }
 
-export default function DatasetStatusTable({
-  datasets,
-}: DatasetStatusTableProps) {
+export default function DatasetStatusTable({ datasets }: DatasetStatusTableProps) {
   const rows = Object.entries(datasets).map(([name, info]) => ({
     name,
     ...info,
@@ -30,8 +28,7 @@ export default function DatasetStatusTable({
     {
       key: "rows",
       label: "Rows",
-      render: (row: (typeof rows)[number]) =>
-        row.rows > 0 ? fmtNum(row.rows) : "-",
+      render: (row: (typeof rows)[number]) => (row.rows > 0 ? fmtNum(row.rows) : "-"),
     },
     {
       key: "first_date",
@@ -46,8 +43,7 @@ export default function DatasetStatusTable({
     {
       key: "size_mb",
       label: "Size",
-      render: (row: (typeof rows)[number]) =>
-        row.size_mb > 0 ? fmtFileSize(row.size_mb) : "-",
+      render: (row: (typeof rows)[number]) => (row.size_mb > 0 ? fmtFileSize(row.size_mb) : "-"),
     },
   ];
 

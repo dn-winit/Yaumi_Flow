@@ -20,7 +20,12 @@ interface Props {
 
 const DEFAULT_HORIZON = 7;
 
-export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DEFAULT_HORIZON }: Props) {
+export default function UpcomingPlanDrawer({
+  open,
+  onClose,
+  routeCode,
+  days = DEFAULT_HORIZON,
+}: Props) {
   const params = { days, ...(routeCode ? { route_code: routeCode } : {}) };
   const { data, loading } = useUpcomingPlan(params, open);
 
@@ -91,15 +96,13 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
                     ? fmtCurrency(data.summary.total_revenue)
                     : "--"
                 }
-                subtitle={data.summary.total_revenue != null ? "Units x avg price" : "No price data"}
+                subtitle={
+                  data.summary.total_revenue != null ? "Units x avg price" : "No price data"
+                }
               />
               <MetricCard
                 label="Peak day"
-                value={
-                  data.summary.peak_day
-                    ? fmtNum(data.summary.peak_day.predicted_qty)
-                    : "--"
-                }
+                value={data.summary.peak_day ? fmtNum(data.summary.peak_day.predicted_qty) : "--"}
                 subtitle={data.summary.peak_day ? fmtDate(data.summary.peak_day.date) : ""}
               />
             </KpiRow>
@@ -114,7 +117,9 @@ export default function UpcomingPlanDrawer({ open, onClose, routeCode, days = DE
 
             <Card
               title="Daily breakdown"
-              actions={<span className="text-body text-text-tertiary">{data.daily.length} days</span>}
+              actions={
+                <span className="text-body text-text-tertiary">{data.daily.length} days</span>
+              }
             >
               <Table data={data.daily as unknown as Record<string, unknown>[]} columns={columns} />
             </Card>

@@ -54,26 +54,22 @@ export default function DashboardPage() {
   // Server-sorted; just take the leaderboard cap (no client re-sort).
   const topRouteRevenueBars = useMemo<HBarDatum[]>(
     () =>
-      (salesData?.top_routes ?? [])
-        .slice(0, DASHBOARD_TOP_N)
-        .map((r) => ({
-          label: `Route ${r.RouteCode}`,
-          value: Number(r.revenue ?? 0),
-          display: fmtCurrency(r.revenue),
-        })),
-    [salesData?.top_routes]
+      (salesData?.top_routes ?? []).slice(0, DASHBOARD_TOP_N).map((r) => ({
+        label: `Route ${r.RouteCode}`,
+        value: Number(r.revenue ?? 0),
+        display: fmtCurrency(r.revenue),
+      })),
+    [salesData?.top_routes],
   );
 
   const categoryBars = useMemo<HBarDatum[]>(
     () =>
-      (salesData?.categories ?? [])
-        .slice(0, DASHBOARD_TOP_N)
-        .map((c) => ({
-          label: c.CategoryName?.trim() || "Uncategorized",
-          value: Number(c.revenue ?? 0),
-          display: fmtCurrency(c.revenue),
-        })),
-    [salesData?.categories]
+      (salesData?.categories ?? []).slice(0, DASHBOARD_TOP_N).map((c) => ({
+        label: c.CategoryName?.trim() || "Uncategorized",
+        value: Number(c.revenue ?? 0),
+        display: fmtCurrency(c.revenue),
+      })),
+    [salesData?.categories],
   );
 
   return (
@@ -86,9 +82,7 @@ export default function DashboardPage() {
             {k?.anchor_date && (
               <span className="text-caption text-text-tertiary mr-1">
                 Data through{" "}
-                <span className="font-semibold text-text-secondary">
-                  {fmtDate(k.anchor_date)}
-                </span>
+                <span className="font-semibold text-text-secondary">{fmtDate(k.anchor_date)}</span>
               </span>
             )}
             <Button variant="ghost" size="sm" onClick={handleRefresh}>
@@ -117,15 +111,13 @@ export default function DashboardPage() {
               {hasActiveFilters
                 ? "Your current filter selection has no sales in this window. Try widening the filters or the period."
                 : singleDay
-                ? "This date is most likely a weekend, holiday, or other closure. The dashboard has no rows to summarise for it."
-                : "Every day in the chosen range has zero rows in scope. The dashboard has nothing to summarise."}
+                  ? "This date is most likely a weekend, holiday, or other closure. The dashboard has no rows to summarise for it."
+                  : "Every day in the chosen range has zero rows in scope. The dashboard has nothing to summarise."}
             </div>
             {!hasActiveFilters && lastActiveDate && lastActiveDate !== period.end_date && (
               <div className="text-caption text-text-tertiary pt-2">
                 The most recent date with activity is{" "}
-                <span className="font-semibold text-text-secondary">
-                  {fmtDate(lastActiveDate)}
-                </span>
+                <span className="font-semibold text-text-secondary">{fmtDate(lastActiveDate)}</span>
                 . Adjust the reporting period to see data again.
               </div>
             )}
@@ -138,7 +130,10 @@ export default function DashboardPage() {
               <Skeleton className="h-3 w-44" />
               <KpiRow>
                 {[1, 2, 3].map((i) => (
-                  <div key={i} className="bg-surface-sunken rounded-lg p-4 border-l-3 border-brand-200">
+                  <div
+                    key={i}
+                    className="bg-surface-sunken rounded-lg p-4 border-l-3 border-brand-200"
+                  >
                     <Skeleton className="h-3 w-20 mb-2" />
                     <Skeleton className="h-6 w-28 mb-1" />
                     <Skeleton className="h-3 w-24" />
@@ -159,7 +154,8 @@ export default function DashboardPage() {
               actions={
                 salesData?.totals?.unique_categories ? (
                   <span className="text-caption text-text-tertiary">
-                    top {Math.min(salesData.totals.unique_categories, DASHBOARD_TOP_N)} of {salesData.totals.unique_categories}
+                    top {Math.min(salesData.totals.unique_categories, DASHBOARD_TOP_N)} of{" "}
+                    {salesData.totals.unique_categories}
                   </span>
                 ) : undefined
               }
@@ -180,7 +176,8 @@ export default function DashboardPage() {
               actions={
                 salesData?.totals?.unique_routes ? (
                   <span className="text-caption text-text-tertiary">
-                    top {Math.min(salesData.totals.unique_routes, DASHBOARD_TOP_N)} of {salesData.totals.unique_routes}
+                    top {Math.min(salesData.totals.unique_routes, DASHBOARD_TOP_N)} of{" "}
+                    {salesData.totals.unique_routes}
                   </span>
                 ) : undefined
               }

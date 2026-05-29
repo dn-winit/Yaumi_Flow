@@ -64,9 +64,7 @@ function PerClassAccuracyLine({
     return `${cls} ${Math.round(w.accuracy_pct)}%`;
   });
   return (
-    <div className="text-caption text-text-tertiary mt-0.5">
-      {parts.join(` ${SEPARATOR} `)}
-    </div>
+    <div className="text-caption text-text-tertiary mt-0.5">{parts.join(` ${SEPARATOR} `)}</div>
   );
 }
 
@@ -92,15 +90,21 @@ function StepCircle({ index, status }: { index: number; status: StepStatus }) {
         isActive
           ? "bg-brand-600 text-white shadow-sm"
           : isFailed
-          ? "bg-danger-600 text-white shadow-sm"
-          : "bg-surface-sunken text-text-tertiary border-2 border-neutral-200",
+            ? "bg-danger-600 text-white shadow-sm"
+            : "bg-surface-sunken text-text-tertiary border-2 border-neutral-200",
       ].join(" ")}
     >
       {isRunning && (
         <span className="absolute inset-0 rounded-full bg-brand-600 animate-ping opacity-50" />
       )}
       {isDone ? (
-        <svg className="relative w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+        <svg
+          className="relative w-5 h-5"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={3}
+        >
           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
         </svg>
       ) : (
@@ -342,11 +346,7 @@ export default function PipelinePage() {
     error: statusError,
     refetch: refetchStatus,
   } = useResolvedPipelineStatus();
-  const {
-    data: summaryData,
-    loading: summaryLoading,
-    error: summaryError,
-  } = useForecastSummary();
+  const { data: summaryData, loading: summaryLoading, error: summaryError } = useForecastSummary();
 
   // OR-gate so the page never paints half-resolved.
   if (statusLoading || summaryLoading) {
@@ -405,11 +405,7 @@ export default function PipelinePage() {
         <MetricCard
           label="Baseline accuracy"
           value={accuracy != null ? fmtPct(accuracy) : "—"}
-          trend={
-            accuracy != null
-              ? accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down"
-              : undefined
-          }
+          trend={accuracy != null ? (accuracy >= GOOD_SCORE_THRESHOLD ? "up" : "down") : undefined}
           subtitle={
             accuracy != null ? (
               <>
@@ -442,8 +438,14 @@ export default function PipelinePage() {
               title="When did the model last train?"
               body={
                 <div className="space-y-2 text-body text-text-secondary leading-relaxed">
-                  <p>The timestamp the last training run completed. Training refreshes the model with the latest sales history so forecasts stay current.</p>
-                  <p>Shown in your browser's local time. The daily training cron runs on the Asia/Dubai schedule.</p>
+                  <p>
+                    The timestamp the last training run completed. Training refreshes the model with
+                    the latest sales history so forecasts stay current.
+                  </p>
+                  <p>
+                    Shown in your browser's local time. The daily training cron runs on the
+                    Asia/Dubai schedule.
+                  </p>
                 </div>
               }
             />
@@ -463,8 +465,15 @@ export default function PipelinePage() {
               title="What is the forecast horizon?"
               body={
                 <div className="space-y-2 text-body text-text-secondary leading-relaxed">
-                  <p>The latest date the model has predictions for. The inference cron writes new predictions daily, extending the horizon forward.</p>
-                  <p>The subtitle reports the size of the held-out test slice scored at the last training (a measure of how broadly the model was evaluated, not the forward horizon itself).</p>
+                  <p>
+                    The latest date the model has predictions for. The inference cron writes new
+                    predictions daily, extending the horizon forward.
+                  </p>
+                  <p>
+                    The subtitle reports the size of the held-out test slice scored at the last
+                    training (a measure of how broadly the model was evaluated, not the forward
+                    horizon itself).
+                  </p>
                 </div>
               }
             />

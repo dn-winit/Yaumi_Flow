@@ -2,11 +2,7 @@ import Card from "@/components/ui/Card";
 import Badge from "@/components/ui/Badge";
 import Select from "@/components/ui/Select";
 import { TABLE_SCROLL_CLASS } from "@/components/ui/Table";
-import {
-  useRetrainConfig,
-  useRetrainHistory,
-  useUpdateRetrainConfig,
-} from "@/hooks/useForecast";
+import { useRetrainConfig, useRetrainHistory, useUpdateRetrainConfig } from "@/hooks/useForecast";
 import { fmtDate, daysSince } from "@/lib/date";
 import { fmtPct } from "@/lib/format";
 import InfoBubble from "@/components/ui/InfoBubble";
@@ -86,15 +82,21 @@ function renderDecisionBadge(h: RetrainHistoryEntry) {
     return <span className="text-text-tertiary">—</span>;
   }
   const tone: Tone =
-    decision === "promote"    ? "success" :
-    decision === "cold_start" ? "info" :
-    decision === "reject"     ? "danger" :
-                                "neutral";
+    decision === "promote"
+      ? "success"
+      : decision === "cold_start"
+        ? "info"
+        : decision === "reject"
+          ? "danger"
+          : "neutral";
   const label =
-    decision === "promote"    ? "Promoted" :
-    decision === "cold_start" ? "Cold start" :
-    decision === "reject"     ? "Rejected" :
-                                decision;
+    decision === "promote"
+      ? "Promoted"
+      : decision === "cold_start"
+        ? "Cold start"
+        : decision === "reject"
+          ? "Rejected"
+          : decision;
   const title = h.promotion_reason ?? undefined;
   return (
     <span title={title}>
@@ -137,11 +139,7 @@ export default function AutoRetrainSection() {
       <div className="space-y-6">
         {/* Controls row */}
         <div className="flex flex-wrap items-center gap-6">
-          <Toggle
-            checked={enabled}
-            onChange={handleToggle}
-            label="Enable auto-retrain"
-          />
+          <Toggle checked={enabled} onChange={handleToggle} label="Enable auto-retrain" />
 
           <Select
             value={String(freqDays)}
@@ -164,82 +162,78 @@ export default function AutoRetrainSection() {
         {/* Status panel */}
         <div className="rounded-lg border border-default bg-surface-sunken p-4">
           <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-          {/* Drift status */}
-          <div>
-            <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
-              Drift status
-              <InfoBubble
-                title="How drift is measured"
-                text="Drift compares Recent accuracy (raw model forecast vs invoiced actuals, class-tolerance WAPE over the last 7 working days, all routes pooled) against Baseline accuracy (same formula on the full held-out test set, set at training time). Both sides score the raw forecast so the delta is a pure model-quality signal. Status is 'stable' inside the warn band, 'drifting' between warn and alert thresholds, and 'significant' beyond alert."
-              />
-            </span>
-            {drift ? (
-              <Badge tone={driftTone(drift.status)}>{driftLabel(drift.status)}</Badge>
-            ) : configLoading ? (
-              <span className="text-body text-text-tertiary">Loading...</span>
-            ) : (
-              <Badge tone="neutral">Unknown</Badge>
-            )}
-          </div>
-
-          {/* Recent vs baseline -- both raw forecast vs actual, so the delta is honest. */}
-          <div>
-            <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
-              Recent accuracy
-              <InfoBubble
-                title="How forecast accuracy is calculated"
-                body={<ForecastAccuracyExplanation />}
-              />
-            </span>
-            <span className="text-body font-semibold text-text-primary">
-              {fmtPct(drift?.recent_accuracy ?? null)}
-            </span>
-            {drift?.baseline_accuracy != null && (
-              <span className="text-caption text-text-tertiary ml-2">
-                vs {fmtPct(drift.baseline_accuracy)} at training
+            {/* Drift status */}
+            <div>
+              <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
+                Drift status
+                <InfoBubble
+                  title="How drift is measured"
+                  text="Drift compares Recent accuracy (raw model forecast vs invoiced actuals, class-tolerance WAPE over the last 7 working days, all routes pooled) against Baseline accuracy (same formula on the full held-out test set, set at training time). Both sides score the raw forecast so the delta is a pure model-quality signal. Status is 'stable' inside the warn band, 'drifting' between warn and alert thresholds, and 'significant' beyond alert."
+                />
               </span>
-            )}
-            {drift?.delta != null && (
-              <span
-                className={`text-caption ml-2 ${
-                  drift.delta >= 0 ? "text-success-600" : "text-danger-600"
-                }`}
-              >
-                {drift.delta >= 0 ? "\u0394 +" : "\u0394 "}
-                {drift.delta.toFixed(1)} pp
-              </span>
-            )}
-            {drift?.rows_compared != null && (
-              <div className="text-caption text-text-tertiary mt-0.5">
-                {drift.rows_compared.toLocaleString()} item-day rows scored
-              </div>
-            )}
-          </div>
+              {drift ? (
+                <Badge tone={driftTone(drift.status)}>{driftLabel(drift.status)}</Badge>
+              ) : configLoading ? (
+                <span className="text-body text-text-tertiary">Loading...</span>
+              ) : (
+                <Badge tone="neutral">Unknown</Badge>
+              )}
+            </div>
 
-          {/* Next scheduled */}
-          <div>
-            <span className="text-caption text-text-tertiary block mb-1">
-              Next auto-retrain
-            </span>
-            <span className="text-body font-semibold text-text-primary">
-              {enabled ? fmtDate(config?.next_scheduled ?? null) : "Disabled"}
-            </span>
-          </div>
-
-          {/* Last auto-retrain */}
-          <div>
-            <span className="text-caption text-text-tertiary block mb-1">
-              Last auto-retrain
-            </span>
-            <span className="text-body font-semibold text-text-primary">
-              {fmtDate(config?.last_auto_retrain ?? null)}
-            </span>
-            {config?.last_auto_retrain && (
-              <span className="text-caption text-text-tertiary ml-1">
-                {timeAgo(config.last_auto_retrain)}
+            {/* Recent vs baseline -- both raw forecast vs actual, so the delta is honest. */}
+            <div>
+              <span className="text-caption text-text-tertiary flex items-center gap-1.5 mb-1">
+                Recent accuracy
+                <InfoBubble
+                  title="How forecast accuracy is calculated"
+                  body={<ForecastAccuracyExplanation />}
+                />
               </span>
-            )}
-          </div>
+              <span className="text-body font-semibold text-text-primary">
+                {fmtPct(drift?.recent_accuracy ?? null)}
+              </span>
+              {drift?.baseline_accuracy != null && (
+                <span className="text-caption text-text-tertiary ml-2">
+                  vs {fmtPct(drift.baseline_accuracy)} at training
+                </span>
+              )}
+              {drift?.delta != null && (
+                <span
+                  className={`text-caption ml-2 ${
+                    drift.delta >= 0 ? "text-success-600" : "text-danger-600"
+                  }`}
+                >
+                  {drift.delta >= 0 ? "\u0394 +" : "\u0394 "}
+                  {drift.delta.toFixed(1)} pp
+                </span>
+              )}
+              {drift?.rows_compared != null && (
+                <div className="text-caption text-text-tertiary mt-0.5">
+                  {drift.rows_compared.toLocaleString()} item-day rows scored
+                </div>
+              )}
+            </div>
+
+            {/* Next scheduled */}
+            <div>
+              <span className="text-caption text-text-tertiary block mb-1">Next auto-retrain</span>
+              <span className="text-body font-semibold text-text-primary">
+                {enabled ? fmtDate(config?.next_scheduled ?? null) : "Disabled"}
+              </span>
+            </div>
+
+            {/* Last auto-retrain */}
+            <div>
+              <span className="text-caption text-text-tertiary block mb-1">Last auto-retrain</span>
+              <span className="text-body font-semibold text-text-primary">
+                {fmtDate(config?.last_auto_retrain ?? null)}
+              </span>
+              {config?.last_auto_retrain && (
+                <span className="text-caption text-text-tertiary ml-1">
+                  {timeAgo(config.last_auto_retrain)}
+                </span>
+              )}
+            </div>
           </div>
         </div>
 
@@ -251,11 +245,21 @@ export default function AutoRetrainSection() {
               <table className="w-full text-left text-body">
                 <thead className="sticky top-0 z-10 bg-surface-raised border-b border-default">
                   <tr>
-                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Date</th>
-                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Trigger</th>
-                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Before</th>
-                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">After</th>
-                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">Status</th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">
+                      Date
+                    </th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">
+                      Trigger
+                    </th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">
+                      Before
+                    </th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">
+                      After
+                    </th>
+                    <th className="py-2 pr-4 text-caption font-semibold text-text-tertiary">
+                      Status
+                    </th>
                     <th className="py-2 text-caption font-semibold text-text-tertiary">Decision</th>
                   </tr>
                 </thead>

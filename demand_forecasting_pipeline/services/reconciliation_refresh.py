@@ -9,11 +9,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Callable, Dict, Iterable, Optional
 
 import pandas as pd
 import pyodbc
+import structlog
 
 from demand_forecasting_pipeline.config.settings import Settings, get_settings
 from common.db_pool import FATAL_DB_ERRORS, get_pool, with_db_retry
@@ -90,6 +92,7 @@ def refresh_reconciliation(
     settings: Optional[Settings] = None,
     today: Optional[datetime] = None,
     force: bool = True,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Recompute the carry chain + diagnostics for ``[today-behind, today]``
     and UPSERT into yf_sales_transactions.
@@ -126,7 +129,15 @@ def refresh_reconciliation(
     global _LAST_REFRESH_AT
 
     s = settings or get_settings()
-    now = today or datetime.now(timezone.utc)
+    # Run-id ties every cascade hop (DI/RO/SS) to the same correlation id
+    # in the structured logs. Inbound callers (manual /refresh, cron) can
+    # pass a pre-existing id to extend an external trace; otherwise we
+    # generate a fresh UUID. Bound into structlog so every log emitted by
+    # this call surfaces ``run_id`` as a flat JSON field, and forwarded as
+    # ``X-Request-ID`` on the three cross-service httpx.post calls below.
+    if not run_id:
+        run_id = uuid.uuid4().hex
+    structlog.contextvars.bind_contextvars(run_id=run_id)
     today_dt = now.date()
     start = (now - timedelta(days=max(0, int(horizon_days_behind)))).date()
     end = today_dt  # never write future
@@ -186,6 +197,7 @@ def refresh_reconciliation(
             s,
             dataset="demand_forecast",
             lookback_days=int(getattr(s, "forecast_csv_refresh_lookback_days", 60)),
+            run_id=run_id,
         )
 
         # 1. Load demand_forecast CSV (raw model output)
@@ -421,10 +433,11 @@ def refresh_reconciliation(
         s,
         dataset="sales_transactions",
         lookback_days=cascade_lookback,
+        run_id=run_id,
     )
 
     # 10. Cascade -> recommended_order regenerates for each refreshed date.
-    recommended_order_cascade = _cascade_recommended_order_generate(s, window=window)
+    recommended_order_cascade = _cascade_recommended_order_generate(s, window=window, run_id=run_id)
 
     # 11. Cascade -> sales_supervision for EVERY date in the reconciliation
     #     window. The earlier single-date version only invalidated today; a
@@ -466,7 +479,7 @@ def refresh_reconciliation(
             # If rec-order succeeded for this specific date OR was a no-op
             # skip, the supervision repair still has something to align against.
             if ro_entry.get("success") is True or ro_entry.get("skipped") is True:
-                r = _cascade_supervision_invalidate(s, date=d)
+                r = _cascade_supervision_invalidate(s, date=d, run_id=run_id)
                 per_date_results.append({"date": d, **r})
                 if not (r.get("success") is True or r.get("skipped") is True):
                     all_ok = False
@@ -546,8 +559,19 @@ def refresh_reconciliation(
     return payload
 
 
+def _cron_propagation_headers(run_id: Optional[str]) -> Dict[str, str]:
+    """Headers every cross-service cascade call must carry so the receiving
+    backend's ``common.api_middleware`` binds the same ``request_id`` into
+    its structured logs. The cron's run_id therefore correlates every hop
+    in the chain (DF -> data_import -> recommended_order -> supervision)
+    end-to-end."""
+    if not run_id:
+        return {}
+    return {"X-Request-ID": run_id}
+
+
 def _cascade_recommended_order_generate(
-    s: Settings, *, window: tuple[str, str],
+    s: Settings, *, window: tuple[str, str], run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """POST recommended_order /generate?force=true per date in window."""
     url_base = (getattr(s, "recommended_order_url", "") or "").strip().rstrip("/")
@@ -571,7 +595,10 @@ def _cascade_recommended_order_generate(
             resp = client.post(
                 f"{url_base}/api/v1/recommended-order/generate",
                 json={"date": d, "force": True},
-                headers={"X-Skip-Carry-Chain-Heal": "1"},
+                headers={
+                    "X-Skip-Carry-Chain-Heal": "1",
+                    **_cron_propagation_headers(run_id),
+                },
             )
             resp.raise_for_status()
             body = resp.json()
@@ -620,7 +647,7 @@ def _cascade_recommended_order_generate(
 
 
 def _cascade_supervision_invalidate(
-    s: Settings, *, date: str,
+    s: Settings, *, date: str, run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """POST sales_supervision /session/internal/invalidate-day so cached
     sessions drop their stale rec snapshot. Best-effort: a supervision
@@ -638,6 +665,7 @@ def _cascade_supervision_invalidate(
             resp = client.post(
                 f"{url_base}/api/v1/supervision/session/internal/invalidate-day",
                 params={"date": date},
+                headers=_cron_propagation_headers(run_id),
             )
             resp.raise_for_status()
             payload = resp.json()
@@ -1206,6 +1234,7 @@ def _post_cascade_once(
     *,
     dataset: str,
     lookback_days: Optional[int],
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Single HTTP attempt. Returns the data_import payload on success,
     a ``{"success": False, "error": ...}`` dict on any failure (network,
@@ -1220,6 +1249,7 @@ def _post_cascade_once(
             f"{base}{s.data_import_path}",
             json=body,
             timeout=s.data_import_cascade_timeout_seconds,
+            headers=_cron_propagation_headers(run_id),
         )
         resp.raise_for_status()
         payload = resp.json()
@@ -1237,6 +1267,7 @@ def _cascade_data_import_refresh(
     *,
     dataset: str,
     lookback_days: Optional[int] = None,
+    run_id: Optional[str] = None,
 ) -> Dict[str, Any]:
     """POST data_import to re-mirror the named dataset (sales_transactions
     after this refactor; demand_forecast for legacy back-compat).
@@ -1260,7 +1291,7 @@ def _cascade_data_import_refresh(
     if not base:
         return {"skipped": True, "reason": "data_import_url not configured"}
 
-    result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days)
+    result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days, run_id=run_id)
     if not result.get("success"):
         logger.warning(
             "reconciliation cascade refresh attempt 1 failed for %s: %s; "
@@ -1268,7 +1299,7 @@ def _cascade_data_import_refresh(
             dataset, result.get("error"), _CASCADE_RETRY_DELAY_SECONDS,
         )
         time.sleep(_CASCADE_RETRY_DELAY_SECONDS)
-        result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days)
+        result = _post_cascade_once(s, dataset=dataset, lookback_days=lookback_days, run_id=run_id)
         if not result.get("success"):
             logger.error(
                 "reconciliation cascade refresh failed after retry for %s: %s",

@@ -25,10 +25,7 @@ interface ErrorBoundaryState {
  * keyed by ``location.key`` at the route boundary so navigating to another
  * page also clears the state.
  */
-export default class ErrorBoundary extends Component<
-  ErrorBoundaryProps,
-  ErrorBoundaryState
-> {
+export default class ErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoundaryState> {
   state: ErrorBoundaryState = { error: null };
 
   static getDerivedStateFromError(error: Error): ErrorBoundaryState {
@@ -56,8 +53,8 @@ export default class ErrorBoundary extends Component<
           Something went wrong on this page
         </h2>
         <p className="text-body text-text-secondary mb-3">
-          The {this.props.scope} surface hit an unexpected error. The rest of
-          the app is still usable — switch tabs or click Retry below.
+          The {this.props.scope} surface hit an unexpected error. The rest of the app is still
+          usable — switch tabs or click Retry below.
         </p>
         <pre className="text-caption font-mono bg-surface-raised border border-default rounded p-3 overflow-auto max-h-48 mb-4">
           {error.message || error.name}

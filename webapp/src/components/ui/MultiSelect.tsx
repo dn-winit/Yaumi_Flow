@@ -120,6 +120,12 @@ export default function MultiSelect({
         return;
       }
       if (!filteredOptions.length) return;
+      // ``true`` when the search input has typed text -- in that case
+      // Home/End should defer to the browser's native caret-to-start /
+      // caret-to-end behaviour rather than reposition the listbox cursor.
+      // Arrow keys still navigate the listbox unconditionally (the
+      // combobox pattern's expected behaviour even with caret text).
+      const searchHasText = e.currentTarget.value.length > 0;
       if (e.key === "ArrowDown") {
         e.preventDefault();
         const next = Math.min(filteredOptions.length - 1, activeIndex + 1);
@@ -130,16 +136,21 @@ export default function MultiSelect({
         const next = Math.max(0, activeIndex - 1);
         setActiveIndex(next);
         scrollActiveIntoView(next);
-      } else if (e.key === "Home") {
+      } else if (e.key === "Home" && !searchHasText) {
         e.preventDefault();
         setActiveIndex(0);
         scrollActiveIntoView(0);
-      } else if (e.key === "End") {
+      } else if (e.key === "End" && !searchHasText) {
         e.preventDefault();
         const last = filteredOptions.length - 1;
         setActiveIndex(last);
         scrollActiveIntoView(last);
       } else if (e.key === "Enter") {
+        // Always preventDefault so an enclosing ``<form>`` doesn't submit
+        // when the user picks an option; matches the WAI-ARIA combobox
+        // pattern. If the component is ever embedded inside a form that
+        // wants Enter to submit, the consumer should listen on the form
+        // and route based on whether the listbox is open.
         e.preventDefault();
         const opt = filteredOptions[activeIndex];
         if (opt) toggle(opt.code);
@@ -148,8 +159,7 @@ export default function MultiSelect({
     [activeIndex, filteredOptions, scrollActiveIntoView, toggle],
   );
 
-  const activeId =
-    filteredOptions.length > 0 ? `${optionIdPrefix}-${activeIndex}` : undefined;
+  const activeId = filteredOptions.length > 0 ? `${optionIdPrefix}-${activeIndex}` : undefined;
 
   return (
     <div ref={ref} className={`relative flex flex-col gap-1 ${className}`}>

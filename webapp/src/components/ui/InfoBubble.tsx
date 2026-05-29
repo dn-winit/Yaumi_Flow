@@ -33,9 +33,7 @@ export default function InfoBubble({
         i
       </button>
       <Modal open={open} onClose={() => setOpen(false)} title={title} size="lg">
-        {body ?? (
-          <p className="text-body text-text-secondary leading-relaxed">{text}</p>
-        )}
+        {body ?? <p className="text-body text-text-secondary leading-relaxed">{text}</p>}
       </Modal>
     </>
   );

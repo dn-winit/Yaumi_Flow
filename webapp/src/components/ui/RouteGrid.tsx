@@ -70,7 +70,8 @@ export default function RouteGrid({
                 <div className="space-y-0.5">
                   {s.lines.map((ln, i) => (
                     <p key={i} className="text-body text-text-tertiary">
-                      {ln.label}: <span className="font-medium text-text-secondary">{ln.value}</span>
+                      {ln.label}:{" "}
+                      <span className="font-medium text-text-secondary">{ln.value}</span>
                     </p>
                   ))}
                 </div>

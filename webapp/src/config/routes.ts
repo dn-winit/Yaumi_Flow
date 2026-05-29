@@ -25,7 +25,12 @@ export const NAV_ITEMS = [
 // Order matters: the stepper renders left-to-right in this order.
 export const WORKFLOW_TABS = [
   { path: ROUTES.workflowPlan, label: "Plan", key: "plan", subtitle: "Van load for the route" },
-  { path: ROUTES.workflowVisit, label: "Visit", key: "visit", subtitle: "Review recs, run the session" },
+  {
+    path: ROUTES.workflowVisit,
+    label: "Visit",
+    key: "visit",
+    subtitle: "Review recs, run the session",
+  },
 ] as const;
 
 export const ADMIN_NAV_ITEMS = [

@@ -63,10 +63,7 @@ export default function VanLoadTable({ rows, items, routeCode, date }: Props) {
         const fresh = r.units_to_load;
         return (
           <div className="flex flex-col">
-            <PredictedValue
-              row={toLegacyRow(r, routeCode, date)}
-              value={r.recommended_van_load}
-            />
+            <PredictedValue row={toLegacyRow(r, routeCode, date)} value={r.recommended_van_load} />
             <span className="text-caption text-text-tertiary tabular-nums">
               {carried != null ? fmtNum(carried) : "—"} carried + {fmtNum(fresh)} fresh
             </span>
@@ -93,7 +90,10 @@ export default function VanLoadTable({ rows, items, routeCode, date }: Props) {
         const open = yaumi.yaumi_opening_stock;
         const fresh = yaumi.yaumi_fresh_load;
         return (
-          <div className="flex flex-col" title="Rep's actual loading (yesterday's leftover + today's depot allocation)">
+          <div
+            className="flex flex-col"
+            title="Rep's actual loading (yesterday's leftover + today's depot allocation)"
+          >
             <span className="tabular-nums text-text-primary">{fmtNum(total)}</span>
             {open != null && fresh != null && (
               <span className="text-caption text-text-tertiary tabular-nums">
@@ -108,10 +108,7 @@ export default function VanLoadTable({ rows, items, routeCode, date }: Props) {
       key: "Confidence",
       label: "Chance of selling",
       render: (r: VanLoadTableRow) => (
-        <ConfidenceBadge
-          value={r.p_demand}
-          demandClass={r.demand_class ?? undefined}
-        />
+        <ConfidenceBadge value={r.p_demand} demandClass={r.demand_class ?? undefined} />
       ),
     },
     {

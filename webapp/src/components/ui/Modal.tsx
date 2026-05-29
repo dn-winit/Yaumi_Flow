@@ -93,7 +93,15 @@ export default function Modal({ open, onClose, title, children, size = "md" }: M
       if (previouslyFocused.current) {
         const target = previouslyFocused.current;
         previouslyFocused.current = null;
-        requestAnimationFrame(() => target.focus());
+        // Guard against the trigger being unmounted while the modal was
+        // open (e.g. opened from a list item that rerendered). ``focus()``
+        // on a detached node is a silent no-op so the browser's focus
+        // ring lands nowhere. Fall back to ``document.body`` so screen
+        // readers don't lose the focus root.
+        requestAnimationFrame(() => {
+          if (target.isConnected) target.focus();
+          else document.body.focus();
+        });
       }
     };
   }, [open]);

@@ -1,8 +1,4 @@
-import {
-  useDataStatus,
-  useImportDataset,
-  useImportAll,
-} from "@/hooks/useDataImport";
+import { useDataStatus, useImportDataset, useImportAll } from "@/hooks/useDataImport";
 import Loading from "@/components/ui/Loading";
 import Card from "@/components/ui/Card";
 import Alert from "@/components/ui/Alert";
@@ -47,7 +43,8 @@ export default function DataAdminPage() {
       {importAll.error && <Alert variant="error">Import all error: {importAll.error}</Alert>}
       {importDataset.result && (
         <Alert variant="success">
-          {importDataset.result.message} -- {importDataset.result.new_rows} new rows ({fmtDuration(importDataset.result.duration_seconds)})
+          {importDataset.result.message} -- {importDataset.result.new_rows} new rows (
+          {fmtDuration(importDataset.result.duration_seconds)})
         </Alert>
       )}
 
@@ -64,9 +61,7 @@ export default function DataAdminPage() {
         {datasets ? (
           <DatasetStatusTable datasets={datasets} />
         ) : (
-          <p className="text-body text-text-tertiary">
-            No dataset information available.
-          </p>
+          <p className="text-body text-text-tertiary">No dataset information available.</p>
         )}
       </Card>
     </div>

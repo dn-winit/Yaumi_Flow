@@ -20,19 +20,19 @@ import { EMPTY_FILTERS } from "@/types/data-import";
 type ChartView = "van_load" | "leftovers";
 
 const CHART_TOGGLE_OPTIONS: ToggleOption<ChartView>[] = [
-  { value: "van_load",  label: "Van load" },
+  { value: "van_load", label: "Van load" },
   { value: "leftovers", label: "Leftovers" },
 ];
 
 const CHART_SERIES_VAN_LOAD = [
-  { key: "rep_van_load",         label: "Actual van load",       color: CHART_COLOR.warning },
-  { key: "recommended_van_load", label: "Recommended van load",  color: CHART_COLOR.brandPrimary },
-  { key: "actual_sold",          label: "Actually sold",         color: CHART_COLOR.success },
+  { key: "rep_van_load", label: "Actual van load", color: CHART_COLOR.warning },
+  { key: "recommended_van_load", label: "Recommended van load", color: CHART_COLOR.brandPrimary },
+  { key: "actual_sold", label: "Actually sold", color: CHART_COLOR.success },
 ];
 
 const CHART_SERIES_LEFTOVERS = [
-  { key: "actual_leftover",      label: "Actual leftover",       color: CHART_COLOR.warning },
-  { key: "recommended_leftover", label: "Recommended leftover",  color: CHART_COLOR.brandPrimary },
+  { key: "actual_leftover", label: "Actual leftover", color: CHART_COLOR.warning },
+  { key: "recommended_leftover", label: "Recommended leftover", color: CHART_COLOR.brandPrimary },
 ];
 
 interface Props {
@@ -65,10 +65,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endD
     });
     const anchor = lastActiveDate ?? todayIso();
     const dayBeforeSelected = endDateProp ? addDays(endDateProp, -1) : null;
-    const end =
-      dayBeforeSelected && dayBeforeSelected < anchor
-        ? dayBeforeSelected
-        : anchor;
+    const end = dayBeforeSelected && dayBeforeSelected < anchor ? dayBeforeSelected : anchor;
     setPeriod({ start_date: addDays(end, -29), end_date: end });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [open, routeCode, endDateProp, lastActiveDate, lastActiveLoading]);
@@ -90,12 +87,7 @@ export default function AccuracyDrawer({ open, onClose, routeCode, endDate: endD
   );
 
   return (
-    <Drawer
-      open={open}
-      onClose={onClose}
-      title="Past performance"
-      width="xl"
-    >
+    <Drawer open={open} onClose={onClose} title="Past performance" width="xl">
       <div className="space-y-6">
         {period == null ? (
           <DrawerSkeleton />
@@ -180,9 +172,7 @@ function DrawerContent({ data }: ContentProps) {
     return fmtDateRange(start, end);
   })();
 
-  const num = (value: number) => (
-    <span className="tabular-nums">{fmtNum(value)}</span>
-  );
+  const num = (value: number) => <span className="tabular-nums">{fmtNum(value)}</span>;
 
   const items = data.items ?? [];
   const categories = data.categories ?? [];
@@ -222,12 +212,22 @@ function DrawerContent({ data }: ContentProps) {
               title="What is actual van load?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>The total stock the rep physically loaded onto the truck across every working day in this window.</p>
-                  <p>For each item on each day, this is what was carried from yesterday plus what the depot issued today:</p>
+                  <p>
+                    The total stock the rep physically loaded onto the truck across every working
+                    day in this window.
+                  </p>
+                  <p>
+                    For each item on each day, this is what was carried from yesterday plus what the
+                    depot issued today:
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     actual van load = yesterday&apos;s leftover + today&apos;s depot allocation
                   </p>
-                  <p>Both numbers come from the SQL Server views that record the rep&apos;s real truck activity (closing stock for the carry, depot allocation for the fresh issue).</p>
+                  <p>
+                    Both numbers come from the SQL Server views that record the rep&apos;s real
+                    truck activity (closing stock for the carry, depot allocation for the fresh
+                    issue).
+                  </p>
                 </div>
               }
             />
@@ -247,16 +247,28 @@ function DrawerContent({ data }: ContentProps) {
               title="What is recommended van load?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>What our engine thinks the rep should have loaded onto the truck across the same window.</p>
-                  <p>For each item on each day, this is the carry from yesterday plus the fresh stock our forecast says the depot should issue:</p>
+                  <p>
+                    What our engine thinks the rep should have loaded onto the truck across the same
+                    window.
+                  </p>
+                  <p>
+                    For each item on each day, this is the carry from yesterday plus the fresh stock
+                    our forecast says the depot should issue:
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     recommended van load = carry + fresh from depot
                   </p>
-                  <p>The fresh part is sized so the truck just covers expected demand without over-stocking:</p>
+                  <p>
+                    The fresh part is sized so the truck just covers expected demand without
+                    over-stocking:
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     fresh from depot = max(0, expected demand &minus; carry)
                   </p>
-                  <p>Same number rendered on the Van Load page&apos;s headline tile -- one recommendation, one definition.</p>
+                  <p>
+                    Same number rendered on the Van Load page&apos;s headline tile -- one
+                    recommendation, one definition.
+                  </p>
                 </div>
               }
             />
@@ -276,12 +288,20 @@ function DrawerContent({ data }: ContentProps) {
               title="What does 'actually sold' mean?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>The total units the rep invoiced to customers across this window -- the ground truth we&apos;re scoring both policies against.</p>
+                  <p>
+                    The total units the rep invoiced to customers across this window -- the ground
+                    truth we&apos;re scoring both policies against.
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    sum(TotalQuantity) where TrxType = &apos;SalesInvoice&apos;<br />
+                    sum(TotalQuantity) where TrxType = &apos;SalesInvoice&apos;
+                    <br />
                     and ItemType = &apos;OrderItem&apos;
                   </p>
-                  <p>Returns (good or bad) are tracked separately and are <strong>not</strong> counted as sales here. Same source the dashboard uses, so the two surfaces always agree.</p>
+                  <p>
+                    Returns (good or bad) are tracked separately and are <strong>not</strong>{" "}
+                    counted as sales here. Same source the dashboard uses, so the two surfaces
+                    always agree.
+                  </p>
                 </div>
               }
             />
@@ -315,12 +335,23 @@ function DrawerContent({ data }: ContentProps) {
               title="What is SKU coverage?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>Of the distinct items the rep actually sold in this window, how many did our engine also forecast?</p>
+                  <p>
+                    Of the distinct items the rep actually sold in this window, how many did our
+                    engine also forecast?
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     SKU coverage = items we forecasted that sold &divide; items the rep sold
                   </p>
-                  <p>100% means we predicted demand for every item the rep moved. A lower number reveals <strong>blind spots</strong> -- items the rep needed that we didn&apos;t anticipate.</p>
-                  <p>Both sides are <strong>distinct item counts</strong>, not unit totals -- so a one-off sale of a slow item weighs the same as a high-volume item. That keeps the metric about <em>breadth of forecast scope</em>, not size of any one item.</p>
+                  <p>
+                    100% means we predicted demand for every item the rep moved. A lower number
+                    reveals <strong>blind spots</strong> -- items the rep needed that we didn&apos;t
+                    anticipate.
+                  </p>
+                  <p>
+                    Both sides are <strong>distinct item counts</strong>, not unit totals -- so a
+                    one-off sale of a slow item weighs the same as a high-volume item. That keeps
+                    the metric about <em>breadth of forecast scope</em>, not size of any one item.
+                  </p>
                 </div>
               }
             />
@@ -352,32 +383,40 @@ function DrawerContent({ data }: ContentProps) {
               title="What does 'leftovers saved' mean?"
               body={
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
-                  <p>The difference between what the rep had to carry overnight versus what our policy would have left over -- across every item, every working day in the window.</p>
-                  <p>For each item on each day, leftover is the stock that didn&apos;t sell that day:</p>
+                  <p>
+                    The difference between what the rep had to carry overnight versus what our
+                    policy would have left over -- across every item, every working day in the
+                    window.
+                  </p>
+                  <p>
+                    For each item on each day, leftover is the stock that didn&apos;t sell that day:
+                  </p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     leftover = max(0, load &minus; sold)
                   </p>
-                  <p>Items that ran short (sold more than loaded) are <strong>stock-outs</strong>, a different failure mode -- not counted as leftovers. That&apos;s why the formula is bounded at 0.</p>
+                  <p>
+                    Items that ran short (sold more than loaded) are <strong>stock-outs</strong>, a
+                    different failure mode -- not counted as leftovers. That&apos;s why the formula
+                    is bounded at 0.
+                  </p>
                   <p>Then:</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
                     leftovers saved = rep&apos;s leftover total &minus; our leftover total
                   </p>
-                  <p>A positive number means our policy leaves <strong>less stock overnight</strong> -- leaner truck, less stale inventory, less handling. Negative means we&apos;d have left more (the tile flips to amber + down-arrow when that happens).</p>
+                  <p>
+                    A positive number means our policy leaves <strong>less stock overnight</strong>{" "}
+                    -- leaner truck, less stale inventory, less handling. Negative means we&apos;d
+                    have left more (the tile flips to amber + down-arrow when that happens).
+                  </p>
                 </div>
               }
             />
           }
           trend={
-            t.leftover_units_saved > 0
-              ? "up"
-              : t.leftover_units_saved < 0
-              ? "down"
-              : undefined
+            t.leftover_units_saved > 0 ? "up" : t.leftover_units_saved < 0 ? "down" : undefined
           }
           className={
-            t.leftover_units_saved >= 0
-              ? "!border-l-success-600"
-              : "!border-l-warning-500"
+            t.leftover_units_saved >= 0 ? "!border-l-success-600" : "!border-l-warning-500"
           }
         />
       </KpiRow>
@@ -393,25 +432,53 @@ function DrawerContent({ data }: ContentProps) {
             <table className="w-full text-body">
               <thead className="sticky top-0 z-10 bg-surface-sunken">
                 <tr className="text-left">
-                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Category</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">SKUs</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual van load</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended van load</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actually sold</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual leftover</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended leftover</th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Category
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    SKUs
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actual van load
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Recommended van load
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actually sold
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actual leftover
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Recommended leftover
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-subtle">
                 {categories.map((c) => (
                   <tr key={c.categoryName} className="hover:bg-surface-sunken/40">
-                    <td className="px-4 py-2 align-top font-medium text-text-primary">{c.categoryName}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{c.skus}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.rep_van_load)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.recommended_van_load)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.actual_sold)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.actual_leftover)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(c.recommended_leftover)}</td>
+                    <td className="px-4 py-2 align-top font-medium text-text-primary">
+                      {c.categoryName}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {c.skus}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(c.rep_van_load)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(c.recommended_van_load)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(c.actual_sold)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(c.actual_leftover)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(c.recommended_leftover)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -429,34 +496,64 @@ function DrawerContent({ data }: ContentProps) {
             <table className="w-full text-body">
               <thead className="sticky top-0 z-10 bg-surface-sunken">
                 <tr className="text-left">
-                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Date</th>
-                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Item</th>
-                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">Category</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual van load</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended van load</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actually sold</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Actual leftover</th>
-                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">Recommended leftover</th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Date
+                  </th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Item
+                  </th>
+                  <th className="px-4 py-2 text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Category
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actual van load
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Recommended van load
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actually sold
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Actual leftover
+                  </th>
+                  <th className="px-4 py-2 text-right text-caption font-semibold uppercase tracking-wider text-text-secondary">
+                    Recommended leftover
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-subtle">
                 {items.map((r) => (
                   <tr key={`${r.date}-${r.itemCode}`} className="hover:bg-surface-sunken/40">
-                    <td className="whitespace-nowrap px-4 py-2 align-top tabular-nums text-text-secondary">{fmtDate(r.date)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 align-top tabular-nums text-text-secondary">
+                      {fmtDate(r.date)}
+                    </td>
                     <td className="px-4 py-2 align-top">
-                      <div className="truncate font-medium text-text-primary" title={r.itemName}>{r.itemName}</div>
-                      <div className="mt-0.5 text-caption uppercase tracking-wider text-text-tertiary">{r.itemCode}</div>
+                      <div className="truncate font-medium text-text-primary" title={r.itemName}>
+                        {r.itemName}
+                      </div>
+                      <div className="mt-0.5 text-caption uppercase tracking-wider text-text-tertiary">
+                        {r.itemCode}
+                      </div>
                     </td>
                     <td className="px-4 py-2 align-top text-text-secondary">
-                      {r.categoryName || (
-                        <span className="text-text-tertiary">Uncategorised</span>
-                      )}
+                      {r.categoryName || <span className="text-text-tertiary">Uncategorised</span>}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.rep_van_load)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.recommended_van_load)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.actual_sold)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.actual_leftover)}</td>
-                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">{fmtNum(r.recommended_leftover)}</td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(r.rep_van_load)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(r.recommended_van_load)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(r.actual_sold)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(r.actual_leftover)}
+                    </td>
+                    <td className="whitespace-nowrap px-4 py-2 text-right align-top tabular-nums">
+                      {fmtNum(r.recommended_leftover)}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -485,4 +582,3 @@ function DrawerContent({ data }: ContentProps) {
     </>
   );
 }
-

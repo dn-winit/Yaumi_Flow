@@ -41,10 +41,7 @@ export default [
 
       // Fast-refresh hygiene -- warn (not error) so a one-off export
       // doesn't block CI.
-      "react-refresh/only-export-components": [
-        "warn",
-        { allowConstantExport: true },
-      ],
+      "react-refresh/only-export-components": ["warn", { allowConstantExport: true }],
 
       // TS variant of no-unused-vars -- argument prefix _ is allowed.
       "@typescript-eslint/no-unused-vars": [

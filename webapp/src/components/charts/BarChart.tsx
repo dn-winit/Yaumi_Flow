@@ -65,19 +65,18 @@ export default function BarChart({
   pxPerPoint = 80,
 }: BarChartProps) {
   // Mirrors LineChart header so the two are visually interchangeable.
-  const header = (title || subtitle || actions) ? (
-    <div className="mb-4 flex items-start justify-between gap-3">
-      <div>
-        {title && (
-          <h3 className="text-title font-semibold text-text-primary">{title}</h3>
-        )}
-        {subtitle && (
-          <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
-        )}
+  const header =
+    title || subtitle || actions ? (
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          {title && <h3 className="text-title font-semibold text-text-primary">{title}</h3>}
+          {subtitle && (
+            <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
+          )}
+        </div>
+        {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
-    </div>
-  ) : null;
+    ) : null;
 
   if (loading) {
     return (
@@ -90,9 +89,7 @@ export default function BarChart({
 
   // Multi-series needs wider columns; ~36px/bar is the smallest legible width.
   const isMulti = Array.isArray(series) && series.length > 0;
-  const effectivePxPerPoint = isMulti
-    ? Math.max(pxPerPoint, series!.length * 36)
-    : pxPerPoint;
+  const effectivePxPerPoint = isMulti ? Math.max(pxPerPoint, series!.length * 36) : pxPerPoint;
 
   return (
     <div className="bg-surface-raised rounded-xl shadow-1 border border-default p-6">

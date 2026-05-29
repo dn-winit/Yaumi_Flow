@@ -14,12 +14,7 @@ interface Props {
 type Mode = "single" | "range";
 
 /** Single-day or range picker; emits {start_date, end_date} ISO with start<=end<=cap. */
-export default function ReportingPeriodPicker({
-  value,
-  onChange,
-  maxDate,
-  className = "",
-}: Props) {
+export default function ReportingPeriodPicker({ value, onChange, maxDate, className = "" }: Props) {
   // Cap floored at today; callers can pass stricter (e.g. lastActiveDate).
   const today = todayIso();
   const cap = maxDate && maxDate < today ? maxDate : today;
@@ -80,12 +75,7 @@ export default function ReportingPeriodPicker({
           <DatePicker value={value.end_date} onChange={setSingleDate} max={cap} />
         ) : (
           <>
-            <DatePicker
-              label="From"
-              value={value.start_date}
-              onChange={setStart}
-              max={cap}
-            />
+            <DatePicker label="From" value={value.start_date} onChange={setStart} max={cap} />
             <DatePicker
               label="To"
               value={value.end_date}
@@ -117,13 +107,10 @@ function ModeTab({
       onClick={onClick}
       className={
         "px-3 py-1 text-caption rounded-md transition-colors " +
-        (active
-          ? "bg-brand-600 text-white shadow-1"
-          : "text-text-secondary hover:bg-surface-hover")
+        (active ? "bg-brand-600 text-white shadow-1" : "text-text-secondary hover:bg-surface-hover")
       }
     >
       {children}
     </button>
   );
 }
-

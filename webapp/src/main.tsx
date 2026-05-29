@@ -18,5 +18,5 @@ createRoot(document.getElementById("root")!).render(
         <ToastContainer />
       </ToastProvider>
     </QueryClientProvider>
-  </StrictMode>
+  </StrictMode>,
 );

@@ -17,7 +17,8 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
   const customers: UnplannedVisitor[] = data?.customers ?? [];
 
   // success:false -> surface error instead of a silent empty grid.
-  const serverError = data && data.success === false ? (data.error ?? "Walk-in visits unavailable.") : null;
+  const serverError =
+    data && data.success === false ? (data.error ?? "Walk-in visits unavailable.") : null;
 
   // Pure presentation adapter; all numbers are server-supplied.
   const tiles: CustomerStat[] = customers.map((c) => ({
@@ -29,7 +30,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
   }));
 
   const selected = selectedCode
-    ? customers.find((c) => c.customer_code === selectedCode) ?? null
+    ? (customers.find((c) => c.customer_code === selectedCode) ?? null)
     : null;
 
   return (
@@ -62,8 +63,7 @@ export default function UnplannedVisits({ sessionId }: { sessionId: string }) {
           role="alert"
           className="rounded-md border border-danger-100 bg-danger-50 px-3 py-2 text-body leading-relaxed text-danger-700"
         >
-          <strong className="font-semibold">Walk-in visits unavailable:</strong>{" "}
-          {serverError}
+          <strong className="font-semibold">Walk-in visits unavailable:</strong> {serverError}
         </div>
       ) : selected ? (
         <div className="space-y-3">

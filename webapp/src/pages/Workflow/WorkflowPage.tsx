@@ -20,7 +20,11 @@ function WorkflowStepper() {
   // Shortcuts: 1 -> Plan; 2 -> Visit (only when route is picked).
   useEffect(() => {
     const handler = (e: KeyboardEvent) => {
-      if (e.target instanceof HTMLElement && ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)) return;
+      if (
+        e.target instanceof HTMLElement &&
+        ["INPUT", "TEXTAREA", "SELECT"].includes(e.target.tagName)
+      )
+        return;
       if (e.key === "1") navigate(ROUTES.workflowPlan);
       if (e.key === "2" && canEnterVisit) navigate(ROUTES.workflowVisit);
     };
@@ -28,9 +32,7 @@ function WorkflowStepper() {
     return () => window.removeEventListener("keydown", handler);
   }, [navigate, canEnterVisit]);
 
-  const activeIndex = WORKFLOW_TABS.findIndex((t) =>
-    location.pathname.startsWith(t.path),
-  );
+  const activeIndex = WORKFLOW_TABS.findIndex((t) => location.pathname.startsWith(t.path));
   // Steps left of active are "done"; the row fills in left-to-right.
   const stepStatus = (i: number): "done" | "active" | "idle" => {
     if (i < activeIndex) return "done";
@@ -84,9 +86,7 @@ function WorkflowStepper() {
                     [{i + 1}]
                   </span>
                 </p>
-                <p className="text-caption text-text-tertiary leading-snug">
-                  {subtitle}
-                </p>
+                <p className="text-caption text-text-tertiary leading-snug">{subtitle}</p>
               </div>
             </button>
             {next && <Connector active={nextActive} />}
@@ -97,13 +97,7 @@ function WorkflowStepper() {
   );
 }
 
-function StepCircle({
-  index,
-  status,
-}: {
-  index: number;
-  status: "done" | "active" | "idle";
-}) {
+function StepCircle({ index, status }: { index: number; status: "done" | "active" | "idle" }) {
   const isDone = status === "done";
   const isActive = status === "active";
   return (
@@ -119,7 +113,13 @@ function StepCircle({
         <span className="absolute inset-0 rounded-full bg-brand-600 animate-ping opacity-40" />
       )}
       {isDone ? (
-        <svg className="relative w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={3}>
+        <svg
+          className="relative w-4 h-4"
+          fill="none"
+          viewBox="0 0 24 24"
+          stroke="currentColor"
+          strokeWidth={3}
+        >
           <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
         </svg>
       ) : (
@@ -154,10 +154,7 @@ export default function WorkflowPage() {
     <WorkflowProvider>
       <div className="space-y-0">
         <div className="px-6 pt-6">
-          <PageHeader
-            title="Workflow"
-            subtitle="Plan the van, then visit the customers."
-          />
+          <PageHeader title="Workflow" subtitle="Plan the van, then visit the customers." />
         </div>
         <div className="px-6 pb-4 border-b border-default bg-surface-raised">
           <WorkflowStepper />

@@ -60,7 +60,7 @@ export default function VanLoadTab() {
       <ContextStrip
         items={[
           { label: "Route", value: routeCode },
-          { label: "Date",  value: fmtDate(date) },
+          { label: "Date", value: fmtDate(date) },
         ]}
         actions={
           <>
@@ -93,8 +93,7 @@ export default function VanLoadTab() {
           <EmptyState
             title="No forecast for this date"
             message={
-              view?.message ||
-              `Nothing forecast for route ${routeCode} on ${fmtDate(date)}.`
+              view?.message || `Nothing forecast for route ${routeCode} on ${fmtDate(date)}.`
             }
             icon="cal"
             action={
@@ -110,9 +109,7 @@ export default function VanLoadTab() {
 
           <Card
             title={`Top ${view.chart_top_n.length} items by van load`}
-            actions={
-              <span className="text-body text-text-tertiary">click a bar for details</span>
-            }
+            actions={<span className="text-body text-text-tertiary">click a bar for details</span>}
           >
             {view.chart_top_n.length === 0 ? (
               <EmptyState title="No items to chart" icon="chart" />
@@ -150,9 +147,7 @@ export default function VanLoadTab() {
           <Card
             title="Van load items"
             actions={
-              <span className="text-body text-text-tertiary">
-                {view.table_rows.length} items
-              </span>
+              <span className="text-body text-text-tertiary">{view.table_rows.length} items</span>
             }
           >
             <VanLoadTable
@@ -264,8 +259,8 @@ function VanLoadRouteGrid({
         <DatePicker value={date} onChange={onDateChange} className="min-w-[180px]" />
       </div>
       <p className="text-body text-text-secondary">
-        Showing the van load for <strong>{fmtDate(date)}</strong>. Change the
-        date to see another day&apos;s plan.
+        Showing the van load for <strong>{fmtDate(date)}</strong>. Change the date to see another
+        day&apos;s plan.
       </p>
     </div>
   );
@@ -307,19 +302,13 @@ function VanLoadRouteGrid({
           <div className="flex items-baseline justify-between">
             <h3 className="text-body font-semibold text-text-primary">
               {g.name}
-              <span className="ml-2 text-caption font-normal text-text-tertiary">
-                {g.code}
-              </span>
+              <span className="ml-2 text-caption font-normal text-text-tertiary">{g.code}</span>
             </h3>
             <span className="text-caption text-text-tertiary">
               {g.routes.length} route{g.routes.length === 1 ? "" : "s"}
             </span>
           </div>
-          <RouteGrid
-            routes={g.routes.map((r) => r.code)}
-            stats={stats}
-            onSelect={onSelect}
-          />
+          <RouteGrid routes={g.routes.map((r) => r.code)} stats={stats} onSelect={onSelect} />
         </div>
       ))}
     </div>

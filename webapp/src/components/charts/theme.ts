@@ -18,11 +18,11 @@ export const CHART_PALETTE: readonly string[] = [
 /** Semantic chart colours for tone-driven single-series charts. */
 export const CHART_COLOR = {
   brandPrimary: color.brand[600],
-  brandBand:    color.brand[100],
-  success:      color.success[600],
-  danger:       color.danger[500],
-  warning:      color.warning[500],
-  info:         color.info[500],
+  brandBand: color.brand[100],
+  success: color.success[600],
+  danger: color.danger[500],
+  warning: color.warning[500],
+  info: color.info[500],
 } as const;
 
 /** Default Recharts chart height in px. */

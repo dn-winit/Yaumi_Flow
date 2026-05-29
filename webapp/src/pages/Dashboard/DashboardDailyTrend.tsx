@@ -10,7 +10,7 @@ import type { SalesOverviewResponse } from "@/types/data-import";
 type TrendMetric = "revenue" | "quantity";
 
 const TREND_METRIC_OPTIONS: ToggleOption<TrendMetric>[] = [
-  { value: "revenue",  label: "Revenue" },
+  { value: "revenue", label: "Revenue" },
   { value: "quantity", label: "Quantity" },
 ];
 

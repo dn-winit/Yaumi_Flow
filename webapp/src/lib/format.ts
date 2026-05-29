@@ -72,10 +72,7 @@ export function fmtFileSize(mb: unknown): string {
 export const GOOD_SCORE_THRESHOLD = 75;
 export const AT_RISK_CONFIDENCE = 0.7;
 export const STRONG_CONFIDENCE = 0.9;
-export const PROBABILISTIC_DEMAND_CLASSES: ReadonlySet<string> = new Set([
-  "intermittent",
-  "lumpy",
-]);
+export const PROBABILISTIC_DEMAND_CLASSES: ReadonlySet<string> = new Set(["intermittent", "lumpy"]);
 
 /** True when the row's class produces a real p_demand (vs synthetic 0/1). */
 export function hasRealConfidence(demandClass: string | null | undefined): boolean {
@@ -91,10 +88,10 @@ export const LEAKAGE_SHARE_WARN = 0.05;
 // Per-class miss tolerance (presentation only); mirror of
 // demand_forecasting_pipeline/src/evaluation/metrics.py.
 export const TOLERANCE_BY_CLASS: Readonly<Record<string, number>> = {
-  smooth:       0.10,
-  intermittent: 0.20,
-  erratic:      0.30,
-  lumpy:        0.40,
+  smooth: 0.1,
+  intermittent: 0.2,
+  erratic: 0.3,
+  lumpy: 0.4,
 };
 
 /** Recommendation-adoption thresholds: delivery-good cutoff + on-target arrow band. */

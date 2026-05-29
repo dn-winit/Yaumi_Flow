@@ -10,10 +10,10 @@ interface AlertProps {
 
 /** Single source of truth for inline error/success/warning/info panels. */
 const STYLES: Record<Variant, string> = {
-  error:   "bg-danger-50  border-danger-200  text-danger-700",
+  error: "bg-danger-50  border-danger-200  text-danger-700",
   success: "bg-success-50 border-success-200 text-success-700",
   warning: "bg-warning-50 border-warning-200 text-warning-700",
-  info:    "bg-brand-50   border-brand-200   text-text-secondary",
+  info: "bg-brand-50   border-brand-200   text-text-secondary",
 };
 
 export default function Alert({ variant, children, className = "" }: AlertProps) {

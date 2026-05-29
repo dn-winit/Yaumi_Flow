@@ -67,6 +67,13 @@ def install_request_middleware(
     """
     log = logger or get_logger(f"{service_name}.api")
 
+    # Keys this middleware owns -- only these are unbound on request end so
+    # the boot-time ``bind_contextvars(service=...)`` survives untouched.
+    # Wiping the whole context would strip ``service`` for any background
+    # work that runs after the request returns (FastAPI BackgroundTasks,
+    # daemon threads sharing the request's contextvar snapshot, etc.).
+    _OWNED_KEYS = ("request_id", "path", "method")
+
     @app.middleware("http")
     async def _request_context(request: Request, call_next: Any) -> Response:
         request_id = _extract_or_generate_request_id(request)
@@ -77,7 +84,6 @@ def install_request_middleware(
             request_id=request_id,
             path=path,
             method=method,
-            service=service_name,
         )
         start = time.perf_counter()
         status_code = 500
@@ -103,7 +109,8 @@ def install_request_middleware(
                 duration_ms=round(duration * 1000.0, 2),
                 request_id=request_id,
             )
-            structlog.contextvars.clear_contextvars()
+            # Targeted unbind so the boot-time ``service`` binding survives.
+            structlog.contextvars.unbind_contextvars(*_OWNED_KEYS)
 
 
 def install_exception_handler(
@@ -130,6 +137,11 @@ def install_exception_handler(
         request_id = _extract_or_generate_request_id(request)
         err_type = type(exc).__name__
         ERRORS.labels(service=service_name, type=err_type).inc()
+        # FULL message goes to the structured log -- ops still has the
+        # detail. The response body returns the type only because
+        # ``str(exc)`` on pyodbc / SQLAlchemy errors typically embeds the
+        # DSN (SERVER, UID, etc.) and other internal context that must NOT
+        # leak to a public client.
         log.exception(
             "unhandled_error",
             error_type=err_type,
@@ -141,7 +153,9 @@ def install_exception_handler(
         return JSONResponse(
             status_code=500,
             content={
-                "error": str(exc) or err_type,
+                # Generic message keyed by ``type`` so the client can
+                # distinguish error classes without seeing internals.
+                "error": "Internal Server Error",
                 "type": err_type,
                 "request_id": request_id,
                 "timestamp": datetime.now(timezone.utc).isoformat(),

@@ -14,16 +14,25 @@ const c = () => getClient("recommendedOrder");
 
 /** Recommended-order service surface. */
 export const recommendedOrderApi = {
-  getSummary: () => c().get<RecommendationSummary>("/summary").then((r) => r.data),
+  getSummary: () =>
+    c()
+      .get<RecommendationSummary>("/summary")
+      .then((r) => r.data),
 
   generate: (data: GenerateRequest) =>
-    c().post<GenerateResponse>("/generate", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),
+    c()
+      .post<GenerateResponse>("/generate", data, { timeout: TIMEOUTS.heavy })
+      .then((r) => r.data),
 
   getRecommendations: (data: RetrieveRequest) =>
-    c().post<RetrieveResponse>("/get", data, { timeout: TIMEOUTS.heavy }).then((r) => r.data),
+    c()
+      .post<RetrieveResponse>("/get", data, { timeout: TIMEOUTS.heavy })
+      .then((r) => r.data),
 
   getFilterOptions: (date?: string) =>
-    c().get<FilterOptionsResponse>("/filter-options", { params: date ? { date } : {} }).then((r) => r.data),
+    c()
+      .get<FilterOptionsResponse>("/filter-options", { params: date ? { date } : {} })
+      .then((r) => r.data),
 
   getAdoption: (params: {
     start_date: string;
@@ -32,8 +41,12 @@ export const recommendedOrderApi = {
     category_codes?: string[];
     item_codes?: string[];
   }) =>
-    c().get<AdoptionResponse>("/analytics/adoption", { params }).then((r) => r.data),
+    c()
+      .get<AdoptionResponse>("/analytics/adoption", { params })
+      .then((r) => r.data),
 
   getUpcoming: (params: { days?: number; route_code?: string }) =>
-    c().get<UpcomingResponse>("/analytics/upcoming", { params }).then((r) => r.data),
+    c()
+      .get<UpcomingResponse>("/analytics/upcoming", { params })
+      .then((r) => r.data),
 };

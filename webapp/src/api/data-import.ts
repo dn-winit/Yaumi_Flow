@@ -27,9 +27,15 @@ function filterParams(f?: Partial<DashboardFilters>): Record<string, string[]> {
 }
 
 export const dataImportApi = {
-  getStatus: () => c().get<DataStatusResponse>("/status").then((r) => r.data),
+  getStatus: () =>
+    c()
+      .get<DataStatusResponse>("/status")
+      .then((r) => r.data),
 
-  getSummary: () => c().get<DataSummary>("/summary").then((r) => r.data),
+  getSummary: () =>
+    c()
+      .get<DataSummary>("/summary")
+      .then((r) => r.data),
 
   getSalesOverview: (period: ReportingPeriod, filters?: Partial<DashboardFilters>) =>
     c()
@@ -42,10 +48,15 @@ export const dataImportApi = {
       })
       .then((r) => r.data),
 
-  getItemCatalog: () => c().get<ItemCatalogResponse>("/eda/items").then((r) => r.data),
+  getItemCatalog: () =>
+    c()
+      .get<ItemCatalogResponse>("/eda/items")
+      .then((r) => r.data),
 
   getLastActiveDate: () =>
-    c().get<LastActiveDateResponse>("/eda/last-active-date").then((r) => r.data),
+    c()
+      .get<LastActiveDateResponse>("/eda/last-active-date")
+      .then((r) => r.data),
 
   getBusinessKpis: (period: ReportingPeriod, filters?: Partial<DashboardFilters>) =>
     c()
@@ -79,8 +90,12 @@ export const dataImportApi = {
       .then((r) => r.data),
 
   importDataset: (dataset: string, mode = "incremental") =>
-    c().post<ImportResponse>("/import", { dataset, mode }).then((r) => r.data),
+    c()
+      .post<ImportResponse>("/import", { dataset, mode })
+      .then((r) => r.data),
 
   importAll: (mode = "incremental") =>
-    c().post<ImportAllResponse>("/import-all", { mode }).then((r) => r.data),
+    c()
+      .post<ImportAllResponse>("/import-all", { mode })
+      .then((r) => r.data),
 };

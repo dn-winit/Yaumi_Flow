@@ -9,11 +9,7 @@ import {
   Cell,
 } from "recharts";
 import EmptyState from "@/components/ui/EmptyState";
-import {
-  AXIS_PROPS,
-  CHART_COLOR,
-  TOOLTIP_PROPS,
-} from "./theme";
+import { AXIS_PROPS, CHART_COLOR, TOOLTIP_PROPS } from "./theme";
 
 export interface HBarDatum {
   /** Y-axis label (route code, customer code, etc.). */
@@ -59,12 +55,7 @@ export default function HorizontalBarChart({
         barCategoryGap={6}
       >
         <XAxis type="number" hide />
-        <YAxis
-          type="category"
-          dataKey="label"
-          width={labelWidth}
-          {...AXIS_PROPS}
-        />
+        <YAxis type="category" dataKey="label" width={labelWidth} {...AXIS_PROPS} />
         <Tooltip
           {...TOOLTIP_PROPS}
           formatter={(value: number, _name, entry) => {
@@ -72,13 +63,13 @@ export default function HorizontalBarChart({
             return [display ?? value.toLocaleString(), ""];
           }}
         />
-        <Bar
-          dataKey="value"
-          radius={[4, 4, 4, 4]}
-          isAnimationActive={false}
-        >
+        <Bar dataKey="value" radius={[4, 4, 4, 4]} isAnimationActive={false}>
           {data.map((d, i) => (
-            <Cell key={d.label} fill={color} fillOpacity={0.55 + (0.45 * (data.length - i)) / data.length} />
+            <Cell
+              key={d.label}
+              fill={color}
+              fillOpacity={0.55 + (0.45 * (data.length - i)) / data.length}
+            />
           ))}
           <LabelList
             dataKey="display"

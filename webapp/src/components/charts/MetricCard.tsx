@@ -16,8 +16,8 @@ interface MetricCardProps {
 }
 
 const trendConfig: Record<Trend, { icon: string; color: string }> = {
-  up:      { icon: "\u2191", color: "text-success-600" },
-  down:    { icon: "\u2193", color: "text-danger-600" },
+  up: { icon: "\u2191", color: "text-success-600" },
+  down: { icon: "\u2193", color: "text-danger-600" },
   neutral: { icon: "\u2192", color: "text-text-tertiary" },
 };
 
@@ -88,18 +88,11 @@ export default function MetricCard({
   const isPrimitive = isAnimatable(value);
   const primitive = isPrimitive ? String(value) : "";
   const animatedValue = useAnimatedValue(primitive);
-  const rendered: ReactNode = !isPrimitive
-    ? value
-    : disableAnimation
-    ? primitive
-    : animatedValue;
+  const rendered: ReactNode = !isPrimitive ? value : disableAnimation ? primitive : animatedValue;
 
   return (
     <div
-      className={[
-        "bg-surface-sunken border-l-3 border-brand-200 rounded-lg p-4",
-        className,
-      ]
+      className={["bg-surface-sunken border-l-3 border-brand-200 rounded-lg p-4", className]
         .filter(Boolean)
         .join(" ")}
     >
@@ -115,20 +108,14 @@ export default function MetricCard({
       ) : (
         <>
           <div className="flex flex-wrap items-baseline gap-2 animate-fadeIn">
-            <span className="text-xl font-bold text-text-primary">
-              {rendered}
-            </span>
+            <span className="text-xl font-bold text-text-primary">{rendered}</span>
             {trend && (
               <span className={`text-body font-medium ${trendConfig[trend].color}`}>
                 {trendConfig[trend].icon}
               </span>
             )}
           </div>
-          {subtitle && (
-            <div className="text-caption text-text-tertiary mt-1">
-              {subtitle}
-            </div>
-          )}
+          {subtitle && <div className="text-caption text-text-tertiary mt-1">{subtitle}</div>}
         </>
       )}
     </div>

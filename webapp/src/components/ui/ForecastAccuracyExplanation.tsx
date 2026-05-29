@@ -35,11 +35,12 @@ export default function ForecastAccuracyExplanation() {
     <div className="space-y-6">
       {/* Headline */}
       <p className="text-body text-text-secondary leading-relaxed">
-        Forecast accuracy measures how well our predictions match actual sales,
-        with each item held to a fair standard based on how predictable its
-        buying pattern is. <span className="font-medium text-text-primary">
-        Misses inside the standard count as &ldquo;good enough&rdquo;; only the
-        part beyond it counts as a real error.</span>
+        Forecast accuracy measures how well our predictions match actual sales, with each item held
+        to a fair standard based on how predictable its buying pattern is.{" "}
+        <span className="font-medium text-text-primary">
+          Misses inside the standard count as &ldquo;good enough&rdquo;; only the part beyond it
+          counts as a real error.
+        </span>
       </p>
 
       {/* Tolerance table */}
@@ -60,16 +61,16 @@ export default function ForecastAccuracyExplanation() {
               {classes.map((c) => (
                 <tr key={c.key}>
                   <td className="px-4 py-2.5">
-                    <span className={`inline-block px-2 py-0.5 rounded-full border text-caption font-semibold ${c.tone}`}>
+                    <span
+                      className={`inline-block px-2 py-0.5 rounded-full border text-caption font-semibold ${c.tone}`}
+                    >
                       {c.label}
                     </span>
                   </td>
                   <td className="px-4 py-2.5 font-semibold text-text-primary">
-                    ±{fmtBps(TOLERANCE_BY_CLASS[c.key] ?? 0.20)}
+                    ±{fmtBps(TOLERANCE_BY_CLASS[c.key] ?? 0.2)}
                   </td>
-                  <td className="px-4 py-2.5 text-text-secondary">
-                    {c.description}
-                  </td>
+                  <td className="px-4 py-2.5 text-text-secondary">{c.description}</td>
                 </tr>
               ))}
             </tbody>
@@ -83,9 +84,7 @@ export default function ForecastAccuracyExplanation() {
           The formula
         </h3>
         <div className="bg-surface-sunken border border-subtle rounded-lg px-4 py-3 space-y-1.5 text-body text-text-secondary">
-          <p>
-            For each forecast row where both predicted and sold are above zero:
-          </p>
+          <p>For each forecast row where both predicted and sold are above zero:</p>
           <p className="font-mono text-caption text-text-primary pl-4">
             real miss = max(0, |predicted − actual| − tolerance × actual)
           </p>
@@ -153,24 +152,38 @@ export default function ForecastAccuracyExplanation() {
       {/* Why */}
       <div className="border-l-3 border-brand-500 bg-brand-50/40 px-4 py-3 rounded-r-lg">
         <p className="text-body text-text-secondary leading-relaxed">
-          <span className="font-semibold text-text-primary">Why class-aware?</span>{" "}
-          Stable items can be predicted tightly, so we hold the model to a
-          high standard. Random items are inherently unpredictable; punishing
-          the model for missing them precisely would hide its real performance.
-          This formula is fair to each item&apos;s nature and gives one honest
-          number for the whole portfolio.
+          <span className="font-semibold text-text-primary">Why class-aware?</span> Stable items can
+          be predicted tightly, so we hold the model to a high standard. Random items are inherently
+          unpredictable; punishing the model for missing them precisely would hide its real
+          performance. This formula is fair to each item&apos;s nature and gives one honest number
+          for the whole portfolio.
         </p>
       </div>
 
       {/* Disambiguation: this is the one place that names the three accuracy numbers. */}
       <div className="border-l-3 border-info-500 bg-info-50/40 px-4 py-3 rounded-r-lg space-y-2">
         <p className="text-body text-text-secondary leading-relaxed">
-          <span className="font-semibold text-text-primary">Three accuracy numbers in this app, three distinct questions:</span>
+          <span className="font-semibold text-text-primary">
+            Three accuracy numbers in this app, three distinct questions:
+          </span>
         </p>
         <ul className="list-disc pl-5 space-y-1 text-body text-text-secondary leading-relaxed">
-          <li><strong>Baseline accuracy</strong> (this tile) — the formula above run over the full held-out test set, all routes pooled. Frozen at training time. Tells you whether the model itself was accurate the day it was trained.</li>
-          <li><strong>Recent accuracy</strong> (Auto-Retrain section below) — the same formula run on the last 7 days of test cells. Compared against Baseline to detect drift.</li>
-          <li><strong>Recommendation match</strong> (Past-performance drawer in Van Load) — a different formula entirely: <code>min(recommended_van_load, sold) / max(recommended_van_load, sold)</code> on aggregate totals for one route over one window. Includes the leftover physically on the truck, not just the forecast. Operational lens.</li>
+          <li>
+            <strong>Baseline accuracy</strong> (this tile) — the formula above run over the full
+            held-out test set, all routes pooled. Frozen at training time. Tells you whether the
+            model itself was accurate the day it was trained.
+          </li>
+          <li>
+            <strong>Recent accuracy</strong> (Auto-Retrain section below) — the same formula run on
+            the last 7 days of test cells. Compared against Baseline to detect drift.
+          </li>
+          <li>
+            <strong>Recommendation match</strong> (Past-performance drawer in Van Load) — a
+            different formula entirely:{" "}
+            <code>min(recommended_van_load, sold) / max(recommended_van_load, sold)</code> on
+            aggregate totals for one route over one window. Includes the leftover physically on the
+            truck, not just the forecast. Operational lens.
+          </li>
         </ul>
       </div>
     </div>

@@ -69,7 +69,9 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
     return Array.isArray(v) ? v.map(String) : [];
   };
 
-  const title = ctx ? `Customer review - ${ctx.customerName || ctx.customerCode}` : "Customer review";
+  const title = ctx
+    ? `Customer review - ${ctx.customerName || ctx.customerCode}`
+    : "Customer review";
 
   return (
     <Modal open={open} onClose={onClose} title={title} size="xl">
@@ -92,7 +94,8 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
               className="ml-auto text-body text-text-tertiary"
               title="Overall = weighted score. Items matched = share of recommended items bought. Quantity accuracy = how close actual quantities were to recommended."
             >
-              Overall {ctx.score.score.toFixed(1)}% - Items matched {ctx.score.coverage.toFixed(1)}% - Quantity accuracy {ctx.score.accuracy.toFixed(1)}%
+              Overall {ctx.score.score.toFixed(1)}% - Items matched {ctx.score.coverage.toFixed(1)}%
+              - Quantity accuracy {ctx.score.accuracy.toFixed(1)}%
             </span>
           </div>
 
@@ -104,7 +107,11 @@ export default function CustomerAnalysisModal({ open, onClose, ctx }: Props) {
 
           <AnalysisList title="Strengths" tone="success" items={list("strengths")} />
           <AnalysisList title="Areas for improvement" tone="warning" items={list("weaknesses")} />
-          <AnalysisList title="Actions required" tone="danger" items={list("supervisor_instructions")} />
+          <AnalysisList
+            title="Actions required"
+            tone="danger"
+            items={list("supervisor_instructions")}
+          />
         </div>
       )}
     </Modal>

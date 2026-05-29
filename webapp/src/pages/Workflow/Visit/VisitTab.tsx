@@ -27,13 +27,7 @@ export default function VisitTab() {
     navigate(ROUTES.workflowPlan);
   }, [navigate, resetRoute]);
 
-  return (
-    <VisitSession
-      routeCode={routeCode}
-      date={date}
-      onPickAnotherRoute={onPickAnotherRoute}
-    />
-  );
+  return <VisitSession routeCode={routeCode} date={date} onPickAnotherRoute={onPickAnotherRoute} />;
 }
 
 // Session shell: fetch recs, auto-init session, render LiveSessionTab with drawer triggers.
@@ -131,11 +125,7 @@ function VisitSession({
   if (recs.error) {
     return (
       <Card>
-        <EmptyState
-          icon="⚠️"
-          title="Could not load recommendations"
-          message={recs.error}
-        />
+        <EmptyState icon="⚠️" title="Could not load recommendations" message={recs.error} />
       </Card>
     );
   }

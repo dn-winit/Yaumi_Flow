@@ -60,19 +60,18 @@ export default function LineChart({
   pxPerPoint = 80,
 }: LineChartProps) {
   // Title/subtitle on the left, actions on the right; mirrors Card + BarChart.
-  const header = (title || subtitle || actions) ? (
-    <div className="mb-4 flex items-start justify-between gap-3">
-      <div>
-        {title && (
-          <h3 className="text-title font-semibold text-text-primary">{title}</h3>
-        )}
-        {subtitle && (
-          <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
-        )}
+  const header =
+    title || subtitle || actions ? (
+      <div className="mb-4 flex items-start justify-between gap-3">
+        <div>
+          {title && <h3 className="text-title font-semibold text-text-primary">{title}</h3>}
+          {subtitle && (
+            <p className={`text-caption text-text-tertiary ${title ? "mt-1" : ""}`}>{subtitle}</p>
+          )}
+        </div>
+        {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
       </div>
-      {actions && <div className="flex items-center gap-2 shrink-0">{actions}</div>}
-    </div>
-  ) : null;
+    ) : null;
 
   if (loading) {
     return (
@@ -92,10 +91,7 @@ export default function LineChart({
         <div className="overflow-x-auto">
           <div style={{ minWidth: `${data.length * pxPerPoint}px` }}>
             <ResponsiveContainer width="100%" height={height}>
-              <RechartsLineChart
-                data={data}
-                margin={{ top: 5, right: 20, left: 0, bottom: 12 }}
-              >
+              <RechartsLineChart data={data} margin={{ top: 5, right: 20, left: 0, bottom: 12 }}>
                 <CartesianGrid {...GRID_PROPS} />
                 {/* interval=0 + scroll wrapper -> every label gets its own column. */}
                 <XAxis
@@ -112,10 +108,7 @@ export default function LineChart({
                 {series.map((s, idx) => {
                   const stroke = s.color ?? CHART_PALETTE[idx % CHART_PALETTE.length];
                   // Adaptive dot: count this series' real points; hide when dense.
-                  const populated = data.reduce(
-                    (n, row) => n + (row[s.key] != null ? 1 : 0),
-                    0,
-                  );
+                  const populated = data.reduce((n, row) => n + (row[s.key] != null ? 1 : 0), 0);
                   const showDots = populated <= _DOT_DENSITY_HIDE_AT;
                   return (
                     <Line

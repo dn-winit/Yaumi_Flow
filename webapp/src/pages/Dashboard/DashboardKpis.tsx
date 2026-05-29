@@ -33,12 +33,20 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
                   <p>AED of customer invoices over the selected period.</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    Σ TotalQuantity × AvgUnitPrice<br />
-                    FROM sales_recent.csv (mirror of VW_GET_SALES_DETAILS)<br />
+                    Σ TotalQuantity × AvgUnitPrice
+                    <br />
+                    FROM sales_recent.csv (mirror of VW_GET_SALES_DETAILS)
+                    <br />
                     WHERE TrxType = &apos;SalesInvoice&apos; AND ItemType = &apos;OrderItem&apos;
                   </p>
-                  <p>Price is the per-bucket average from the ingest job — invoices that shipped the same item at multiple prices on the same day blend into one AvgUnitPrice.</p>
-                  <p>The daily average divides this total by the number of <em>active sales days</em> in the window (days where any invoice was booked) — not calendar days.</p>
+                  <p>
+                    Price is the per-bucket average from the ingest job — invoices that shipped the
+                    same item at multiple prices on the same day blend into one AvgUnitPrice.
+                  </p>
+                  <p>
+                    The daily average divides this total by the number of <em>active sales days</em>{" "}
+                    in the window (days where any invoice was booked) — not calendar days.
+                  </p>
                 </div>
               }
             />
@@ -51,8 +59,8 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
             volume?.daily_avg_units != null && volume?.transactions != null
               ? `${fmtNum(volume.daily_avg_units)} units a day · across ${fmtNum(volume.transactions)} sales lines`
               : volume?.transactions != null
-              ? `Across ${fmtNum(volume.transactions)} sales lines`
-              : ""
+                ? `Across ${fmtNum(volume.transactions)} sales lines`
+                : ""
           }
           info={
             <InfoBubble
@@ -61,10 +69,14 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
                   <p>Total units sold and number of sales lines booked over the period.</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    units       = Σ TotalQuantity (TrxType = &apos;SalesInvoice&apos;)<br />
+                    units = Σ TotalQuantity (TrxType = &apos;SalesInvoice&apos;)
+                    <br />
                     sales lines = COUNT(rows in sales_recent.csv after filter)
                   </p>
-                  <p>Each sales line is one item shipped on one date for one route — already aggregated upstream. An invoice typically has many lines.</p>
+                  <p>
+                    Each sales line is one item shipped on one date for one route — already
+                    aggregated upstream. An invoice typically has many lines.
+                  </p>
                 </div>
               }
             />
@@ -85,7 +97,8 @@ export default function DashboardKpis({ k }: { k: BusinessKpis | null }) {
                 <div className="space-y-3 text-body text-text-secondary leading-relaxed">
                   <p>Distinct items that appeared in any invoice over the period.</p>
                   <p className="font-mono text-caption bg-surface-sunken p-3 rounded">
-                    count = nunique(ItemCode) in VW_GET_SALES_DETAILS<br />
+                    count = nunique(ItemCode) in VW_GET_SALES_DETAILS
+                    <br />
                     daily_avg = mean of nunique(ItemCode) per active sales day
                   </p>
                 </div>

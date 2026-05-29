@@ -17,25 +17,24 @@ interface Props {
 // probability. Read as "the model expects this item to sell, but the
 // score isn't a meaningful per-day probability for this pattern."
 const _NON_PROBABILISTIC_LABEL: Record<string, string> = {
-  smooth:  "Regular",
+  smooth: "Regular",
   erratic: "Frequent",
 };
 
 export default function ConfidenceBadge({ value, demandClass, decimals = 0 }: Props) {
   if (value == null) return <Badge tone="neutral">—</Badge>;
   if (demandClass !== undefined && !hasRealConfidence(demandClass)) {
-    const label = _NON_PROBABILISTIC_LABEL[
-      String(demandClass ?? "").trim().toLowerCase()
-    ] ?? "—";
+    const label =
+      _NON_PROBABILISTIC_LABEL[
+        String(demandClass ?? "")
+          .trim()
+          .toLowerCase()
+      ] ?? "—";
     return (
       <span title="This buying pattern sells too consistently for a per-day probability to be meaningful — treat as a routine seller">
         <Badge tone="info">{label}</Badge>
       </span>
     );
   }
-  return (
-    <Badge tone={confidenceTone(value)}>
-      {(value * 100).toFixed(decimals)}%
-    </Badge>
-  );
+  return <Badge tone={confidenceTone(value)}>{(value * 100).toFixed(decimals)}%</Badge>;
 }

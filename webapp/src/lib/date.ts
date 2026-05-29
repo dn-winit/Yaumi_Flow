@@ -38,7 +38,10 @@ export function addDays(dateIso: string, delta: number): string {
 }
 
 /** Inclusive (start, end) window ending today from a day-count; shared so math doesn't drift. */
-export function trailingWindow(days: number, today: string = todayIso()): {
+export function trailingWindow(
+  days: number,
+  today: string = todayIso(),
+): {
   start_date: string;
   end_date: string;
 } {
@@ -87,7 +90,7 @@ export function fmtDate(value: unknown): string {
 }
 
 /** Format ISO datetime as dd-mm-yyyy HH:mm in server TZ so audit ts match host logs. */
-const DISPLAY_TZ = "Asia/Kolkata";  // matches backend log_timezone default
+const DISPLAY_TZ = "Asia/Kolkata"; // matches backend log_timezone default
 const DT_FORMATTER = new Intl.DateTimeFormat("en-GB", {
   timeZone: DISPLAY_TZ,
   year: "numeric",

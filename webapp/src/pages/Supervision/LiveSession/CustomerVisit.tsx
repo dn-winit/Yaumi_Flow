@@ -130,9 +130,7 @@ export default function CustomerVisit({
   // Redistribution replay is heavy (~3s per route); /session/saved ships an empty
   // {groups:[]} placeholder. Fetch on drill-in unless live /visit already inlined a non-empty view.
   // Gate on groups.length>0, not truthiness, or the placeholder would suppress the fetch.
-  const [redistributionView, setRedistributionView] = useState(
-    initialVisit?.redistributions,
-  );
+  const [redistributionView, setRedistributionView] = useState(initialVisit?.redistributions);
   const inlineGroupsCount = initialVisit?.redistributions?.groups?.length ?? 0;
   useEffect(() => {
     if (inlineGroupsCount > 0 && initialVisit?.redistributions) {
@@ -148,13 +146,15 @@ export default function CustomerVisit({
           setRedistributionView(r.redistributions as typeof redistributionView);
         }
       })
-      .catch(() => {/* drill-in renders without the replay if it fails */});
-    return () => { cancelled = true; };
+      .catch(() => {
+        /* drill-in renders without the replay if it fails */
+      });
+    return () => {
+      cancelled = true;
+    };
   }, [customerCode, routeCode, date, inlineGroupsCount, initialVisit?.redistributions]);
   // Green-dot = bought something: totalActual>0 OR alsoBought non-empty.
-  const visited =
-    !!initialVisit &&
-    ((initialVisit.totalActual ?? 0) > 0 || alsoBought.length > 0);
+  const visited = !!initialVisit && ((initialVisit.totalActual ?? 0) > 0 || alsoBought.length > 0);
 
   // Hydrate from saved briefing JSON; visit path wins, otherwise use the briefings map.
   const initialBriefing = useMemo<Record<string, unknown> | null>(() => {
@@ -198,7 +198,11 @@ export default function CustomerVisit({
       // time the supervisor opens this view. The previous saveBriefing call
       // wrote to a column we no longer maintain.
     } catch {
-      setBriefing({ briefing: "Briefing unavailable. Please try again.", key_items: [], heads_up: "" });
+      setBriefing({
+        briefing: "Briefing unavailable. Please try again.",
+        key_items: [],
+        heads_up: "",
+      });
     } finally {
       setBriefingLoading(false);
     }
@@ -235,14 +239,18 @@ export default function CustomerVisit({
             />
           )}
           <div className="min-w-0">
-            <p className="text-body font-semibold text-text-primary truncate">{customerName || customerCode}</p>
+            <p className="text-body font-semibold text-text-primary truncate">
+              {customerName || customerCode}
+            </p>
             <p className="text-caption text-text-tertiary">{customerCode}</p>
           </div>
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <Badge variant="neutral">{items.length} items</Badge>
           {visited ? (
-            <Badge variant={scoreBadgeVariant(score!.score)}>Visited - {score!.score.toFixed(0)}%</Badge>
+            <Badge variant={scoreBadgeVariant(score!.score)}>
+              Visited - {score!.score.toFixed(0)}%
+            </Badge>
           ) : liveVisited ? (
             <Badge variant="success">Visited live</Badge>
           ) : (
@@ -252,7 +260,7 @@ export default function CustomerVisit({
       </div>
 
       <div className="border-t border-default bg-surface-sunken/40 px-4 py-4 space-y-4">
-          <div className={TABLE_SCROLL_CLASS}>
+        <div className={TABLE_SCROLL_CLASS}>
           <table className="w-full text-body">
             <thead className="sticky top-0 z-10 bg-surface-sunken border-b border-default">
               <tr className="text-left text-caption font-medium text-text-tertiary uppercase tracking-wide">
@@ -298,77 +306,76 @@ export default function CustomerVisit({
               })}
             </tbody>
           </table>
-          </div>
-
-          {!visited && (
-            <div className="space-y-2">
-              <Button
-                variant={briefing ? "secondary" : "primary"}
-                size="sm"
-                loading={briefingLoading}
-                onClick={handleBriefing}
-              >
-                {briefing ? "Briefing read" : "Read briefing"}
-              </Button>
-              <p className="text-caption text-text-tertiary">
-                Actuals + score appear automatically as soon as the rep
-                invoices this customer.
-              </p>
-            </div>
-          )}
-
-          {visited && score && (
-            <div className="flex items-center justify-between gap-3 flex-wrap bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
-              <div className="flex items-center gap-5 text-body">
-                <span title="Weighted visit score combining coverage and quantity accuracy">
-                  <span className="text-brand-700 font-semibold">{score.score.toFixed(1)}%</span>
-                  <span className="text-brand-600 ml-1 text-caption">overall</span>
-                </span>
-                <span title="Share of recommended items the customer actually bought">
-                  <span className="text-brand-700 font-semibold">{score.coverage.toFixed(1)}%</span>
-                  <span className="text-brand-600 ml-1 text-caption">items matched</span>
-                </span>
-                <span title="How close the actual quantities were to what we recommended">
-                  <span className="text-brand-700 font-semibold">{score.accuracy.toFixed(1)}%</span>
-                  <span className="text-brand-600 ml-1 text-caption">quantity accuracy</span>
-                </span>
-              </div>
-              <Button variant="secondary" size="sm" onClick={handleAiClick}>
-                Get AI review
-              </Button>
-            </div>
-          )}
-
-          {alsoBought.length > 0 && (
-            <div>
-              <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">
-                Also bought (not on plan)
-              </p>
-              <div className="flex flex-wrap gap-2">
-                {alsoBought.map((r) => (
-                  <div
-                    key={r.item_code}
-                    className="inline-flex items-center gap-2 text-caption bg-warning-50 border border-warning-100 text-warning-700 rounded-full px-2 py-1"
-                  >
-                    <span className="font-medium">{r.item_code}</span>
-                    <span className="text-warning-700">x {r.qty}</span>
-                  </div>
-                ))}
-              </div>
-              <p className="mt-1 text-caption text-text-tertiary">
-                Off-plan purchases don't affect the score -- shown for visibility only.
-              </p>
-            </div>
-          )}
-
-          {visited && redistributionView && (
-            <RedistributionSection
-              view={redistributionView}
-              customerCode={customerCode}
-              customerName={customerName}
-            />
-          )}
         </div>
+
+        {!visited && (
+          <div className="space-y-2">
+            <Button
+              variant={briefing ? "secondary" : "primary"}
+              size="sm"
+              loading={briefingLoading}
+              onClick={handleBriefing}
+            >
+              {briefing ? "Briefing read" : "Read briefing"}
+            </Button>
+            <p className="text-caption text-text-tertiary">
+              Actuals + score appear automatically as soon as the rep invoices this customer.
+            </p>
+          </div>
+        )}
+
+        {visited && score && (
+          <div className="flex items-center justify-between gap-3 flex-wrap bg-brand-50 border border-brand-100 rounded-lg px-3 py-2">
+            <div className="flex items-center gap-5 text-body">
+              <span title="Weighted visit score combining coverage and quantity accuracy">
+                <span className="text-brand-700 font-semibold">{score.score.toFixed(1)}%</span>
+                <span className="text-brand-600 ml-1 text-caption">overall</span>
+              </span>
+              <span title="Share of recommended items the customer actually bought">
+                <span className="text-brand-700 font-semibold">{score.coverage.toFixed(1)}%</span>
+                <span className="text-brand-600 ml-1 text-caption">items matched</span>
+              </span>
+              <span title="How close the actual quantities were to what we recommended">
+                <span className="text-brand-700 font-semibold">{score.accuracy.toFixed(1)}%</span>
+                <span className="text-brand-600 ml-1 text-caption">quantity accuracy</span>
+              </span>
+            </div>
+            <Button variant="secondary" size="sm" onClick={handleAiClick}>
+              Get AI review
+            </Button>
+          </div>
+        )}
+
+        {alsoBought.length > 0 && (
+          <div>
+            <p className="text-caption font-medium text-text-tertiary uppercase tracking-wider mb-1">
+              Also bought (not on plan)
+            </p>
+            <div className="flex flex-wrap gap-2">
+              {alsoBought.map((r) => (
+                <div
+                  key={r.item_code}
+                  className="inline-flex items-center gap-2 text-caption bg-warning-50 border border-warning-100 text-warning-700 rounded-full px-2 py-1"
+                >
+                  <span className="font-medium">{r.item_code}</span>
+                  <span className="text-warning-700">x {r.qty}</span>
+                </div>
+              ))}
+            </div>
+            <p className="mt-1 text-caption text-text-tertiary">
+              Off-plan purchases don't affect the score -- shown for visibility only.
+            </p>
+          </div>
+        )}
+
+        {visited && redistributionView && (
+          <RedistributionSection
+            view={redistributionView}
+            customerCode={customerCode}
+            customerName={customerName}
+          />
+        )}
+      </div>
 
       <Modal
         open={briefingOpen}
@@ -404,7 +411,11 @@ export default function CustomerVisit({
             <AnalysisList
               title="Heads up"
               tone="warning"
-              items={typeof briefing.heads_up === "string" && briefing.heads_up ? [briefing.heads_up] : []}
+              items={
+                typeof briefing.heads_up === "string" && briefing.heads_up
+                  ? [briefing.heads_up]
+                  : []
+              }
             />
           </div>
         ) : null}

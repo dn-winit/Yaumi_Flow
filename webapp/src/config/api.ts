@@ -2,8 +2,7 @@
 // In production (Docker): env vars are empty, so paths are relative (nginx proxies)
 // In development: env vars point to http://localhost:PORT
 
-const base = (envUrl: string, path: string) =>
-  envUrl ? `${envUrl}${path}` : path;
+const base = (envUrl: string, path: string) => (envUrl ? `${envUrl}${path}` : path);
 
 export const API = {
   dataImport: base(import.meta.env.VITE_DATA_IMPORT_URL, "/api/v1/data"),

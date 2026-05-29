@@ -19,15 +19,13 @@ export default function DrawerContextBar({
     !itemCodes || itemCodes.length === 0
       ? "All items"
       : itemCodes.length === 1
-      ? itemCodes[0]
-      : `${itemCodes.length} items`;
+        ? itemCodes[0]
+        : `${itemCodes.length} items`;
 
   const items = [
     {
       label: "Route",
-      value: (
-        <Badge variant={routeCode ? "info" : "neutral"}>{routeCode || "All"}</Badge>
-      ),
+      value: <Badge variant={routeCode ? "info" : "neutral"}>{routeCode || "All"}</Badge>,
     },
     {
       label: "Items",

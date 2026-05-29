@@ -9,9 +9,7 @@ export function Skeleton({ className = "", style }: SkeletonProps) {
   return (
     <div
       style={style}
-      className={["animate-pulse bg-neutral-200 rounded-md", className]
-        .filter(Boolean)
-        .join(" ")}
+      className={["animate-pulse bg-neutral-200 rounded-md", className].filter(Boolean).join(" ")}
     />
   );
 }

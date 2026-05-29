@@ -157,21 +157,20 @@ export default function LiveSessionTab({
 
   // Seeded from /session/initialize; saved-visits polls keep it fresh.
   // Monotonic accept prevents a slow poll from rewinding behind a fresh /visit.
-  const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>(() =>
-    sessionData?.visit_totals ?? {
-      visited_count: 0,
-      total_actual: 0,
-      total_recommended: 0,
-      avg_score: null,
-      unplanned_visited_count: 0,
-    },
+  const [visitTotals, setVisitTotals] = useState<SessionVisitTotals>(
+    () =>
+      sessionData?.visit_totals ?? {
+        visited_count: 0,
+        total_actual: 0,
+        total_recommended: 0,
+        avg_score: null,
+        unplanned_visited_count: 0,
+      },
   );
   useEffect(() => {
     const incoming = savedVisitsData?.visit_totals;
     if (!incoming) return;
-    setVisitTotals((prev) =>
-      incoming.visited_count >= prev.visited_count ? incoming : prev,
-    );
+    setVisitTotals((prev) => (incoming.visited_count >= prev.visited_count ? incoming : prev));
   }, [savedVisitsData?.visit_totals]);
 
   // Live-visited codes from /session/unplanned (LIVE tier).
@@ -305,7 +304,9 @@ export default function LiveSessionTab({
             handleVisitComplete(cust, res.visit);
           }
         })
-        .catch(() => {/* logged server-side; next poll retries */})
+        .catch(() => {
+          /* logged server-side; next poll retries */
+        })
         .finally(() => {
           autoVisitInflight.current.delete(code);
         });
@@ -332,7 +333,9 @@ export default function LiveSessionTab({
           handleVisitComplete(cust, res.visit);
         }
       })
-      .catch(() => {/* logged server-side; modal renders placeholder */})
+      .catch(() => {
+        /* logged server-side; modal renders placeholder */
+      })
       .finally(() => {
         autoVisitInflight.current.delete(selectedCustomerCode);
       });
@@ -397,22 +400,14 @@ export default function LiveSessionTab({
         <MetricCard
           label="Avg visit score"
           loading={!countsReady}
-          value={
-            effectiveAvgScore != null
-              ? `${effectiveAvgScore.toFixed(1)}%`
-              : "--"
-          }
-          subtitle={
-            effectiveAvgScore != null
-              ? "Planned customers only"
-              : "No planned visits yet"
-          }
+          value={effectiveAvgScore != null ? `${effectiveAvgScore.toFixed(1)}%` : "--"}
+          subtitle={effectiveAvgScore != null ? "Planned customers only" : "No planned visits yet"}
           trend={
             effectiveAvgScore != null && effectiveAvgScore >= GOOD_SCORE_THRESHOLD
               ? "up"
               : effectiveAvgScore != null
-              ? "down"
-              : undefined
+                ? "down"
+                : undefined
           }
           disableAnimation
         />
@@ -430,11 +425,7 @@ export default function LiveSessionTab({
           if (selected) {
             return (
               <div className="space-y-3">
-                <Button
-                  variant="ghost"
-                  size="sm"
-                  onClick={() => setSelectedCustomerCode(null)}
-                >
+                <Button variant="ghost" size="sm" onClick={() => setSelectedCustomerCode(null)}>
                   <svg
                     className="mr-1 inline-block h-4 w-4"
                     fill="none"
@@ -477,9 +468,7 @@ export default function LiveSessionTab({
                       : undefined
                   }
                   // Briefing hydrates for every planned customer; modal skips a fresh LLM call.
-                  initialBriefing={
-                    savedVisitsData?.briefings?.[selected.customerCode] ?? null
-                  }
+                  initialBriefing={savedVisitsData?.briefings?.[selected.customerCode] ?? null}
                   onRequestAnalysis={(payload) =>
                     setCustCtx({
                       sessionId: payload.sessionId,
@@ -504,8 +493,7 @@ export default function LiveSessionTab({
             const live = visits[t.customer_code];
             const saved = savedVisits[t.customer_code];
             const bought =
-              (live != null && live.actualQty > 0) ||
-              (saved != null && saved.totalActual > 0);
+              (live != null && live.actualQty > 0) || (saved != null && saved.totalActual > 0);
             return {
               customerCode: t.customer_code,
               customerName: t.customer_name,
@@ -522,9 +510,8 @@ export default function LiveSessionTab({
               onSelect={setSelectedCustomerCode}
               summary={
                 <>
-                  Pick a customer to record the visit -{" "}
-                  {recommendationTotals.customers_count} planned for{" "}
-                  <strong>{fmtDate(date)}</strong>
+                  Pick a customer to record the visit - {recommendationTotals.customers_count}{" "}
+                  planned for <strong>{fmtDate(date)}</strong>
                 </>
               }
             />

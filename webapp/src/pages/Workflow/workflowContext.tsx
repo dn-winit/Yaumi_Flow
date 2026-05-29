@@ -50,10 +50,7 @@ export function WorkflowProvider({ children }: { children: React.ReactNode }) {
     (v: string) => update((p) => (v ? p.set(_PARAM_ROUTE, v) : p.delete(_PARAM_ROUTE))),
     [update],
   );
-  const resetRoute = useCallback(
-    () => update((p) => p.delete(_PARAM_ROUTE)),
-    [update],
-  );
+  const resetRoute = useCallback(() => update((p) => p.delete(_PARAM_ROUTE)), [update]);
 
   const value = useMemo(
     () => ({ date, routeCode, setDate, setRouteCode, resetRoute }),

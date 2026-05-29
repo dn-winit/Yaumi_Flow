@@ -10,16 +10,26 @@ const c = () => getClient("supervision");
 
 /** Supervision microservice surface; each visit auto-persists (no separate save). */
 export const supervisionApi = {
-  initSession: (route_code: string, date: string, recommendations: Record<string, unknown>[] = []) =>
-    c().post<SessionResponse>("/session/initialize", { route_code, date, recommendations }).then((r) => r.data),
+  initSession: (
+    route_code: string,
+    date: string,
+    recommendations: Record<string, unknown>[] = [],
+  ) =>
+    c()
+      .post<SessionResponse>("/session/initialize", { route_code, date, recommendations })
+      .then((r) => r.data),
 
   // Actuals are fetched server-side from YaumiLive -- the client only
   // tells the service which customer to mark visited.
   processVisit: (session_id: string, customer_code: string) =>
-    c().post<VisitResponse>("/session/visit", { session_id, customer_code }).then((r) => r.data),
+    c()
+      .post<VisitResponse>("/session/visit", { session_id, customer_code })
+      .then((r) => r.data),
 
   getUnplannedVisits: (session_id: string) =>
-    c().get<UnplannedVisitsResponse>(`/session/unplanned/${session_id}`).then((r) => r.data),
+    c()
+      .get<UnplannedVisitsResponse>(`/session/unplanned/${session_id}`)
+      .then((r) => r.data),
 
   // Hydrates live UI on mount + 45s poll; skips the heavy redistribution replay.
   getSavedVisits: (route_code: string, date: string) =>

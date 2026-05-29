@@ -99,16 +99,15 @@ export default function Table<T extends Record<string, unknown>>({
                   onClick={onRowClick ? () => onRowClick(row) : undefined}
                   className={[
                     idx % 2 === 1 ? "bg-surface-sunken/50" : "bg-surface-raised",
-                    onRowClick
-                      ? "cursor-pointer hover:bg-brand-50 transition-colors"
-                      : "",
+                    onRowClick ? "cursor-pointer hover:bg-brand-50 transition-colors" : "",
                   ].join(" ")}
                 >
                   {columns.map((col) => (
-                    <td key={col.key} className={`px-4 py-3 text-text-secondary${col.align === "right" ? " text-right" : ""}`}>
-                      {col.render
-                        ? col.render(row)
-                        : (row[col.key] as React.ReactNode)}
+                    <td
+                      key={col.key}
+                      className={`px-4 py-3 text-text-secondary${col.align === "right" ? " text-right" : ""}`}
+                    >
+                      {col.render ? col.render(row) : (row[col.key] as React.ReactNode)}
                     </td>
                   ))}
                 </tr>

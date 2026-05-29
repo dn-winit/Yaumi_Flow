@@ -5,7 +5,10 @@ export type Row = Record<string, unknown>;
 // Summary responses (aggregated KPIs for dashboard)
 
 export interface DataSummary {
-  datasets: Record<string, { exists: boolean; rows: number; last_date: string | null; size_mb: number }>;
+  datasets: Record<
+    string,
+    { exists: boolean; rows: number; last_date: string | null; size_mb: number }
+  >;
   total_rows: number;
   db_connected: boolean;
   last_updated: string | null;

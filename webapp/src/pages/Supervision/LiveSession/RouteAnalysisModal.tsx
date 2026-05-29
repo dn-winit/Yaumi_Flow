@@ -80,7 +80,8 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
             <Badge variant="info">Route {ctx.routeCode}</Badge>
             <Badge variant="neutral">{ctx.date}</Badge>
             <span className="ml-auto text-body text-text-tertiary">
-              {ctx.visitedCustomers.length} / {ctx.totalCustomers} visited - Actual {ctx.totalActual} / {ctx.totalRecommended}
+              {ctx.visitedCustomers.length} / {ctx.totalCustomers} visited - Actual{" "}
+              {ctx.totalActual} / {ctx.totalRecommended}
             </span>
           </div>
 
@@ -90,9 +91,17 @@ export default function RouteAnalysisModal({ open, onClose, ctx }: Props) {
             </div>
           )}
 
-          <AnalysisList title="Top performers" tone="success" items={list("high_performers_with_practices")} />
+          <AnalysisList
+            title="Top performers"
+            tone="success"
+            items={list("high_performers_with_practices")}
+          />
           <AnalysisList title="Critical issues" tone="danger" items={list("critical_issues")} />
-          <AnalysisList title="Priority actions" tone="info" items={list("supervisor_priorities")} />
+          <AnalysisList
+            title="Priority actions"
+            tone="info"
+            items={list("supervisor_priorities")}
+          />
         </div>
       )}
     </Modal>

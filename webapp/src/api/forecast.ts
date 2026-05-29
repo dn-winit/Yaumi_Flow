@@ -134,14 +134,16 @@ const c = () => getClient("forecast");
 
 /** Frontend surface for demand-forecasting-pipeline; trimmed to what the UI consumes. */
 export const forecastApi = {
-  getSummary: () => c().get<ForecastSummary>("/summary").then((r) => r.data),
+  getSummary: () =>
+    c()
+      .get<ForecastSummary>("/summary")
+      .then((r) => r.data),
 
   getForecastRouteSummary: (date?: string) =>
     c()
-      .get<ForecastRouteSummaryResponse>(
-        "/predictions/forecast/route-summary",
-        { params: date ? { date } : {} },
-      )
+      .get<ForecastRouteSummaryResponse>("/predictions/forecast/route-summary", {
+        params: date ? { date } : {},
+      })
       .then((r) => r.data),
 
   /** VanLoad page view -- summary tiles + top-N chart + table rows in one fetch. */
@@ -169,10 +171,14 @@ export const forecastApi = {
       .then((r) => r.data),
 
   triggerTraining: () =>
-    c().post<PipelineRunResponse>("/pipeline/train", {}).then((r) => r.data),
+    c()
+      .post<PipelineRunResponse>("/pipeline/train", {})
+      .then((r) => r.data),
 
   triggerInference: () =>
-    c().post<PipelineRunResponse>("/pipeline/inference", {}).then((r) => r.data),
+    c()
+      .post<PipelineRunResponse>("/pipeline/inference", {})
+      .then((r) => r.data),
 
   /** Pipeline page resolver -- per-step status, cascade summary, any_running in one fetch. */
   getResolvedPipelineStatus: () =>
@@ -181,10 +187,14 @@ export const forecastApi = {
       .then((r) => r.data),
 
   getRetrainConfig: () =>
-    c().get<RetrainConfig & { drift: DriftStatus }>("/retrain/config").then((r) => r.data),
+    c()
+      .get<RetrainConfig & { drift: DriftStatus }>("/retrain/config")
+      .then((r) => r.data),
 
   updateRetrainConfig: (updates: Partial<RetrainConfig>) =>
-    c().post<RetrainConfig>("/retrain/config", updates).then((r) => r.data),
+    c()
+      .post<RetrainConfig>("/retrain/config", updates)
+      .then((r) => r.data),
 
   getRetrainHistory: () =>
     c()

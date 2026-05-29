@@ -73,13 +73,28 @@ export function getClient(service: ServiceKey): AxiosInstance {
           err.response?.data?.error ||
           err.message ||
           "Request failed";
-        // Attach request_id from the backend's stable error envelope so
-        // toasts / boundaries can surface a copyable id to ops if needed.
+        // Preserve axios's diagnostic fields (``response``, ``code``,
+        // ``config``, ``status``) on the rejected error so retry / refresh
+        // logic anywhere upstream can still inspect them. Earlier wrap
+        // discarded these silently; callers reading ``.response?.status``
+        // would have got ``undefined``.
         const requestId = err.response?.data?.request_id;
-        const wrapped = new Error(msg) as Error & { requestId?: string };
+        const wrapped = new Error(msg) as Error & {
+          requestId?: string;
+          status?: number;
+          code?: string;
+          response?: typeof err.response;
+          config?: typeof err.config;
+          isAxiosError?: boolean;
+        };
         if (typeof requestId === "string") wrapped.requestId = requestId;
+        wrapped.status = err.response?.status;
+        wrapped.code = err.code;
+        wrapped.response = err.response;
+        wrapped.config = err.config;
+        wrapped.isAxiosError = true;
         return Promise.reject(wrapped);
-      }
+      },
     );
   }
   return clients[service]!;

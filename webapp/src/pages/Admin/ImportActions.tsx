@@ -27,18 +27,10 @@ export default function ImportActions({
     <div className="space-y-4">
       {/* Bulk actions */}
       <div className="flex items-center gap-3">
-        <Button
-          variant="primary"
-          loading={loading}
-          onClick={() => onImportAll("incremental")}
-        >
+        <Button variant="primary" loading={loading} onClick={() => onImportAll("incremental")}>
           Import All (Incremental)
         </Button>
-        <Button
-          variant="secondary"
-          loading={loading}
-          onClick={() => onImportAll("full")}
-        >
+        <Button variant="secondary" loading={loading} onClick={() => onImportAll("full")}>
           Import All (Full)
         </Button>
       </div>
@@ -52,12 +44,7 @@ export default function ImportActions({
           placeholder="Select dataset..."
           label="Dataset"
         />
-        <Select
-          value={mode}
-          onChange={setMode}
-          options={modeOptions}
-          label="Mode"
-        />
+        <Select value={mode} onChange={setMode} options={modeOptions} label="Mode" />
         <Button
           variant="primary"
           size="sm"

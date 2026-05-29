@@ -20,9 +20,7 @@ export default function TopBar({ onCommandPaletteOpen }: TopBarProps) {
 
   // Build breadcrumbs from the current pathname
   const segments = location.pathname.replace(/^\//, "").split("/").filter(Boolean);
-  const crumbs: { label: string; path: string }[] = [
-    { label: "Dashboard", path: "/" },
-  ];
+  const crumbs: { label: string; path: string }[] = [{ label: "Dashboard", path: "/" }];
 
   if (segments.length > 0) {
     let cumulative = "";
@@ -49,9 +47,7 @@ export default function TopBar({ onCommandPaletteOpen }: TopBarProps) {
               <span key={crumb.path} className="flex items-center gap-1">
                 {i > 0 && <span className="text-neutral-300">/</span>}
                 {isLast ? (
-                  <span className="text-neutral-800 font-medium">
-                    {crumb.label}
-                  </span>
+                  <span className="text-neutral-800 font-medium">{crumb.label}</span>
                 ) : (
                   <Link
                     to={crumb.path}
@@ -78,7 +74,10 @@ export default function TopBar({ onCommandPaletteOpen }: TopBarProps) {
       </button>
 
       {/* Notification bell placeholder */}
-      <button aria-label="Notifications" className="relative p-1.5 rounded-md text-neutral-400 hover:text-neutral-600 hover:bg-neutral-50 transition-colors">
+      <button
+        aria-label="Notifications"
+        className="relative p-1.5 rounded-md text-neutral-400 hover:text-neutral-600 hover:bg-neutral-50 transition-colors"
+      >
         <svg
           className="h-4.5 w-4.5"
           fill="none"

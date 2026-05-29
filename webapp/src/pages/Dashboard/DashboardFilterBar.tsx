@@ -127,12 +127,7 @@ export default function DashboardFilterBar({
               {activeCount} filter{activeCount === 1 ? "" : "s"} active
             </span>
           )}
-          <Button
-            variant="ghost"
-            size="sm"
-            onClick={reset}
-            disabled={activeCount === 0}
-          >
+          <Button variant="ghost" size="sm" onClick={reset} disabled={activeCount === 0}>
             Reset
           </Button>
         </div>
@@ -140,4 +135,3 @@ export default function DashboardFilterBar({
     </Card>
   );
 }
-
